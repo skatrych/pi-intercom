@@ -94,7 +94,7 @@ pi install /absolute/path/to/pi-intercom
 
 Replace the final path with your checkout's absolute path (use a Windows path on Windows). Remove or disable a separately installed npm copy before loading source. Then open Pi in the project you want to coordinate—not necessarily the extension's checkout.
 
-Run Pi `/reload` (or start a new interactive session) after installing or changing source; reload workers too when changing their extension code. A standalone monitor already running in its pane needs an explicit restart to load rebuilt display code. Linux supports messaging, configuration, the terminal monitor, and Herdr worker launch/resume. Launch the coordinator inside a Herdr workspace; `herdr`, `sh`, and `pi` must be on PATH in worker panes. Workers run a quoted POSIX shell command in the returned pane, with the coordinator's actual extension path. Project trust remains required.
+Run Pi `/reload` (or start a new interactive session) after installing or changing source; reload workers too when changing their extension code. A standalone monitor already running in its pane needs an explicit restart to load rebuilt display code. Linux supports messaging, configuration, the terminal monitor, and Herdr worker launch/resume. Launch the coordinator inside a Herdr workspace; `herdr`, `sh`, and `pi` must be on PATH in worker panes. Role-aware workers also need `pi-role` on PATH there, unless `PI_INTERCOM_ROLE_LAUNCHER` names another executable. Workers run a quoted POSIX shell command in the returned pane, with the coordinator's actual extension path. Project trust remains required.
 
 Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headless fallback, or automatic cleanup. Graceful stop remains disabled on both platforms; external pane closure is Linux Herdr only. Automated Linux tests cover shell argument preservation and adapter/HTTP behavior. A live source-loaded Linux Herdr smoke test launched two workers: both registered, loaded their configured names/responsibilities, and acknowledged coordinator messages through Intercom. This verifies launch and round-trip messaging, not resume or cancellation.
 
@@ -102,18 +102,53 @@ Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headl
 
 Without shared config, the current working directory becomes the coordinator root. Startup creates `.pi-intercom/config.json`, opens a loopback listener, synchronizes the name `Coordinator`, and waits for user input (no model turn). Existing config is found by walking upward. Invalid/unreadable config is an error and is not overwritten. Unknown session IDs, including forks, are workers, never replacement coordinators.
 
-Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below.
+Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
 
 ## Explicit workflow
 
-1. Coordinator calls `intercom_create_worker({projectDirectory:"."})`. No worker identity, responsibility, callback address or special config path is passed.
-2. Anonymous worker opens its own endpoint and sends its session ID, actual port and root-relative project directory to coordinator Pi. Registration starts a normal coordinator turn when idle or queues steering when busy. It creates **no config entry or hidden pending-registration map**.
-3. Coordinator decides and calls `intercom_configure_worker` with **all five explicit fields**: `sessionId`, `port`, `projectDirectory`, `name`, `description`. This only writes config.
+1. Coordinator calls `intercom_create_worker({projectDirectory:"."})`. No worker identity, responsibility, callback address or special config path is passed. Optional `role` is a logical Pi role name; see [Role-aware workers](#role-aware-workers).
+2. Anonymous worker opens its own endpoint and sends its session ID, actual port and root-relative project directory to coordinator Pi. A role-aware worker also reports that logical role name. Registration starts a normal coordinator turn when idle or queues steering when busy. It creates **no config entry**. The reported role is remembered only so the later explicit configure can store it on that session; it does not assign a name or responsibility.
+3. Coordinator decides and calls `intercom_configure_worker` with **all five explicit fields**: `sessionId`, `port`, `projectDirectory`, `name`, `description`. Optional `role` stores the logical Pi role when registration did not already report one. This only writes config. Name and description remain communication metadata.
 4. Coordinator separately calls `intercom_reload_worker({to:"Builder"})`. Worker rereads responsibility and synchronizes Pi/Herdr tab names. **This is not Pi `/reload`, a restart, cancellation, or work assignment.** No model turn starts.
 5. Coordinator sends explicit work using `intercom_send({to:"Builder",message:"..."})`. Workers can communicate directly with configured peers. Findings do not authorize unrelated implementation. Progress questions ask for reporting and continuation, not cancellation.
 6. Workers report as instructed and wait, without autonomous exit. Coordinator unavailability does not close the worker or cancel its assignment.
 
-Existing workers restore responsibility by session ID, bind their saved port or, if it is already in use, an OS-selected fallback, and report their actual port. Coordinator updates existing ports as bookkeeping. Status from removed/unknown sessions notifies Pi but creates no entry. Resume uses the configured project directory and full session ID, with a saved-session lookup first; a never-used Pi session might not yet exist on disk. Failure leaves config unchanged, without fabricated history or forced model turns.
+Existing workers restore responsibility by session ID, bind their saved port or, if it is already in use, an OS-selected fallback, and report their actual port. Coordinator updates existing ports as bookkeeping. Status from removed/unknown sessions notifies Pi but creates no entry. Resume uses the configured project directory and full session ID, with a saved-session lookup in the normal Pi session store; a never-used Pi session might not yet exist on disk. A saved role is launched again through `pi-role`. Failure leaves config unchanged, without fabricated history or forced model turns.
+
+## Role-aware workers
+
+`role` is a logical Pi role name such as `developer`, `architect`, or `verifier`. Intercom persists that name with the worker and, on Linux, launches and resumes the worker through the existing `pi-role` executable. `pi-role` resolves `~/.pi/roles/<role>` (or `PI_ROLES_DIR`), loads the role overlay, and starts the normal `pi` binary. Intercom does not resolve role directories, inspect role contents, or set `PI_CODING_AGENT_DIR`.
+
+A Pi role is an overlay on the normal global Pi home (`~/.pi/agent`), which continues to own authentication, sessions, global settings, and model configuration. Omitting `role` keeps the existing Intercom launch exactly.
+
+```text
+intercom_create_worker({
+  role: "developer",
+  projectDirectory: "."
+})
+```
+
+`projectDirectory` stays the existing root-relative directory (`.` is the coordinator root). A role does not change that.
+
+That launch is structurally:
+
+```text
+pi-role developer -e <intercom-extension>
+```
+
+Resume uses the same wrapper. The saved Pi session id is the existing `--session` argument, not a second session store:
+
+```text
+pi-role developer -e <intercom-extension> --session <existing-session>
+```
+
+`pi-role` must be on `PATH` in the worker pane. `PI_INTERCOM_ROLE_LAUNCHER` can name a different executable; it is not a map of roles to directories. Intercom validates the role name (`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`) before launch and quotes it. An invalid name does not start a process. A name that is valid here but missing from the `pi-role` environment fails when `pi-role` fails; Intercom surfaces that error and does not resume the worker without its role.
+
+The worker process also receives `PI_INTERCOM_WORKER_ROLE` so registration can report the logical name. That variable is Intercom metadata only. It does not load the role.
+
+`intercom_configure_worker` persists the role. Precedence is the explicit `role` argument, then a role already saved on that worker, then the role reported at registration in this coordinator process. Pass the `role` from the create result into configure when the coordinator may have restarted: the registration cache is memory-only and is not written at registration. A later name or description edit keeps the saved role. If the reported name differs, the result includes `roleNote` and the saved role stays. An explicit role replaces the saved one. Omitting `role` does not clear it.
+
+`name` and `description` are not used to choose a role. Workers saved before `role` existed remain valid and resume with the normal Pi launch. Role-aware launch is not supported on Windows: the request fails with an explicit error, and role-less Windows workers are unchanged. Session lookup stays on the normal Pi session store. The role directory is not a Pi home.
 
 ## Tools and permissions
 
@@ -121,8 +156,8 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 
 | Tool | Arguments | Permission / effect |
 |---|---|---|
-| `intercom_create_worker` | `projectDirectory?` (default `.`) | Coordinator; launch anonymous worker |
-| `intercom_configure_worker` | `sessionId`, `port`, `projectDirectory`, `name`, `description` | Coordinator; all five explicit fields, writes only |
+| `intercom_create_worker` | `projectDirectory?` (default `.`), `role?` | Coordinator; launch anonymous worker. `role` launches through `pi-role <role>` on Linux |
+| `intercom_configure_worker` | `sessionId`, `port`, `projectDirectory`, `name`, `description`, `role?` | Coordinator; explicit fields, writes only. `role` is the logical Pi role, separate from name and description |
 | `intercom_reload_worker` | `to` (worker name) | Coordinator; passive config/name reload |
 | `intercom_send` | `to` (name), `message` | Configured, responsibility-loaded sessions; asynchronous message |
 | `intercom_list` | None | Configured coordinator/workers; saved roster, never live health |
@@ -133,7 +168,7 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_stop_worker` | `to` | Unsupported graceful cancellation; no side effects |
 | `intercom_close_worker` | `to` | Linux Herdr coordinator; request background handoff/save/settle/pane-close job, retain registration |
 | `intercom_report_handoff` | `jobId`, `summary` | Requested worker only; save concise public handoff, then finish the turn and wait |
-| `intercom_resume_worker` | `to`, `confirmClosed` | Coordinator; user-confirmed old-session closure, saved session/launcher/directory, guarded launch |
+| `intercom_resume_worker` | `to`, `confirmClosed` | Coordinator; user-confirmed old-session closure, saved session/launcher/directory/role, guarded launch |
 | `intercom_remove_worker` | `to` (worker name) | Coordinator; config entry only, no shutdown/session deletion |
 | `intercom_set_multiplexer` | `multiplexer`: `herdr` or `none` | Coordinator; future launches only |
 
@@ -160,7 +195,7 @@ Shared, source-controlled file: `<root>/.pi-intercom/config.json`. Do not ignore
 }
 ```
 
-Legacy coordinator-only `dashboardPort` values are accepted for migration, but the browser dashboard has been retired in 0.4.1. Coordinator startup removes this field through the guarded config-write path. `intercom_list` returns the saved roster without `dashboardPort` or `dashboardUrl`; it does not probe live availability. The agent messaging `port` is unchanged.
+Legacy coordinator-only `dashboardPort` values are accepted for migration, but the browser dashboard has been retired in 0.4.1. Coordinator startup removes this field through the guarded config-write path. `intercom_list` returns the saved roster without `dashboardPort` or `dashboardUrl`; it does not probe live availability. The agent messaging `port` is unchanged. An optional worker `role` is the logical Pi role described in [Role-aware workers](#role-aware-workers). Workers saved before `role` existed remain valid. There is no Intercom map from role names to directories.
 
 Workers have `coordinator:false` and an existing project directory equal to root or below it. Writes canonicalize directories and check real paths (including symlink escapes). Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
 
@@ -174,7 +209,7 @@ HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 K
 
 Handoff wire kinds (0.6.1): `close_prepare`, `close_identity`, `close_request`, `handoff_report`, `close_ready`, `close_commit`. These require configured roles, matching job/runtime identity and bounded validated payloads. Pane/process identity is ephemeral protocol data, never stored in public config or summaries.
 
-Other kinds: `message`, `report` (`status`, `summary`; configured worker → coordinator only), `registration` (`port`, `projectDirectory`), `status` (`port`, `busy`), `request_status`, `reload`, `stop`, `close` (empty control payload). Sender session identity is the envelope `from`; registration/status agent notifications include an explicit `sessionId` field. Agent messages require configured sender and recipient; controls require the current coordinator's sender ID and a worker recipient. Registration/unknown status are intentional exceptions to configured-sender checks, accepted only by coordinator. All receivers verify expected recipient ID, protecting against stale ports reaching another session. Local processes are trusted: this is role validation, **not authentication**. No remote networking/proxies/redirects or credentials.
+Other kinds: `message`, `report` (`status`, `summary`; configured worker → coordinator only), `registration` (`port`, `projectDirectory`, optional logical `role`), `status` (`port`, `busy`), `request_status`, `reload`, `stop`, `close` (empty control payload). Sender session identity is the envelope `from`; registration/status agent notifications include an explicit `sessionId` field. Agent messages require configured sender and recipient; controls require the current coordinator's sender ID and a worker recipient. Registration/unknown status are intentional exceptions to configured-sender checks, accepted only by coordinator. All receivers verify expected recipient ID, protecting against stale ports reaching another session. Local processes are trusted: this is role validation, **not authentication**. No remote networking/proxies/redirects or credentials.
 
 `202 {"accepted":true}` means Intercom extension receipt/dispatch, **not guaranteed Pi input acceptance, queueing, or model completion**. In Pi 0.84.4, `sendUserMessage` can reject during manual compaction after Intercom has acknowledged receipt: its void extension API reports the asynchronous rejection only as a local host error. Intercom has no delivery queue or retry to repair this gap; inspect the recipient's local error and arrange an explicit resend after compaction if needed. Replacing it with `sendMessage` is not a safe workaround because that path can start a concurrent run. Invalid/unsupported requests return an error; excessive bodies return 413. Request-status sends its report separately after accepting control. Starting in 0.2.1, Intercom always supplies `deliverAs: 'steer'`: Pi starts normally when idle and steers when busy. This avoids the idle-snapshot-to-busy race that caused “Agent is already processing” errors; it does not fix manual-compaction rejection. It does not hard-interrupt an executing tool. Each send resolves the recipient again from config; 5-second receipt deadline, **no retries**. Timeout means unknown outcome, not proof of nondelivery. No durable inbox, deduplication or replay log in V1.
 
@@ -200,7 +235,7 @@ Close the worker's Pi session manually **without removing its registration**. It
 
 Connection is separate from historical activity and public reports. A recent matching health response means connected. Refused connections, timeouts or a mismatched session ID mean the saved worker endpoint is unreachable/unmatched—not proof the process is stopped. Old versions without health support, malformed responses, unsupported protocols and skipped checks remain unknown. Checks older than 30 seconds expire to unknown. Details show check time/reason; cached checks are discarded when a saved port changes or a worker is removed.
 
-After the user confirms the previous session is closed, call `intercom_resume_worker({ to: "Builder", confirmClosed: true })`. It launches the **same saved Pi session**, restores configured identity/responsibility, and does not automatically start an old assignment. A matching connected endpoint blocks resume. Concurrent/submitted/uncertain attempts are fenced locally until a subsequent configured worker status arrives. On uncertain launch with no status, inspect the actual worker process; only after verifying closure should you reload the coordinator and consider an explicit retry. The fence is not persistent or a cross-process uniqueness guarantee. Resume failures do not remove/replace saved identity.
+After the user confirms the previous session is closed, call `intercom_resume_worker({ to: "Builder", confirmClosed: true })`. It launches the **same saved Pi session**, restores configured identity/responsibility and, when one was saved, the same logical role through `pi-role`. It does not automatically start an old assignment. A matching connected endpoint blocks resume. Concurrent/submitted/uncertain attempts are fenced locally until a subsequent configured worker status arrives. On uncertain launch with no status, inspect the actual worker process; only after verifying closure should you reload the coordinator and consider an explicit retry. The fence is not persistent or a cross-process uniqueness guarantee. Resume failures do not remove/replace saved identity.
 
 `intercom_remove_worker` is only for forgetting the saved registration, not parking a worker. Graceful stop remains disabled; see the background close workflow below. Reload coordinator/workers and restart the standalone monitor to use the new health protocol/UI; these additions require 0.5.1.
 

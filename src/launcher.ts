@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { fail } from './config.js';
+import { DEFAULT_ROLE_LAUNCHER, ROLE_LAUNCHER_ENV, ROLE_NAME, WORKER_ROLE_ENV, fail } from './config.js';
 import type { LaunchRequest } from './runtime.js';
 
 export type Run = (file: string, args: string[]) => Promise<string>;
@@ -18,11 +18,28 @@ export interface LauncherOptions {
   run?: Run;
   sessionExists(cwd: string, id: string): Promise<boolean>;
 }
+function roleLauncher(env: NodeJS.ProcessEnv): string {
+  const configured = env[ROLE_LAUNCHER_ENV];
+  const launcher = configured === undefined || configured === '' ? DEFAULT_ROLE_LAUNCHER : configured;
+  if (launcher !== launcher.trim() || /[\u0000-\u001f\u007f]/.test(launcher)) fail(`invalid ${ROLE_LAUNCHER_ENV}`);
+  return launcher;
+}
+/** Role-less invocation stays `exec pi`. A role wraps that same argument list with `pi-role` and does not set PI_CODING_AGENT_DIR. */
+function linuxPiInvocation(request: LaunchRequest, args: string[], env: NodeJS.ProcessEnv): string {
+  const piArgs = args.map(shQuote).join(' ');
+  if (!request.role) return `exec pi ${piArgs}`;
+  return `${WORKER_ROLE_ENV}=${shQuote(request.role)} exec ${shQuote(roleLauncher(env))} ${shQuote(request.role)} ${piArgs}`;
+}
 export function launchers(options: LauncherOptions) {
   const exec = options.run ?? run, env = options.env ?? process.env;
   async function launch(request: LaunchRequest): Promise<unknown> {
     const platform = options.platform ?? process.platform;
     if (platform !== 'win32' && platform !== 'linux') fail('launchers support Windows and Linux only');
+    if (request.role !== undefined) {
+      if (typeof request.role !== 'string' || !ROLE_NAME.test(request.role)) fail('invalid role');
+      if (platform === 'win32') fail('Role-aware worker launch is not supported on Windows. No worker was launched.');
+      roleLauncher(env);
+    }
     if (platform === 'linux' && request.multiplexer === 'none') fail('Linux worker launching requires Herdr; none is Windows-only. No terminal fallback');
     if (request.sessionId && !await options.sessionExists(request.cwd, request.sessionId)) fail('saved Pi session not found in project directory; never-used sessions may not be persisted. Config unchanged; no replacement launched');
     const args = ['-e', options.extension, ...(request.sessionId ? ['--session', request.sessionId] : [])];
@@ -40,7 +57,7 @@ export function launchers(options: LauncherOptions) {
       const script = `$ErrorActionPreference='Stop'; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.ps1 -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
       const command = platform === 'win32'
         ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded(script)}`
-        : `sh -c ${shQuote(`cd ${shQuote(request.cwd)} && exec pi ${args.map(shQuote).join(' ')}`)}`;
+        : `sh -c ${shQuote(`cd ${shQuote(request.cwd)} && ${linuxPiInvocation(request, args, env)}`)}`;
       try { await exec('herdr', ['pane', 'run', pane, command]); }
       catch (e) { fail(`Herdr Pi command submission failed in tab ${tab}, pane ${pane}: ${String(e)}. Tab/process may remain; no automatic cleanup/retry/replacement`); }
       return { commandSubmitted: true, tab, pane, piReadiness: 'not observed; inspect pane for startup failures', registrationAwaited: false };
