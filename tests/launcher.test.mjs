@@ -16,6 +16,8 @@ test('Herdr uses one returned tab/pane, no split/focus, explicit extension/resum
   assert.match(r.piReadiness, /not observed/);
   const script = Buffer.from(calls[1].args[3].split(' ').at(-1), 'base64').toString('utf16le');
   assert.match(script, /Get-Command pi\.ps1/);
+  assert.match(script, /Remove-Item Env:PI_INTERCOM_WORKER_ROLE -ErrorAction Ignore/);
+  assert.doesNotMatch(script, /PI_CODING_AGENT_DIR/);
   assert.match(script, /'D:\/a space\/O''Brien\/index\.ts'/);
   assert.match(script, /'--session' 'session-id'/);
   assert.doesNotMatch(script, /Start-Process|HERDR_.*Remove/);
@@ -44,7 +46,35 @@ test('none creates visible terminal with encoded arguments; no inherited Herdr c
   const base64 = script.match(/'-EncodedCommand','([^']+)'/)[1];
   const inner = Buffer.from(base64, 'base64').toString('utf16le');
   assert.match(inner, /HERDR_\*/); assert.match(inner, /O''Brien/); assert.match(inner, /'-e'/);
+  assert.match(inner, /Remove-Item Env:PI_INTERCOM_WORKER_ROLE -ErrorAction Ignore/);
+  assert.doesNotMatch(inner, /PI_CODING_AGENT_DIR/);
   assert.equal(psQuote("a'b"), "'a''b'"); assert.equal(Buffer.from(encoded('hello'), 'base64').toString('utf16le'), 'hello');
+});
+test('Windows role launch assigns a quoted Pi agent directory before Pi starts', async () => {
+  const agentDir = "D:/roles/O'Brien $HOME;$(echo bad)";
+  const quoted = "'D:/roles/O''Brien $HOME;$(echo bad)'";
+  const decode = encoded => Buffer.from(encoded, 'base64').toString('utf16le');
+  const assignment = new RegExp(`\\$env:PI_CODING_AGENT_DIR = ${quoted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+  let herdr;
+  const pane = launchers({ ...options, run: async (file, args) => {
+    if (args[0] === 'pane') herdr = decode(args[3].split(' ').at(-1));
+    return JSON.stringify({ result: { tab: { tab_id: 'w1:t42' }, root_pane: { pane_id: 'w1:p71' } } });
+  } });
+  await pane.launch({ multiplexer: 'herdr', cwd: 'D:/project', role: 'verifier', agentDir });
+  assert.match(herdr, assignment);
+  assert.match(herdr, /\$env:PI_INTERCOM_WORKER_ROLE = 'verifier'/);
+  assert.doesNotMatch(herdr, /\$env:PI_CODING_AGENT_DIR = D:/);
+  let nested;
+  const terminal = launchers({ ...options, run: async (file, args) => {
+    assert.equal(file, 'powershell.exe');
+    const outer = decode(args.at(-1));
+    nested = decode(outer.match(/'-EncodedCommand','([^']+)'/)[1]);
+    return '12345\r\n';
+  } });
+  await terminal.launch({ multiplexer: 'none', cwd: "D:/space/O'Brien", role: 'developer', agentDir });
+  assert.match(nested, assignment);
+  assert.match(nested, /\$env:PI_INTERCOM_WORKER_ROLE = 'developer'/);
+  assert.doesNotMatch(nested, /\$env:PI_CODING_AGENT_DIR = D:/);
 });
 test('name sync resolves current pane tab rather than focused tab', async () => {
   const calls = [];

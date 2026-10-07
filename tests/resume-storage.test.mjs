@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
-import { CONFIG_DIR_NAME, SessionManager } from '@earendil-works/pi-coding-agent';
-import { resumeSessionDirectory } from '../dist/index.js';
+import { CONFIG_DIR_NAME, SessionManager, getAgentDir } from '@earendil-works/pi-coding-agent';
+import { resumeSessionDirectory, workerSessionDirectory } from '../dist/index.js';
 import { launchers } from '../dist/launcher.js';
 
 async function fixture(t) {
@@ -37,6 +37,18 @@ test('resume storage uses public Pi normalization for tilde settings and env pat
   assert.equal(resumeSessionDirectory(f.cwd, '', f.agentDir), path.join(homedir(), 'intercom-test-sessions'));
   assert.equal(resumeSessionDirectory(f.cwd, '~/intercom-env-sessions', f.agentDir), path.join(homedir(), 'intercom-env-sessions'));
   // Resolution only: never create files under the real home/session directories.
+});
+
+test('role resume lookup uses the worker agent directory, not the coordinator default', async t => {
+  const f = await fixture(t);
+  const developer = path.join(f.root, 'developer-agent');
+  await mkdir(developer);
+  await writeFile(path.join(developer, 'settings.json'), JSON.stringify({ sessionDir: 'developer-sessions' }));
+  await f.global({ sessionDir: 'coordinator-sessions' });
+  assert.equal(workerSessionDirectory(f.cwd, developer, ''), path.join(f.cwd, 'developer-sessions'));
+  assert.equal(workerSessionDirectory(f.cwd, f.agentDir, ''), path.join(f.cwd, 'coordinator-sessions'));
+  assert.equal(workerSessionDirectory(f.cwd, undefined, ''), resumeSessionDirectory(f.cwd, '', getAgentDir()));
+  assert.notEqual(workerSessionDirectory(f.cwd, developer, ''), workerSessionDirectory(f.cwd, f.agentDir, ''));
 });
 
 test('settings-based saved session passes resume preflight; missing ID never launches a replacement', async t => {

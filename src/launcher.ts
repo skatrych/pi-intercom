@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { fail } from './config.js';
+import { AGENT_DIR_ENV, WORKER_ROLE_ENV, fail } from './config.js';
 import type { LaunchRequest } from './runtime.js';
 
 export type Run = (file: string, args: string[]) => Promise<string>;
@@ -16,7 +16,18 @@ export interface LauncherOptions {
   platform?: string;
   env?: NodeJS.ProcessEnv;
   run?: Run;
-  sessionExists(cwd: string, id: string): Promise<boolean>;
+  sessionExists(cwd: string, id: string, agentDir?: string): Promise<boolean>;
+}
+function posixPiCommand(request: LaunchRequest, args: string[]): string {
+  const pi = `exec pi ${args.map(shQuote).join(' ')}`;
+  if (!request.agentDir) return `unset ${WORKER_ROLE_ENV} && ${pi}`;
+  if (!request.role) fail('role directory requires a role name');
+  return [`${AGENT_DIR_ENV}=${shQuote(request.agentDir)}`, `${WORKER_ROLE_ENV}=${shQuote(request.role)}`, pi].join(' ');
+}
+function windowsPiPrelude(request: LaunchRequest): string {
+  if (!request.agentDir) return `Remove-Item Env:${WORKER_ROLE_ENV} -ErrorAction Ignore`;
+  if (!request.role) fail('role directory requires a role name');
+  return [`$env:${AGENT_DIR_ENV} = ${psQuote(request.agentDir)}`, `$env:${WORKER_ROLE_ENV} = ${psQuote(request.role)}`].join('; ');
 }
 export function launchers(options: LauncherOptions) {
   const exec = options.run ?? run, env = options.env ?? process.env;
@@ -24,7 +35,7 @@ export function launchers(options: LauncherOptions) {
     const platform = options.platform ?? process.platform;
     if (platform !== 'win32' && platform !== 'linux') fail('launchers support Windows and Linux only');
     if (platform === 'linux' && request.multiplexer === 'none') fail('Linux worker launching requires Herdr; none is Windows-only. No terminal fallback');
-    if (request.sessionId && !await options.sessionExists(request.cwd, request.sessionId)) fail('saved Pi session not found in project directory; never-used sessions may not be persisted. Config unchanged; no replacement launched');
+    if (request.sessionId && !await options.sessionExists(request.cwd, request.sessionId, request.agentDir)) fail('saved Pi session not found in project directory; never-used sessions may not be persisted. Config unchanged; no replacement launched');
     const args = ['-e', options.extension, ...(request.sessionId ? ['--session', request.sessionId] : [])];
     if (request.multiplexer === 'herdr') {
       if (env.HERDR_ENV !== '1' || !env.HERDR_WORKSPACE_ID) fail('Herdr launcher requires this Pi to run inside a Herdr-managed workspace; no fallback');
@@ -37,10 +48,10 @@ export function launchers(options: LauncherOptions) {
       // can resolve to a PowerShell shim and fail with invalid Win32 application.
       // Run an explicit PowerShell command in the returned shell pane instead.
       // This acknowledges command submission only, not Pi readiness/registration.
-      const script = `$ErrorActionPreference='Stop'; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.ps1 -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
+      const script = `$ErrorActionPreference='Stop'; Set-Location -LiteralPath ${psQuote(request.cwd)}; ${windowsPiPrelude(request)}; & (Get-Command pi.ps1 -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
       const command = platform === 'win32'
         ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded(script)}`
-        : `sh -c ${shQuote(`cd ${shQuote(request.cwd)} && exec pi ${args.map(shQuote).join(' ')}`)}`;
+        : `sh -c ${shQuote(`cd ${shQuote(request.cwd)} && ${posixPiCommand(request, args)}`)}`;
       try { await exec('herdr', ['pane', 'run', pane, command]); }
       catch (e) { fail(`Herdr Pi command submission failed in tab ${tab}, pane ${pane}: ${String(e)}. Tab/process may remain; no automatic cleanup/retry/replacement`); }
       return { commandSubmitted: true, tab, pane, piReadiness: 'not observed; inspect pane for startup failures', registrationAwaited: false };
@@ -48,7 +59,7 @@ export function launchers(options: LauncherOptions) {
     if (request.multiplexer !== 'none') fail('unsupported multiplexer');
     // Use encoded PowerShell rather than constructing cmd.exe command strings.
     // The outer process reports only successful visible terminal creation, not Pi readiness.
-    const child = `$ErrorActionPreference='Stop'; Get-ChildItem Env: | Where-Object { $_.Name -like 'HERDR_*' -or $_.Name -like 'PI_SESSION_*' } | ForEach-Object { Remove-Item ('Env:' + $_.Name) }; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.cmd -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
+    const child = `$ErrorActionPreference='Stop'; Get-ChildItem Env: | Where-Object { $_.Name -like 'HERDR_*' -or $_.Name -like 'PI_SESSION_*' } | ForEach-Object { Remove-Item ('Env:' + $_.Name) }; Set-Location -LiteralPath ${psQuote(request.cwd)}; ${windowsPiPrelude(request)}; & (Get-Command pi.cmd -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
     const outer = `$ErrorActionPreference='Stop'; $null=Get-Command pi.cmd -ErrorAction Stop; $p=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WorkingDirectory ${psQuote(request.cwd)} -ArgumentList @('-NoProfile','-NoExit','-EncodedCommand',${psQuote(encoded(child))}) -WindowStyle Normal -PassThru; $p.Id`;
     const result = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(outer)]);
     const pid = Number(result.trim());

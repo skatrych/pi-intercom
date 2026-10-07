@@ -23,6 +23,8 @@ test('Linux Herdr uses returned pane and quotes cwd, extension and resume ID lit
   const sessionId = "session'$HOME;`echo bad`";
   const result = await launcher.launch({ multiplexer: 'herdr', cwd, sessionId });
   assert.deepEqual(calls[0], { file: 'herdr', args: ['tab', 'create', '--workspace', 'workspace', '--cwd', cwd, '--label', 'Intercom (anonymous)', '--no-focus'] });
+  assert.match(calls[1].args[3], /unset PI_INTERCOM_WORKER_ROLE && exec pi /);
+  assert.doesNotMatch(calls[1].args[3], /PI_CODING_AGENT_DIR/);
   assert.deepEqual(calls[1].args.slice(0, 3), ['pane', 'run', 'pane']);
   assert.equal(calls.length, 2);
   assert.equal(result.commandSubmitted, true);
@@ -37,6 +39,24 @@ test('Linux rejects unsupported launcher, missing workspace and missing resume b
   await assert.rejects(launchers({ ...options, env: {}, run }).launch({ multiplexer: 'herdr', cwd: '/tmp' }), /no fallback/);
   await assert.rejects(launchers({ ...options, sessionExists: async () => false, run }).launch({ multiplexer: 'herdr', cwd: '/tmp', sessionId: 'missing' }), /not found/);
   await assert.rejects(launchers({ ...options, platform: 'darwin', run }).launch({ multiplexer: 'herdr', cwd: '/tmp' }), /Windows and Linux/);
+});
+
+test('Linux role launch quotes the Pi agent directory and passes it to session lookup', { skip: process.platform !== 'linux' }, async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'intercom-linux-role-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = path.join(root, 'project');
+  const agentDir = path.join(root, "O'Brien $HOME;$(echo bad) role");
+  await mkdir(cwd);
+  await mkdir(agentDir);
+  await writeFile(path.join(root, 'pi'), '#!/bin/sh\nprintf "%s\\n" "$PWD" "$PI_CODING_AGENT_DIR" "$PI_INTERCOM_WORKER_ROLE" "$@"\n', { mode: 0o700 });
+  const calls = [];
+  let lookup;
+  const launcher = launchers({ ...options, sessionExists: async (dir, id, roleDir) => { lookup = { dir, id, roleDir }; return true; },
+    run: async (file, args) => { calls.push({ file, args }); return created; } });
+  await launcher.launch({ multiplexer: 'herdr', cwd, sessionId: 'session-id', role: 'developer', agentDir });
+  assert.deepEqual(lookup, { dir: cwd, id: 'session-id', roleDir: agentDir });
+  const { stdout } = await promisify(execFile)('/bin/sh', ['-c', calls[1].args[3]], { env: { ...process.env, PATH: `${root}:${process.env.PATH}` } });
+  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, agentDir, 'developer', '-e', options.extension, '--session', 'session-id']);
 });
 
 test('Linux partial command submission failure leaves tab and never retries', async () => {

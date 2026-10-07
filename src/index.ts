@@ -11,8 +11,8 @@ import { createCloseProvider } from './pane-close.js';
 
 const to = Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }) });
 const tools: [string, string, TSchema][] = [
-  ['create_worker', 'Coordinator only. Launch one anonymous worker in projectDirectory (default root). No assignment, configuration, or registration wait.', Type.Object({ projectDirectory: Type.Optional(Type.String()) })],
-  ['configure_worker', 'Coordinator only. Write explicit reported connection details and responsibility to config. Does not notify, reload, or start work. Use reload_worker separately.', Type.Object({ sessionId: Type.String(), port: Type.Integer({ minimum: 1, maximum: 65535 }), projectDirectory: Type.String(), name: Type.String({ minLength: 1, maxLength: 128 }), description: Type.String({ minLength: 1, maxLength: 4096 }) })],
+  ['create_worker', 'Coordinator only. Launch one anonymous worker in projectDirectory (default root). Optional role is a configured role name, not a path: it sets PI_CODING_AGENT_DIR to that role\'s Pi agent directory before Pi starts. Omit role to keep the existing launch environment. No assignment, configuration, or registration wait.', Type.Object({ projectDirectory: Type.Optional(Type.String()), role: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })) })],
+  ['configure_worker', 'Coordinator only. Write explicit reported connection details and responsibility to config. Optional role is the Pi execution identity, separate from name and description. Explicit role wins; a saved role is kept when role is omitted; a reported role fills only a worker that has none. Omitting role does not clear a saved role. Does not notify, reload, or start work. Use reload_worker separately.', Type.Object({ sessionId: Type.String(), port: Type.Integer({ minimum: 1, maximum: 65535 }), projectDirectory: Type.String(), name: Type.String({ minLength: 1, maxLength: 128 }), description: Type.String({ minLength: 1, maxLength: 4096 }), role: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })) })],
   ['reload_worker', 'Coordinator only. Ask worker to reread responsibility and synchronize names. NOT Pi extension reload, cancellation, restart, or work assignment.', to],
   ['send', 'Configured sessions only. Send an explicit work/progress/findings message by recipient name. Idle delivery starts a turn; busy delivery steers at supported boundaries. Receipt is not an agent reply. Progress questions do not cancel assignments.', Type.Object({ to: Type.String(), message: Type.String({ minLength: 1, maxLength: 48000 }) })],
   ['worker_status', 'Configured sessions only. Read paginated JSON worker observations and public reports from local files, optionally by worker name. Last-observed status is not live liveness or task completion; reports are self-reported, not approval. Local-only by default; probe:true performs bounded loopback identity checks for this page only, without worker prompts or Telegram dependency. Disconnected means endpoint unreachable, not process termination. Follow nextOffset for further pages; null report means no readable active report.', Type.Object({ name: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })), probe: Type.Optional(Type.Boolean()) })],
@@ -23,7 +23,7 @@ const tools: [string, string, TSchema][] = [
   ['stop_worker', UNSUPPORTED_CANCELLATION, to],
   ['close_worker', 'Coordinator only. Begin a background save-handoff-and-close job for a configured worker in Linux Herdr. Requests a public summary, saves it in config, waits for successful tool persistence and final turn settlement, then attempts one verified pane close. Returns job acceptance, not completion. Registration/session history are retained. Check worker_status/list for closeJob; failure/timeout/uncertainty never authorizes retry. Not graceful abort or an all-descendants termination guarantee; Windows/non-Herdr unsupported.', to],
   ['report_handoff', 'Configured worker only, in response to its pending close request. Submit the matching jobId and concise public resume handoff (current work, completed work, unfinished items, blockers, next step). Never include secrets, private reasoning or raw tool payloads. Saved receipt is not closure: finish the response and wait; the extension requires final turn settlement before pane closure.', Type.Object({ jobId: Type.String({ minLength: 1, maxLength: 128 }), summary: Type.String({ minLength: 1, maxLength: 4000 }) })],
-  ['resume_worker', 'Coordinator only. Resume saved session/name/responsibility after the user explicitly confirms the old session was closed: set confirmClosed:true only for that confirmation, never infer it from disconnected status. A matching live health endpoint blocks launch. In-flight/uncertain attempts are fenced until worker status arrives; otherwise inspect process and reload coordinator before considering retry. No cross-process uniqueness guarantee, automatic assignment, replacement or removal.', Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }), confirmClosed: Type.Boolean() })],
+  ['resume_worker', 'Coordinator only. Resume saved session/name/responsibility after the user explicitly confirms the old session was closed: set confirmClosed:true only for that confirmation, never infer it from disconnected status. A saved role launches with that Pi agent directory again; workers without a saved role keep the existing launch environment; a saved role missing from configuration fails instead of falling back. A matching live health endpoint blocks launch. In-flight/uncertain attempts are fenced until worker status arrives; otherwise inspect process and reload coordinator before considering retry. No cross-process uniqueness guarantee, automatic assignment, replacement or removal.', Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }), confirmClosed: Type.Boolean() })],
   ['remove_worker', 'Coordinator only. Remove config entry only; never stop process or delete session files. A running worker must be explicitly closed before removal. Retain registration to resume it later; remove only to forget it. Pending or uncertain close jobs block removal.', to],
   ['set_multiplexer', 'Coordinator only. Set herdr (default, Windows/Linux) or none (separate visible Windows terminals; unsupported on Linux) for future launches. Never move/restart existing workers or fall back.', Type.Object({ multiplexer: Type.String({ enum: ['herdr', 'none'] }) })],
 ];
@@ -31,12 +31,18 @@ const tools: [string, string, TSchema][] = [
 // Launchers pass no --session-dir. Match child Pi's env > per-cwd settings >
 // default lookup, resolving relative paths against the child's cwd, not ours.
 // SettingsManager's public getter applies Pi's own path/tilde normalization.
+// Role-aware resume passes that role's agent directory so lookup follows the child Pi home.
 export function resumeSessionDirectory(cwd: string, envSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR, agentDir = getAgentDir()): string | undefined {
   const settings = envSessionDir
     ? SettingsManager.inMemory({ sessionDir: envSessionDir })
     : SettingsManager.create(cwd, path.resolve(cwd, agentDir));
   const sessionDir = settings.getSessionDir();
   return sessionDir ? path.resolve(cwd, sessionDir) : undefined;
+}
+// An omitted agent directory must still select getAgentDir(). Passing undefined
+// would skip that default and look up settings with no agent directory.
+export function workerSessionDirectory(cwd: string, agentDir?: string, envSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR): string | undefined {
+  return resumeSessionDirectory(cwd, envSessionDir, agentDir ?? getAgentDir());
 }
 
 // Participate in Pi's own per-file mutation queue as well as Intercom serialization.
@@ -55,7 +61,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   });
   const launcher = launchers({
     extension: fileURLToPath(import.meta.url),
-    sessionExists: async (cwd, id) => (await SessionManager.list(cwd, resumeSessionDirectory(cwd))).some(s => s.id === id),
+    sessionExists: async (cwd, id, agentDir) => (await SessionManager.list(cwd, workerSessionDirectory(cwd, agentDir))).some(s => s.id === id),
   });
   let monitorTask: { runtime: Intercom; generation: number; dirty: boolean; promise: Promise<void> } | undefined;
   async function ensureCoordinatorMonitor(current: Intercom, ctx: ExtensionContext, started: number): Promise<void> {

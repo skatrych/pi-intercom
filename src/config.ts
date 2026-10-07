@@ -1,6 +1,7 @@
 import { mkdir, readFile, realpath, rename, unlink, open, link, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { fencedClose, validateHandoff, validateCloseJob, type Handoff, type CloseJob } from './handoff.js';
 
 export interface Agent {
@@ -12,10 +13,22 @@ export interface Agent {
   /** Legacy browser dashboard field, accepted for migration only; removed at coordinator startup. */
   dashboardPort?: number;
   projectDirectory: string;
+  /** Logical Pi execution identity. Not a name, description, or filesystem path. */
+  role?: string;
   handoff?: Handoff;
   closeJob?: CloseJob;
 }
-export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[] }
+export interface Config {
+  version: 1;
+  multiplexer: 'herdr' | 'none';
+  /** Role name to Pi agent directory. Absent when workers use the existing launch environment. */
+  roles?: Record<string, string>;
+  agents: Agent[];
+}
+/** Logical role keys only. Callers cannot pass a Pi agent directory through this name. */
+export const ROLE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const AGENT_DIR_ENV = 'PI_CODING_AGENT_DIR';
+export const WORKER_ROLE_ENV = 'PI_INTERCOM_WORKER_ROLE';
 export const DEFAULT_DESCRIPTION = 'Coordinate workers, delegate work, and manage shared configuration.';
 export const key = (name: string) => name.toLowerCase();
 export function fail(message: string): never { throw new Error(`PiIntercom: ${message}`); }
@@ -29,13 +42,50 @@ export function relativeDirectory(value: unknown): asserts value is string {
   text(value, 'projectDirectory');
   if (path.isAbsolute(value) || path.win32.isAbsolute(value) || value.split(/[\\/]/).includes('..')) fail('projectDirectory must be root-relative, without ..');
 }
+export function expandHome(value: string): string {
+  if (value === '~') return homedir();
+  if (value.startsWith('~/') || value.startsWith('~\\')) return path.join(homedir(), value.slice(2));
+  return value;
+}
+/** Accept only absolute paths and `~` / `~/` expansions. `~user` is not expanded. */
+export function roleDirectory(value: unknown, role: string): string {
+  text(value, `role directory for ${role}`);
+  if (/[\r\n]/.test(value)) fail(`invalid role directory for ${role}`);
+  if (/^~[^/\\]/.test(value)) fail(`invalid role directory for ${role}: ~user is not expanded`);
+  const expanded = expandHome(value);
+  if (!path.isAbsolute(expanded) && !path.win32.isAbsolute(expanded)) fail(`role directory for ${role} must be absolute or start with ~/`);
+  return path.resolve(expanded);
+}
+/** Resolve a configured role to an existing Pi agent directory. Never accepts a caller-supplied path. */
+export async function resolveRoleDirectory(config: Config, role: string): Promise<string> {
+  if (typeof role !== 'string' || !ROLE_NAME.test(role)) fail('invalid role');
+  const roles = config.roles;
+  if (!roles || !Object.hasOwn(roles, role)) fail(`unknown role ${role}`);
+  const resolved = roleDirectory(roles[role], role);
+  let info;
+  try { info = await stat(resolved); }
+  catch (error) { fail(`role ${role} directory unavailable: ${resolved} (${(error as NodeJS.ErrnoException).code ?? 'error'})`); }
+  if (!info.isDirectory()) fail(`role ${role} path is not a directory: ${resolved}`);
+  return resolved;
+}
 export function validateConfig(value: unknown): Config {
   const c = value as Config;
   if (!c || c.version !== 1 || !['herdr', 'none'].includes(c.multiplexer) || !Array.isArray(c.agents)) fail('invalid config schema/version');
+  if (c.roles !== undefined) {
+    if (!c.roles || typeof c.roles !== 'object' || Array.isArray(c.roles)) fail('invalid roles');
+    for (const [name, directory] of Object.entries(c.roles)) {
+      if (!ROLE_NAME.test(name)) fail(`invalid role name ${name}`);
+      roleDirectory(directory, name);
+    }
+  }
   const names = new Set<string>(), ids = new Set<string>();
   for (const a of c.agents) {
     if (!a || typeof a.coordinator !== 'boolean') fail('invalid agent');
     text(a.sessionId, 'sessionId', 256); text(a.name, 'name', 128); text(a.description, 'description');
+    if (a.role !== undefined) {
+      if (a.coordinator) fail('role is worker-only');
+      if (typeof a.role !== 'string' || !ROLE_NAME.test(a.role)) fail('invalid role');
+    }
     if (a.name !== a.name.trim() || /[\r\n\x00-\x1f]/.test(a.name)) fail('invalid name');
     port(a.port); relativeDirectory(a.projectDirectory);
     if (a.handoff !== undefined) { if (a.coordinator) fail('handoff is worker-only'); validateHandoff(a.handoff); }
@@ -170,6 +220,11 @@ export class ConfigStore {
       if (values.sessionId === coordinator(c).sessionId) fail('cannot configure coordinator as worker');
       const projectDirectory = await directory(this.root, values.projectDirectory);
       const a: Agent = { sessionId: values.sessionId, name: values.name, description: values.description, port: values.port, projectDirectory, coordinator: false };
+      if (values.role !== undefined) {
+        if (typeof values.role !== 'string' || !ROLE_NAME.test(values.role)) fail('invalid role');
+        if (!c.roles || !Object.hasOwn(c.roles, values.role)) fail(`unknown role ${values.role}`);
+        a.role = values.role;
+      }
       const index = c.agents.findIndex(old => old.sessionId === a.sessionId);
       if (index < 0) c.agents.push(a);
       else {
@@ -177,6 +232,7 @@ export class ConfigStore {
         if (fencedClose(old.closeJob)) fail('worker close is active or uncertain; configuration is fenced');
         if (old.handoff) a.handoff = old.handoff;
         if (old.closeJob) a.closeJob = old.closeJob;
+        if (a.role === undefined && old.role) a.role = old.role;
         c.agents[index] = a;
       }
     }, assertValid);

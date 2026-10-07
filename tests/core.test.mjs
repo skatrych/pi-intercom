@@ -41,6 +41,26 @@ test('coordinator writes only, unique case-insensitive names, serialized writes'
   assert.equal((await s.read()).agents.length, 22);
   await assert.rejects(s.configure('coordinator', worker('coordinator')), /coordinator/);
 });
+test('optional roles round-trip and stay separate from worker names', async t => {
+  const s = await fixture(t); await s.initialize('c', 12345);
+  await s.update('c', c => { c.roles = { developer: '~/.pi/roles/developer', architect: '~/.pi/roles/architect' }; });
+  await s.configure('c', worker());
+  const saved = await s.read();
+  assert.deepEqual(saved.roles, { developer: '~/.pi/roles/developer', architect: '~/.pi/roles/architect' });
+  assert.equal(saved.agents[1].role, undefined);
+  const withRole = structuredClone(saved);
+  withRole.agents.push({ ...worker('w2', 'Other'), coordinator: false, role: 'developer' });
+  assert.equal(validateConfig(withRole).agents[2].role, 'developer');
+  const legacy = structuredClone(saved);
+  delete legacy.roles;
+  assert.equal(validateConfig(legacy).roles, undefined);
+  assert.throws(() => validateConfig({ ...saved, roles: { '../developer': '/tmp' } }), /invalid role name/);
+  assert.throws(() => validateConfig({ ...saved, roles: ['developer'] }), /invalid roles/);
+  assert.throws(() => validateConfig({ ...saved, agents: [{ ...saved.agents[0], role: 'developer' }] }), /worker-only/);
+  assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker('w3', 'Bad'), coordinator: false, role: '/tmp/developer' }] }), /invalid role/);
+  assert.throws(() => validateConfig({ ...saved, roles: { developer: 'roles/developer' } }), /must be absolute or start with ~\//);
+  assert.throws(() => validateConfig({ ...saved, roles: { developer: '~user/roles' } }), /~user is not expanded/);
+});
 test('schema rejects malformed version, port, duplicate IDs, traversal', async t => {
   const s = await fixture(t); await s.initialize('c', 12345);
   const c = await s.read();
