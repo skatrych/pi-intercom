@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { fail, port, text } from './config.js';
+import { ROLE_NAME, fail, port, text } from './config.js';
 import type { ReportStatus } from './reports.js';
 import { HANDOFF_KINDS, validateHandoffPayload, type HandoffKind } from './handoff.js';
 
@@ -32,7 +32,10 @@ export function envelope(value: unknown): Envelope {
   if (m.kind === 'report') reportPayload(m.payload);
   if (HANDOFF_KINDS.includes(m.kind)) validateHandoffPayload(m.kind, m.payload);
   if (m.kind === 'registration' || m.kind === 'status') port(m.payload.port);
-  if (m.kind === 'registration') text(m.payload.projectDirectory, 'projectDirectory');
+  if (m.kind === 'registration') {
+    text(m.payload.projectDirectory, 'projectDirectory');
+    if (m.payload.role !== undefined && (typeof m.payload.role !== 'string' || !ROLE_NAME.test(m.payload.role))) fail('invalid role');
+  }
   if (m.kind === 'status' && typeof m.payload.busy !== 'boolean') fail('invalid busy flag');
   return m;
 }

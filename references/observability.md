@@ -42,6 +42,7 @@ Version 1 fields:
 | `peerSessionId`, `peerName` | Optional peer metadata |
 | `correlationId` | One transport attempt, not a task/completion token |
 | `kind`, `operation`, `role`, `outcome` | Allowlisted metadata values |
+| `piRole` | Optional logical Pi role name on launch/registration metadata. Distinct from coordinator/worker/anonymous `role` |
 | `busy`, `port` | Observed boolean / port |
 | `phase`, `detail` | Fixed public activity enums |
 | `errorCode` | Fixed safe error label |
@@ -58,7 +59,7 @@ Activity phases are `working`, `thinking`, `responding`, `tool`, `idle`. Details
 
 Checks expire to unknown after 30 seconds. Monitor batches rotate to avoid starvation; skipped checks may retain previous unexpired evidence. Saved-port changes/removal invalidate cached checks. Shared classification/sorting preserves config order within connected-or-unknown and disconnected groups. UI selection follows session ID across these order changes.
 
-Closing a worker does not remove config. Explicit resume uses the saved session ID, name and responsibility and requires user-confirmed closure (`confirmClosed:true`). A live matching health endpoint rejects duplicate resume. In-flight/uncertain submissions are fenced within this coordinator runtime until a later configured status announcement; preflight announcements do not qualify, and uncertain launch errors preserve the fence. Config/identity/lifecycle are rechecked before launch. These safeguards do not guarantee cross-process uniqueness, survive coordinator restart or certify OS process death. Connectivity monitoring never automatically closes, retries, restarts or assigns work. An explicit close request (0.6.1) may separately initiate the handoff workflow described below.
+Closing a worker does not remove config. Explicit resume uses the saved session ID, name, responsibility and logical Pi role (relaunched through `pi-role` when present) and requires user-confirmed closure (`confirmClosed:true`). A live matching health endpoint rejects duplicate resume. In-flight/uncertain submissions are fenced within this coordinator runtime until a later configured status announcement; preflight announcements do not qualify, and uncertain launch errors preserve the fence. Config/identity/lifecycle are rechecked before launch. These safeguards do not guarantee cross-process uniqueness, survive coordinator restart or certify OS process death. Connectivity monitoring never automatically closes, retries, restarts or assigns work. An explicit close request (0.6.1) may separately initiate the handoff workflow described below.
 
 ## Public handoff and background pane-close jobs (0.6.1)
 
