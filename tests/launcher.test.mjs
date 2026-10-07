@@ -16,6 +16,7 @@ test('Herdr uses one returned tab/pane, no split/focus, explicit extension/resum
   assert.match(r.piReadiness, /not observed/);
   const script = Buffer.from(calls[1].args[3].split(' ').at(-1), 'base64').toString('utf16le');
   assert.match(script, /Get-Command pi\.ps1/);
+  assert.doesNotMatch(script, /PI_CODING_AGENT_DIR|PI_INTERCOM_WORKER_ROLE|pi-role/);
   assert.match(script, /'D:\/a space\/O''Brien\/index\.ts'/);
   assert.match(script, /'--session' 'session-id'/);
   assert.ok(script.includes("'--intercom-root' 'D:/project/O''Brien $HOME;root'"));
@@ -46,6 +47,7 @@ test('none creates visible terminal with encoded arguments; no inherited Herdr c
   const inner = Buffer.from(base64, 'base64').toString('utf16le');
   assert.ok(inner.includes("'--intercom-root' '\\\\server\\share\\O''Brien root'"));
   assert.match(inner, /HERDR_\*/); assert.match(inner, /O''Brien/); assert.match(inner, /'-e'/);
+  assert.doesNotMatch(inner, /PI_CODING_AGENT_DIR|PI_INTERCOM_WORKER_ROLE|pi-role/);
   assert.equal(psQuote("a'b"), "'a''b'"); assert.equal(Buffer.from(encoded('hello'), 'base64').toString('utf16le'), 'hello');
 });
 test('launcher requires explicit absolute root before session lookup or process creation', async () => {
@@ -65,6 +67,12 @@ test('Windows launcher allows platform-equivalent same cwd roots', async () => {
   const launcher = launchers({ ...options, run: async () => JSON.stringify({ result: { tab: { tab_id: 't' }, root_pane: { pane_id: 'p' } } }) });
   const result = await launcher.launch({ multiplexer: 'herdr', cwd: 'D:/Project/./', workspaceRoot: 'd:\\project' });
   assert.equal(result.commandSubmitted, true);
+});
+test('Windows rejects a role before any process launch and leaves role-less launches unchanged', async () => {
+  const run = async () => assert.fail('must not launch');
+  await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'herdr', cwd: 'D:/project', workspaceRoot: 'D:/project', role: 'developer' }), /not supported on Windows/);
+  await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'none', cwd: 'D:/project', workspaceRoot: 'D:/project', role: 'developer' }), /not supported on Windows/);
+  await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'none', cwd: 'D:/project', workspaceRoot: 'D:/project', role: "developer';rm" }), /invalid role/);
 });
 test('name sync resolves current pane tab rather than focused tab', async () => {
   const calls = [];
