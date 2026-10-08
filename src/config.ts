@@ -18,8 +18,13 @@ export interface Agent {
   closeJob?: CloseJob;
 }
 export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[] }
-/** Logical role names only. Callers cannot pass a path or shell fragment through this name. */
+/** Logical role names only. Same alphabet as pi-role, bounded for Intercom storage. Callers cannot pass a path or shell fragment. */
 export const ROLE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+/** Names apply.sh refuses to install. They are not Pi roles. */
+export const RESERVED_ROLES = new Set(['credentials', 'auth.json', 'sessions', 'history', 'cache']);
+export function logicalRole(value: unknown): value is string {
+  return typeof value === 'string' && ROLE_NAME.test(value) && !RESERVED_ROLES.has(value);
+}
 /** Intercom metadata for the worker extension. It does not load the role. */
 export const WORKER_ROLE_ENV = 'PI_INTERCOM_WORKER_ROLE';
 /** Optional executable used instead of `pi-role` on PATH. Not a role-to-directory map. */
@@ -47,7 +52,7 @@ export function validateConfig(value: unknown): Config {
     text(a.sessionId, 'sessionId', 256); text(a.name, 'name', 128); text(a.description, 'description');
     if (a.role !== undefined) {
       if (a.coordinator) fail('role is worker-only');
-      if (typeof a.role !== 'string' || !ROLE_NAME.test(a.role)) fail('invalid role');
+      if (!logicalRole(a.role)) fail('invalid role');
     }
     if (a.name !== a.name.trim() || /[\r\n\x00-\x1f]/.test(a.name)) fail('invalid name');
     port(a.port); relativeDirectory(a.projectDirectory);
@@ -184,7 +189,7 @@ export class ConfigStore {
       const projectDirectory = await directory(this.root, values.projectDirectory);
       const a: Agent = { sessionId: values.sessionId, name: values.name, description: values.description, port: values.port, projectDirectory, coordinator: false };
       if (values.role !== undefined) {
-        if (typeof values.role !== 'string' || !ROLE_NAME.test(values.role)) fail('invalid role');
+        if (!logicalRole(values.role)) fail('invalid role');
         a.role = values.role;
       }
       const index = c.agents.findIndex(old => old.sessionId === a.sessionId);

@@ -36,9 +36,9 @@ async function setup(t, extra = {}) {
     observe: () => ({ record: (event, metadata) => events.push({ event, metadata }), close: async () => {} }),
     ...extra,
   };
-  async function start(id, workerRole) {
+  async function start(id, workerRole, roleDirectory) {
     const messages = [], notices = [];
-    const host = { cwd: root, sessionId: () => id, busy: () => false, workerRole,
+    const host = { cwd: root, sessionId: () => id, busy: () => false, workerRole, roleDirectory,
       deliver: (text, busy) => messages.push({ text, busy }), setName: async () => {}, notify: text => notices.push(text) };
     const runtime = new Intercom(host, options); all.push(runtime);
     try { await runtime.start(); }
@@ -89,7 +89,7 @@ test('invalid role syntax fails before launch', async t => {
   let launched = false;
   const f = await setup(t, { launch: async () => { launched = true; return { launched: true }; } });
   const c = await f.start('c');
-  for (const role of ['../../something', "developer'; touch pwned; '", 'has space', '..', '.hidden', 'a'.repeat(65), 'dev\nx', '/tmp/developer']) {
+  for (const role of ['../../something', "developer'; touch pwned; '", 'has space', '..', '.hidden', 'a'.repeat(65), 'dev\nx', '/tmp/developer', 'sessions', 'credentials', 'auth.json', 'history', 'cache']) {
     await assert.rejects(c.runtime.tool('create_worker', { role, projectDirectory: '.' }), /invalid role/);
   }
   await assert.rejects(c.runtime.tool('create_worker', { role: 1, projectDirectory: '.' }), /invalid role/);
@@ -166,20 +166,57 @@ test('registration role must be a logical name on the wire', () => {
   const base = { version: 1, kind: 'registration', from: 'w', to: 'c', payload: { port: 1, projectDirectory: '.' } };
   assert.equal(envelope(base).payload.role, undefined);
   assert.equal(envelope({ ...base, payload: { ...base.payload, role: 'dev.role-1' } }).payload.role, 'dev.role-1');
-  for (const role of ['/tmp/dev', '', 'a'.repeat(65), 'has space', 'dev\nx', 1, 'constructor/../x', '../../something']) {
+  for (const role of ['/tmp/dev', '', 'a'.repeat(65), 'has space', 'dev\nx', 1, 'constructor/../x', '../../something', 'sessions', 'auth.json']) {
     assert.throws(() => envelope({ ...base, payload: { ...base.payload, role } }), /invalid role/);
   }
 });
 
-test('a malformed worker role is reported directly and does not register', async t => {
+test('a malformed worker role is omitted and registration still reaches the coordinator', async t => {
   const f = await setup(t), c = await f.start('c');
-  await assert.rejects(f.start('w', 'not a role'), error => {
-    assert.match(String(error), /invalid worker role/);
-    assert.match(error.notices.join('\n'), /Invalid PI_INTERCOM_WORKER_ROLE/);
-    assert.doesNotMatch(error.notices.join('\n'), /Coordinator unreachable/);
-    return true;
-  });
-  assert.equal(c.messages.length, 0);
+  const w = await f.start('w', 'not a role');
+  assert.match(w.notices.join('\n'), /Invalid worker role/);
+  assert.match(w.notices.join('\n'), /Messaging continues/);
+  assert.match(c.messages.at(-1).text, /registration/);
+  assert.doesNotMatch(c.messages.at(-1).text, /"role"/);
+  assert.equal(typeof w.runtime.endpoint.port, 'number');
+});
+
+test('a manual pi-role launch reports basename(PI_ROLE_DIR) without reading that directory', async t => {
+  const f = await setup(t), c = await f.start('c');
+  const w = await f.start('manual', undefined, '/no/such/role/directory/developer/');
+  assert.match(c.messages.at(-1).text, /"role":"developer"/);
+  assert.match(w.notices.join('\n'), /worker ready/);
+  const reserved = await f.start('reserved', undefined, '/no/such/sessions');
+  assert.match(reserved.notices.join('\n'), /Invalid worker role/);
+  assert.doesNotMatch(c.messages.at(-1).text, /"role"/);
+  const explicit = await f.start('explicit-bad', 'not a role', '/no/such/developer');
+  assert.match(explicit.notices.join('\n'), /Invalid worker role/);
+  assert.doesNotMatch(c.messages.at(-1).text, /"role":"developer"/);
+});
+
+test('status reports the role, and a mismatch notifies without relaunching', async t => {
+  const f = await setup(t), c = await f.start('c');
+  await configure(c.runtime, 'dropped', 32010, 'Dropped', { role: 'developer' });
+  const dropped = await f.start('dropped');
+  assert.match(c.messages.at(-1).text, /no relaunch/);
+  assert.match(c.messages.at(-1).text, /saved role developer/);
+  assert.match(c.notices.at(-1), /no relaunch/);
+  assert.equal(f.launches.length, 0);
+  assert.equal(typeof dropped.runtime.endpoint.port, 'number');
+  const matched = await f.start('matched', 'architect');
+  await configure(c.runtime, 'matched', matched.runtime.endpoint.port, 'Matched', { role: 'architect' });
+  c.messages.length = 0;
+  await matched.runtime.tool('report_status', {});
+  assert.match(c.messages.at(-1).text, /"role":"architect"/);
+  assert.doesNotMatch(c.messages.at(-1).text, /roleNote|no relaunch/);
+  c.messages.length = 0;
+  const other = await f.start('other', 'developer');
+  await configure(c.runtime, 'other', other.runtime.endpoint.port, 'Other', { role: 'developer' });
+  c.messages.length = 0; c.notices.length = 0;
+  await other.runtime.tool('report_status', {});
+  assert.match(c.messages.at(-1).text, /"role":"developer"/);
+  assert.equal(c.notices.length, 0);
+  assert.equal(f.launches.length, 0);
 });
 
 test('logical role is visible in the observation snapshot and worker status', async t => {

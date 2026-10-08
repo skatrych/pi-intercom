@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
-import { ConfigStore, ROLE_NAME, WORKER_ROLE_ENV, coordinator, directory, fail, named, port, requireCoordinator, type Agent, type Config } from './config.js';
+import { ConfigStore, WORKER_ROLE_ENV, coordinator, directory, fail, logicalRole, named, port, requireCoordinator, type Agent, type Config } from './config.js';
 import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } from './transport.js';
 import { saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
@@ -19,6 +19,8 @@ export interface Host {
   notify(text: string): void;
   /** Test seam. Production workers report `PI_INTERCOM_WORKER_ROLE` from the launch environment. */
   workerRole?: string;
+  /** Test seam. Production reads `PI_ROLE_DIR` and uses only its basename. */
+  roleDirectory?: string;
 }
 export interface LaunchRequest {
   multiplexer: 'herdr' | 'none';
@@ -29,12 +31,12 @@ export interface LaunchRequest {
 }
 function requestedRole(role: unknown): string | undefined {
   if (role === undefined) return undefined;
-  if (typeof role !== 'string' || !ROLE_NAME.test(role)) fail('invalid role');
+  if (!logicalRole(role)) fail('invalid role');
   return role;
 }
 /** Explicit argument, then the saved worker role, then a same-process registration report. */
 function chooseWorkerRole(config: Config, sessionId: string, explicit: unknown, reported?: string): { role?: string; roleNote?: string } {
-  if (explicit !== undefined && (typeof explicit !== 'string' || !ROLE_NAME.test(explicit))) fail('invalid role');
+  if (explicit !== undefined && !logicalRole(explicit)) fail('invalid role');
   const existing = config.agents.find(agent => agent.sessionId === sessionId && !agent.coordinator);
   if (typeof explicit === 'string') return { role: explicit };
   if (existing?.role) {
@@ -42,8 +44,14 @@ function chooseWorkerRole(config: Config, sessionId: string, explicit: unknown, 
     return {};
   }
   if (!reported) return {};
-  if (!ROLE_NAME.test(reported)) fail('invalid role');
+  if (!logicalRole(reported)) fail('invalid role');
   return { role: reported };
+}
+/** Last path segment only. Does not resolve, stat, or interpret the directory. */
+function roleBasename(dir: string | undefined): string | undefined {
+  if (!dir) return undefined;
+  const base = path.posix.basename(dir);
+  return base && base !== '.' && base !== '/' ? base : undefined;
 }
 export interface RuntimeOptions {
   launch(request: LaunchRequest): Promise<unknown>;
@@ -71,6 +79,8 @@ export class Intercom {
   private resumeFences = new Map<string, { inFlight: boolean; submitted: boolean; announced: boolean }>();
   /** Role names reported by workers, applied when that session is explicitly configured. Not an agent entry. */
   private registeredRoles = new Map<string, string>();
+  private roleResolved = false;
+  private resolvedRole?: string;
   private handoff?: HandoffWorkflow;
   workerStarted(): void { this.handoff?.workerStarted(); }
   workerSettled(successfulToolCallIds: ReadonlySet<string>): void { this.handoff?.workerSettled(successfulToolCallIds); }
@@ -102,6 +112,8 @@ export class Intercom {
     this.probeController = new AbortController();
     this.resumeFences.clear();
     this.registeredRoles.clear();
+    this.roleResolved = false;
+    this.resolvedRole = undefined;
     const generation = ++this.generation, assertValid = this.validity();
     let record = this.captureObserver();
     try {
@@ -154,11 +166,7 @@ export class Intercom {
       } else {
         if (me) { try { await this.reload(); } catch (e) { assertValid(); this.host.notify(`Name/responsibility synchronization failed: ${String(e)}`); } }
         assertValid();
-        const role = me ? undefined : this.host.workerRole ?? process.env[WORKER_ROLE_ENV];
-        if (!me && role !== undefined && role !== '' && !ROLE_NAME.test(role)) {
-          this.host.notify(`Invalid ${WORKER_ROLE_ENV}; registration was not sent.`);
-          fail('invalid worker role');
-        }
+        const role = me?.coordinator ? undefined : this.reportedRole();
         try {
           if (me) await this.report();
           else {
@@ -257,7 +265,23 @@ export class Intercom {
     assertValid();
     if (me?.coordinator) fail('report_status is worker-only');
     if (!this.endpoint) fail('endpoint unavailable');
-    await this.transmit(coordinator(config).name, 'status', { port: this.endpoint.port, busy: this.host.busy() });
+    const role = this.reportedRole();
+    await this.transmit(coordinator(config).name, 'status', { port: this.endpoint.port, busy: this.host.busy(), ...(role ? { role } : {}) });
+  }
+  /** Logical role for registration and status. Invalid metadata is omitted; it does not stop messaging. */
+  private reportedRole(): string | undefined {
+    if (this.roleResolved) return this.resolvedRole;
+    this.roleResolved = true;
+    const explicit = this.host.workerRole !== undefined && this.host.workerRole !== '' ? this.host.workerRole : process.env[WORKER_ROLE_ENV];
+    const directory = this.host.roleDirectory !== undefined ? this.host.roleDirectory : process.env.PI_ROLE_DIR;
+    const candidate = explicit !== undefined && explicit !== '' ? explicit : roleBasename(directory);
+    if (!candidate) return undefined;
+    if (!logicalRole(candidate)) {
+      this.host.notify('Invalid worker role; omitted from registration and status. Messaging continues.');
+      return undefined;
+    }
+    this.resolvedRole = candidate;
+    return candidate;
   }
   async receive(message: Envelope): Promise<void> {
     const record = this.captureObserver();
@@ -303,7 +327,7 @@ export class Intercom {
         const projectDirectory = await directory(this.store.root, message.payload.projectDirectory as string);
         // No agent entry or placeholder. A reported role is remembered only until explicit configure stores it.
         if (message.payload.role !== undefined) {
-          if (typeof message.payload.role !== 'string' || !ROLE_NAME.test(message.payload.role)) fail('invalid role');
+          if (!logicalRole(message.payload.role)) fail('invalid role');
           this.registeredRoles.set(message.from, message.payload.role);
         }
         const reportedRole = typeof message.payload.role === 'string' ? message.payload.role : undefined;
@@ -320,9 +344,17 @@ export class Intercom {
           fence.announced = true;
           if (!fence.inFlight) this.resumeFences.delete(sender!.sessionId);
         }
-        record('status.received', { ...metadata, busy: message.payload.busy as boolean, port: message.payload.port as number });
+        if (message.payload.role !== undefined && !logicalRole(message.payload.role)) fail('invalid role');
+        const reportedRole = typeof message.payload.role === 'string' ? message.payload.role : undefined;
+        const expected = sender && !sender.coordinator ? sender.role : undefined;
+        const roleMismatch = !!expected && reportedRole !== expected;
+        const roleNote = roleMismatch
+          ? `reported role ${reportedRole ?? 'none'} differs from saved role ${expected}; saved role kept, no relaunch`
+          : undefined;
+        if (roleNote) this.host.notify(`Worker ${sender!.name}: ${roleNote}`);
+        record('status.received', { ...metadata, busy: message.payload.busy as boolean, port: message.payload.port as number, ...(reportedRole ? { piRole: reportedRole } : {}) });
         if (sender) record('config.changed', { operation: 'port_update', peerSessionId: message.from, port: message.payload.port as number, outcome: 'written' });
-        notify('status', JSON.stringify({ sessionId: message.from, port: message.payload.port, busy: message.payload.busy, configured: !!sender }));
+        notify('status', JSON.stringify({ sessionId: message.from, port: message.payload.port, busy: message.payload.busy, configured: !!sender, ...(reportedRole ? { role: reportedRole } : {}), ...(roleNote ? { roleNote } : {}) }));
       }
       return;
     }
@@ -474,7 +506,7 @@ export class Intercom {
         const current = fresh.config.agents.find(agent => agent.sessionId === target.sessionId && !agent.coordinator);
         if (!current || current.port !== target.port || current.projectDirectory !== target.projectDirectory || current.role !== target.role) fail('Worker configuration changed during resume check; no launch submitted.');
         if (this.handoff?.isClosing(target.sessionId) || fencedClose(current.closeJob)) fail('worker close is active or uncertain; resume is fenced');
-        if (current.role !== undefined && !ROLE_NAME.test(current.role)) fail('invalid role');
+        if (current.role !== undefined && !logicalRole(current.role)) fail('invalid role');
         fence.submitted = true;
         const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, sessionId: current.sessionId, ...(current.role ? { role: current.role } : {}) });
         completed = true;
@@ -500,7 +532,7 @@ export class Intercom {
     const record = this.captureObserver();
     const metadata: EventMetadata = {
       operation: request.sessionId ? 'resume_worker' : 'create_worker', peerSessionId: request.sessionId,
-      ...(request.role && ROLE_NAME.test(request.role) ? { piRole: request.role } : {}),
+      ...(request.role && logicalRole(request.role) ? { piRole: request.role } : {}),
     };
     record('launch.result', { ...metadata, outcome: 'attempted' });
     try {

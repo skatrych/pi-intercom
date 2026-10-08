@@ -58,37 +58,44 @@ test('Linux role launch wraps Pi with a quoted pi-role and keeps normal argument
     ...options,
     env: { ...options.env, PI_INTERCOM_ROLE_LAUNCHER: launcherPath },
     sessionExists: async (dir, id) => { lookup = { dir, id }; return true; },
-    run: async (file, args) => { calls.push({ file, args }); return created; },
+    run: async (file, args) => {
+      calls.push({ file, args });
+      if (file === 'sh') return `${launcherPath}\n`;
+      if (args[0] === '--print') return `/tmp/not-a-pi-home/${role}\n`;
+      return created;
+    },
   });
   await launcher.launch({ multiplexer: 'herdr', cwd, sessionId, role });
   assert.deepEqual(lookup, { dir: cwd, id: sessionId });
-  assert.equal(Object.keys(lookup).includes('roleDir'), false);
-  const command = calls[1].args[3];
+  assert.equal(calls[0].file, 'sh');
+  assert.deepEqual(calls[1].args, ['--print', role]);
+  assert.equal(calls[2].args[0], 'tab');
+  const command = calls[3].args[3];
   assert.match(command, /exec /);
-  assert.doesNotMatch(command, /PI_CODING_AGENT_DIR|exec pi /);
+  assert.doesNotMatch(command, /PI_CODING_AGENT_DIR|exec pi |not-a-pi-home/);
   const { stdout } = await promisify(execFile)('/bin/sh', ['-c', command], { env: { ...process.env, PATH: `${root}:${process.env.PATH}` } });
   assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, role, 'UNSET', role, '-e', options.extension, '--session', sessionId]);
   await assert.rejects(access(path.join(cwd, 'pwned')), /ENOENT/);
 });
 
-test('Linux role launch failure is the pi-role error and does not fall back to plain pi', async () => {
-  const commands = [];
-  const launcher = launchers({ ...options, run: async (file, args) => {
-    commands.push(args[0] === 'pane' ? args[3] : args[0]);
-    if (args[0] === 'pane') throw new Error("pi-role: role 'developer' not found");
-    return created;
-  } });
-  await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp', role: 'developer' }), /role 'developer' not found/);
-  assert.equal(commands.length, 2);
-  assert.match(commands[1], /PI_INTERCOM_WORKER_ROLE=/);
-  assert.match(commands[1], /pi-role/);
-  assert.match(commands[1], /developer/);
-  assert.doesNotMatch(commands[1], /PI_CODING_AGENT_DIR|exec pi /);
+test('missing role or launcher fails preflight before a pane is created', async () => {
+  const missingRole = [];
+  await assert.rejects(launchers({ ...options, run: async (file, args) => {
+    missingRole.push(file);
+    if (file === 'sh') return '/usr/bin/pi-role\n';
+    if (args[0] === '--print') throw new Error("pi-role: role 'developer' not found");
+    assert.fail('no pane');
+  } }).launch({ multiplexer: 'herdr', cwd: '/tmp', role: 'developer' }), /not available from pi-role --print/);
+  assert.deepEqual(missingRole, ['sh', 'pi-role']);
+  await assert.rejects(launchers({ ...options, run: async file => {
+    if (file === 'sh') throw new Error('not found');
+    assert.fail('no pane');
+  } }).launch({ multiplexer: 'herdr', cwd: '/tmp', role: 'developer' }), /role launcher not found: pi-role/);
 });
 
 test('invalid role syntax and a control-character launcher never start a process', async () => {
   const run = async () => assert.fail('must not launch');
-  for (const role of ['../../something', "developer'; touch pwned; '", 'has space', '..', '.hidden']) {
+  for (const role of ['../../something', "developer'; touch pwned; '", 'has space', '..', '.hidden', 'sessions', 'credentials', 'auth.json', 'history', 'cache']) {
     await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'herdr', cwd: '/tmp', role }), /invalid role/);
   }
   await assert.rejects(launchers({
