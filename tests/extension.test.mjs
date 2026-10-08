@@ -122,6 +122,13 @@ test('single extension registers all agreed tools without starting resources in 
   assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
+  const create = tools.get('intercom_create_worker');
+  assert.equal(create.parameters.properties.role.type, 'string');
+  assert.equal((create.parameters.required ?? []).includes('role'), false);
+  assert.equal(configure.parameters.properties.role.type, 'string');
+  assert.equal(configure.parameters.required.includes('role'), false);
+  assert.match(create.description, /pi-role/);
+  assert.match(create.description, /does not change PI_CODING_AGENT_DIR/);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
   assert.match(tools.get('intercom_reload_worker').description, /NOT Pi extension reload/);
   await assert.rejects(tools.get('intercom_list').execute('test', {}, undefined, undefined, {}), /not initialized/);

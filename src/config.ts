@@ -12,10 +12,24 @@ export interface Agent {
   /** Legacy browser dashboard field, accepted for migration only; removed at coordinator startup. */
   dashboardPort?: number;
   projectDirectory: string;
+  /** Logical Pi role name. Absent when the worker uses the normal Pi launch. */
+  role?: string;
   handoff?: Handoff;
   closeJob?: CloseJob;
 }
 export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[] }
+/** Logical role names only. Same alphabet as pi-role, bounded for Intercom storage. Callers cannot pass a path or shell fragment. */
+export const ROLE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+/** Names apply.sh refuses to install. They are not Pi roles. */
+export const RESERVED_ROLES = new Set(['credentials', 'auth.json', 'sessions', 'history', 'cache']);
+export function logicalRole(value: unknown): value is string {
+  return typeof value === 'string' && ROLE_NAME.test(value) && !RESERVED_ROLES.has(value);
+}
+/** Intercom metadata for the worker extension. It does not load the role. */
+export const WORKER_ROLE_ENV = 'PI_INTERCOM_WORKER_ROLE';
+/** Optional executable used instead of `pi-role` on PATH. Not a role-to-directory map. */
+export const ROLE_LAUNCHER_ENV = 'PI_INTERCOM_ROLE_LAUNCHER';
+export const DEFAULT_ROLE_LAUNCHER = 'pi-role';
 export const DEFAULT_DESCRIPTION = 'Coordinate workers, delegate work, and manage shared configuration.';
 export const key = (name: string) => name.toLowerCase();
 export function fail(message: string): never { throw new Error(`PiIntercom: ${message}`); }
@@ -36,6 +50,10 @@ export function validateConfig(value: unknown): Config {
   for (const a of c.agents) {
     if (!a || typeof a.coordinator !== 'boolean') fail('invalid agent');
     text(a.sessionId, 'sessionId', 256); text(a.name, 'name', 128); text(a.description, 'description');
+    if (a.role !== undefined) {
+      if (a.coordinator) fail('role is worker-only');
+      if (!logicalRole(a.role)) fail('invalid role');
+    }
     if (a.name !== a.name.trim() || /[\r\n\x00-\x1f]/.test(a.name)) fail('invalid name');
     port(a.port); relativeDirectory(a.projectDirectory);
     if (a.handoff !== undefined) { if (a.coordinator) fail('handoff is worker-only'); validateHandoff(a.handoff); }
@@ -170,6 +188,10 @@ export class ConfigStore {
       if (values.sessionId === coordinator(c).sessionId) fail('cannot configure coordinator as worker');
       const projectDirectory = await directory(this.root, values.projectDirectory);
       const a: Agent = { sessionId: values.sessionId, name: values.name, description: values.description, port: values.port, projectDirectory, coordinator: false };
+      if (values.role !== undefined) {
+        if (!logicalRole(values.role)) fail('invalid role');
+        a.role = values.role;
+      }
       const index = c.agents.findIndex(old => old.sessionId === a.sessionId);
       if (index < 0) c.agents.push(a);
       else {
@@ -177,6 +199,7 @@ export class ConfigStore {
         if (fencedClose(old.closeJob)) fail('worker close is active or uncertain; configuration is fenced');
         if (old.handoff) a.handoff = old.handoff;
         if (old.closeJob) a.closeJob = old.closeJob;
+        if (a.role === undefined && old.role) a.role = old.role;
         c.agents[index] = a;
       }
     }, assertValid);

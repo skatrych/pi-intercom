@@ -41,6 +41,27 @@ test('coordinator writes only, unique case-insensitive names, serialized writes'
   assert.equal((await s.read()).agents.length, 22);
   await assert.rejects(s.configure('coordinator', worker('coordinator')), /coordinator/);
 });
+test('worker role round-trips as a logical name and legacy workers stay valid', async t => {
+  const s = await fixture(t); await s.initialize('c', 12345);
+  await s.configure('c', worker());
+  const saved = await s.read();
+  assert.equal(saved.agents[1].role, undefined);
+  assert.equal(saved.roles, undefined);
+  const withRole = structuredClone(saved);
+  withRole.agents.push({ ...worker('w2', 'Other'), coordinator: false, role: 'dev.role-1' });
+  assert.equal(validateConfig(withRole).agents[2].role, 'dev.role-1');
+  assert.throws(() => validateConfig({ ...saved, agents: [{ ...saved.agents[0], role: 'developer' }] }), /worker-only/);
+  assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker('w3', 'Bad'), coordinator: false, role: '../developer' }] }), /invalid role/);
+  assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker('w4', 'Injected'), coordinator: false, role: "developer';rm" }] }), /invalid role/);
+  for (const role of ['sessions', 'credentials', 'auth.json', 'history', 'cache', 'a'.repeat(65)]) {
+    assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker(`bad-${role}`, `Bad-${role}`), coordinator: false, role }] }), /invalid role/);
+  }
+  await s.configure('c', { ...worker('w2', 'Other'), role: 'developer' });
+  await s.configure('c', worker('w2', 'Renamed'));
+  const kept = (await s.read()).agents.find(agent => agent.sessionId === 'w2');
+  assert.equal(kept.role, 'developer');
+  assert.equal(kept.name, 'Renamed');
+});
 test('schema rejects malformed version, port, duplicate IDs, traversal', async t => {
   const s = await fixture(t); await s.initialize('c', 12345);
   const c = await s.read();
