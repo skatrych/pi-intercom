@@ -1,0 +1,3609 @@
+{
+  "recordedAt": "2026-10-13",
+  "pi": "1.2.0",
+  "forkCommit": "e5b817a7b309dd28c2b56efc25506aa431fc0e68",
+  "upstreamCommit": "ca508706f3e6ad5ef5d6a3c105dcfd4423939cff",
+  "runs": {
+    "fork-busy": {
+      "sha256": "dbffa52fcab025c9bca4927375368885e076eb27ca11770f29597a61093fa091",
+      "events": [
+        {
+          "at": 1791927926750,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "busy",
+          "os": "linux",
+          "session": "01a1373a-3fd1-7491-aa06-98694265c7b2",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791927926752,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791927926752,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791927926754,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791927926755,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791927926755,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791927926761,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM1"
+          ]
+        },
+        {
+          "at": 1791927926762,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791927926762,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": false
+        },
+        {
+          "at": 1791927926763,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM2"
+          ]
+        },
+        {
+          "at": 1791927926764,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791927926764,
+          "type": "transport.send",
+          "marker": "SAME",
+          "idle": false
+        },
+        {
+          "at": 1791927926765,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791927926765,
+          "type": "transport.receipt",
+          "marker": "SAME"
+        },
+        {
+          "at": 1791927926765,
+          "type": "transport.send",
+          "marker": "SAME",
+          "idle": false
+        },
+        {
+          "at": 1791927926766,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791927926766,
+          "type": "transport.receipt",
+          "marker": "SAME"
+        },
+        {
+          "at": 1791927926766,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791927926767,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791927926767,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791927926767,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791927926768,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791927926768,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791927926768,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791927926768,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791927926768,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791927926768,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME",
+          "idle": false
+        },
+        {
+          "at": 1791927926768,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791927926768,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791927926768,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME",
+          "idle": false
+        },
+        {
+          "at": 1791927926769,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791927926769,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791927926769,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791927926770,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791927926770,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791927956770,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791927956770,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373a-3fd1-7491-aa06-98694265c7b2)]\nSAME"
+          ],
+          "errors": [],
+          "requests": 5,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-idle": {
+      "sha256": "c13aa7b2b5044d505ac6c8ebeb49055316e55239f3ac5632d43aaa2bf70e8989",
+      "events": [
+        {
+          "at": 1791927981980,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "idle",
+          "os": "linux",
+          "session": "01a1373b-178f-7685-82a3-259d618e787d",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791927981980,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791927981988,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791927981988,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": false
+        },
+        {
+          "at": 1791927981989,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791927981990,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373b-178f-7685-82a3-259d618e787d)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791927981991,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791927981991,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791927981992,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791927981992,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928011988,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928011988,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a1373b-178f-7685-82a3-259d618e787d)]\nM1"
+          ],
+          "errors": [],
+          "requests": 1,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-before-settle": {
+      "sha256": "ddb2475e5bfe568f24ad0b0a4e6dc4aba99675e44672f076ef7eabc2ef13f041",
+      "events": [
+        {
+          "at": 1791928012906,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "before-settle",
+          "os": "linux",
+          "session": "01a1373b-905d-75ac-8e7e-61632c15f1cc",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928012908,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928012908,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791928012909,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928012909,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928012910,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928012910,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791928012916,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373b-905d-75ac-8e7e-61632c15f1cc)]\nM1"
+          ]
+        },
+        {
+          "at": 1791928012917,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928012918,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928012918,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791928012918,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373b-905d-75ac-8e7e-61632c15f1cc)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791928012918,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928012918,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928012918,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928012919,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928012919,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928042919,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928042919,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1373b-905d-75ac-8e7e-61632c15f1cc)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-input-cross-settle": {
+      "sha256": "19af8250471d8505ab666262add76fb245451d42297f42ecbe5f78b59a21f93e",
+      "events": [
+        {
+          "at": 1791928043867,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "input-cross-settle",
+          "os": "linux",
+          "session": "01a1373c-094d-71a5-a972-25c379509101",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928043869,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928043869,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791928043871,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928043871,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928043872,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928043872,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791928043877,
+          "type": "input.held"
+        },
+        {
+          "at": 1791928043879,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928043880,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928043880,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928043880,
+          "type": "input.released"
+        },
+        {
+          "at": 1791928043881,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928043881,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373c-094d-71a5-a972-25c379509101)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791928043881,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928043881,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928043881,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928043881,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928073880,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928073880,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1373c-094d-71a5-a972-25c379509101)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-auth-race": {
+      "sha256": "338eabb1c9ad488910806324f4efc40902f43839643ca2bd94808b4918e45e96",
+      "events": [
+        {
+          "at": 1791928074794,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "auth-race",
+          "os": "linux",
+          "session": "01a1373c-821d-715f-8172-d030c9ada89a",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928074794,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928074801,
+          "type": "auth.held"
+        },
+        {
+          "at": 1791928074802,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928074802,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928074804,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928074805,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928074806,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373c-821d-715f-8172-d030c9ada89a)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928074807,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928074808,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928074808,
+          "type": "auth.released"
+        },
+        {
+          "at": 1791928074809,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928074809,
+          "type": "extension.error",
+          "event": "send_user_message",
+          "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+        },
+        {
+          "at": 1791928074828,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928074828,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928074829,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791928074829,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928074830,
+          "type": "agent_end",
+          "idle": true
+        },
+        {
+          "at": 1791928074830,
+          "type": "boundary",
+          "idle": true
+        },
+        {
+          "at": 1791928074830,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928104828,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928104828,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a1373c-821d-715f-8172-d030c9ada89a)]\nM2"
+          ],
+          "errors": [
+            {
+              "at": 1791928074809,
+              "type": "extension.error",
+              "event": "send_user_message",
+              "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+          ],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-auth-race-repeat": {
+      "sha256": "8e1562559186e63ad13bdf8aca4aa6ec15a39233f27846238e072c20bdd1657e",
+      "events": [
+        {
+          "at": 1791928271028,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "auth-race",
+          "os": "linux",
+          "session": "01a1373f-80a8-7729-a259-60df57f4b4f6",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928271029,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928271035,
+          "type": "auth.held"
+        },
+        {
+          "at": 1791928271036,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928271036,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928271038,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928271040,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928271040,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373f-80a8-7729-a259-60df57f4b4f6)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928271041,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928271042,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928271042,
+          "type": "auth.released"
+        },
+        {
+          "at": 1791928271043,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928271043,
+          "type": "extension.error",
+          "event": "send_user_message",
+          "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+        },
+        {
+          "at": 1791928271063,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928271063,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928271063,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791928271064,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928271064,
+          "type": "agent_end",
+          "idle": true
+        },
+        {
+          "at": 1791928271064,
+          "type": "boundary",
+          "idle": true
+        },
+        {
+          "at": 1791928271065,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928301063,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928301063,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a1373f-80a8-7729-a259-60df57f4b4f6)]\nM2"
+          ],
+          "errors": [
+            {
+              "at": 1791928271043,
+              "type": "extension.error",
+              "event": "send_user_message",
+              "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+          ],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-input-order": {
+      "sha256": "069d9406206a6290474c3cf64b7dac47baa4471fd4da69c46975d00acc3713a8",
+      "events": [
+        {
+          "at": 1791928105763,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "input-order",
+          "os": "linux",
+          "session": "01a1373c-fb16-7300-98d2-bd393fff64e6",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928105763,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928105769,
+          "type": "input.held"
+        },
+        {
+          "at": 1791928105770,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928105770,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928105772,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928105774,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928105774,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373c-fb16-7300-98d2-bd393fff64e6)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928105775,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928105775,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928105776,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928105777,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928105793,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928105793,
+          "type": "input.released"
+        },
+        {
+          "at": 1791928105794,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928105794,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373c-fb16-7300-98d2-bd393fff64e6)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791928105794,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928105794,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928105794,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928105794,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928135793,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928135793,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a1373c-fb16-7300-98d2-bd393fff64e6)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373c-fb16-7300-98d2-bd393fff64e6)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-busy": {
+      "sha256": "4e7dbeeb599de86c40db8eeaee3b066719b4cc9bdbd012752022efec20b68cbc",
+      "events": [
+        {
+          "at": 1791928178141,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "busy",
+          "os": "linux",
+          "session": "01a1373e-15cf-7779-abd3-875fcf80665f",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928178143,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928178143,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791928178145,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928178146,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928178146,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791928178152,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM1"
+          ]
+        },
+        {
+          "at": 1791928178153,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928178153,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": false
+        },
+        {
+          "at": 1791928178154,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM2"
+          ]
+        },
+        {
+          "at": 1791928178155,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928178155,
+          "type": "transport.send",
+          "marker": "SAME",
+          "idle": false
+        },
+        {
+          "at": 1791928178156,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791928178156,
+          "type": "transport.receipt",
+          "marker": "SAME"
+        },
+        {
+          "at": 1791928178156,
+          "type": "transport.send",
+          "marker": "SAME",
+          "idle": false
+        },
+        {
+          "at": 1791928178157,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791928178157,
+          "type": "transport.receipt",
+          "marker": "SAME"
+        },
+        {
+          "at": 1791928178157,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928178158,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791928178158,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791928178158,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791928178159,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928178159,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791928178159,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928178159,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928178159,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME"
+          ]
+        },
+        {
+          "at": 1791928178159,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME",
+          "idle": false
+        },
+        {
+          "at": 1791928178159,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928178159,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791928178159,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME",
+          "idle": false
+        },
+        {
+          "at": 1791928178160,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928178160,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928178160,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928178161,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928178161,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928208161,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928208161,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM1",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME",
+            "[Intercom agent message from Coordinator (01a1373e-15cf-7779-abd3-875fcf80665f)]\nSAME"
+          ],
+          "errors": [],
+          "requests": 5,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-auth-race": {
+      "sha256": "b8ae9463da844f6ceae89768276d3fc5809148d4d64cca89f73dc05b782abc3b",
+      "events": [
+        {
+          "at": 1791928209095,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "auth-race",
+          "os": "linux",
+          "session": "01a1373e-8eb2-73cb-a583-326e31397887",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928209095,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928209101,
+          "type": "auth.held"
+        },
+        {
+          "at": 1791928209102,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928209102,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928209104,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928209106,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928209106,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373e-8eb2-73cb-a583-326e31397887)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928209107,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928209108,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928209108,
+          "type": "auth.released"
+        },
+        {
+          "at": 1791928209109,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928209109,
+          "type": "extension.error",
+          "event": "send_user_message",
+          "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+        },
+        {
+          "at": 1791928209128,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928209128,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928209128,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791928209129,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928209129,
+          "type": "agent_end",
+          "idle": true
+        },
+        {
+          "at": 1791928209129,
+          "type": "boundary",
+          "idle": true
+        },
+        {
+          "at": 1791928209130,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928239128,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928239128,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a1373e-8eb2-73cb-a583-326e31397887)]\nM2"
+          ],
+          "errors": [
+            {
+              "at": 1791928209109,
+              "type": "extension.error",
+              "event": "send_user_message",
+              "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+          ],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-input-order": {
+      "sha256": "0c4515d4696edf461cb262fc1aefe2ab7cedbba112f76ba72095d3fa067c8e7d",
+      "events": [
+        {
+          "at": 1791928240073,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "input-order",
+          "os": "linux",
+          "session": "01a1373f-07b4-7744-a77b-7cf8d9fa93ab",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928240073,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928240079,
+          "type": "input.held"
+        },
+        {
+          "at": 1791928240080,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928240080,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928240082,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928240083,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928240084,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373f-07b4-7744-a77b-7cf8d9fa93ab)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928240085,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928240085,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928240086,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928240086,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928240102,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928240102,
+          "type": "input.released"
+        },
+        {
+          "at": 1791928240102,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928240102,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1373f-07b4-7744-a77b-7cf8d9fa93ab)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791928240103,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928240103,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928240103,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791928240103,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928270102,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928270102,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a1373f-07b4-7744-a77b-7cf8d9fa93ab)]\nM2",
+            "[Intercom agent message from Coordinator (01a1373f-07b4-7744-a77b-7cf8d9fa93ab)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-native-auth-race": {
+      "sha256": "0659ed0855df919a0f516e64e64501cbc06fb477844050c5c1067fc7bf8397d7",
+      "events": [
+        {
+          "at": 1791928395577,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "native-auth-race",
+          "os": "linux",
+          "session": "01a13741-6728-74ea-b150-1e7947123edd",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928395581,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928395587,
+          "type": "auth.held"
+        },
+        {
+          "at": 1791928395588,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928395588,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928395590,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928395592,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928395592,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a13741-6728-74ea-b150-1e7947123edd)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928395593,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928395594,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928395594,
+          "type": "auth.released"
+        },
+        {
+          "at": 1791928395595,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928395595,
+          "type": "extension.error",
+          "event": "send_user_message",
+          "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+        },
+        {
+          "at": 1791928395615,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928395615,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928395615,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791928395616,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928395616,
+          "type": "agent_end",
+          "idle": true
+        },
+        {
+          "at": 1791928395617,
+          "type": "boundary",
+          "idle": true
+        },
+        {
+          "at": 1791928395617,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928425615,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928425616,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a13741-6728-74ea-b150-1e7947123edd)]\nM2"
+          ],
+          "errors": [
+            {
+              "at": 1791928395595,
+              "type": "extension.error",
+              "event": "send_user_message",
+              "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+          ],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-native-auth-race": {
+      "sha256": "847e8b0ba50a0bc344efaf4b5a6e307961c915b1ea341e25e41b4aa42379b34a",
+      "events": [
+        {
+          "at": 1791928465957,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "native-auth-race",
+          "os": "linux",
+          "session": "01a13742-7a14-70e1-a795-c902046690c8",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928465960,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928465967,
+          "type": "auth.held"
+        },
+        {
+          "at": 1791928465968,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928465968,
+          "type": "transport.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928465970,
+          "type": "transport.receipt",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928465971,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928465971,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a13742-7a14-70e1-a795-c902046690c8)]\nM2",
+          "idle": false
+        },
+        {
+          "at": 1791928465973,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928465974,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928465974,
+          "type": "auth.released"
+        },
+        {
+          "at": 1791928465974,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928465974,
+          "type": "extension.error",
+          "event": "send_user_message",
+          "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+        },
+        {
+          "at": 1791928465994,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928465994,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928465994,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791928465995,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928465995,
+          "type": "agent_end",
+          "idle": true
+        },
+        {
+          "at": 1791928465996,
+          "type": "boundary",
+          "idle": true
+        },
+        {
+          "at": 1791928465996,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928495994,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928495994,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a13742-7a14-70e1-a795-c902046690c8)]\nM2"
+          ],
+          "errors": [
+            {
+              "at": 1791928465974,
+              "type": "extension.error",
+              "event": "send_user_message",
+              "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+          ],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "host-native-auth-race": {
+      "sha256": "cd3b68e224fb3f9ff74fcb6a901154eef20b05e1866232631b1f962dca529ef1",
+      "events": [
+        {
+          "at": 1791928496922,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "host",
+          "shape": "native-auth-race",
+          "os": "linux",
+          "session": "01a13742-f311-7651-a7e6-4d76f5ad6274",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791928496926,
+          "type": "sdk.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791928496926,
+          "type": "sdk.returned",
+          "marker": "M1"
+        },
+        {
+          "at": 1791928496926,
+          "type": "auth.held"
+        },
+        {
+          "at": 1791928496926,
+          "type": "sdk.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791928496926,
+          "type": "sdk.returned",
+          "marker": "M2"
+        },
+        {
+          "at": 1791928496928,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928496928,
+          "type": "consumed",
+          "text": "M2",
+          "idle": false
+        },
+        {
+          "at": 1791928496929,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928496930,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928496930,
+          "type": "auth.released"
+        },
+        {
+          "at": 1791928496930,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928496930,
+          "type": "extension.error",
+          "event": "direct_sdk_send",
+          "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+        },
+        {
+          "at": 1791928496950,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791928496950,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928496950,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791928496951,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928496951,
+          "type": "agent_end",
+          "idle": true
+        },
+        {
+          "at": 1791928496952,
+          "type": "boundary",
+          "idle": true
+        },
+        {
+          "at": 1791928496952,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928526956,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791928526956,
+          "type": "result",
+          "consumed": [
+            "M2"
+          ],
+          "errors": [
+            {
+              "at": 1791928496930,
+              "type": "extension.error",
+              "event": "direct_sdk_send",
+              "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+          ],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "authenticated-live": {
+      "sha256": "597734cb13ed7f78ba8d13d257a57f9f2cb5d464e5d351c0f6c3d86ef694e0db",
+      "events": [
+        {
+          "at": 1791928569675,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "provider": "openai-codex",
+          "model": "gpt-6.1-sol",
+          "mode": "SDK bound tui, no rendered TUI",
+          "auth": "default Pi service, no synthetic delays",
+          "deadlineMs": 30000
+        },
+        {
+          "at": 1791928569677,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791928571741,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791928571742,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791928571742,
+          "type": "transport.send",
+          "marker": "LIVE-M1",
+          "idle": false
+        },
+        {
+          "at": 1791928571748,
+          "type": "transport.receipt",
+          "marker": "LIVE-M1"
+        },
+        {
+          "at": 1791928571748,
+          "type": "observe.begin",
+          "boundMs": 30000
+        },
+        {
+          "at": 1791928571748,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791928571750,
+          "type": "consumed",
+          "marker": "LIVE-M1",
+          "count": 1
+        },
+        {
+          "at": 1791928573882,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791928573882,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791928573883,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791928601748,
+          "type": "result",
+          "consumed": 1,
+          "errors": 0,
+          "runError": false,
+          "idle": true,
+          "pending": 0,
+          "noSecondSend": true
+        }
+      ]
+    },
+    "fork-assistant-end": {
+      "sha256": "386fd6a9104838e19491ca35956fc8fd959f5b5cd81174f95b88cd5b41a0386f",
+      "events": [
+        {
+          "at": 1791929184202,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "assistant-end",
+          "os": "linux",
+          "session": "01a1374d-6fb5-71da-ba32-6653f83916aa",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929184204,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929184205,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929184206,
+          "type": "edge.inject",
+          "eventName": "message_end",
+          "idle": false
+        },
+        {
+          "at": 1791929184206,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929184212,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1374d-6fb5-71da-ba32-6653f83916aa)]\nM1"
+          ]
+        },
+        {
+          "at": 1791929184213,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929184213,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929184214,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791929184214,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1374d-6fb5-71da-ba32-6653f83916aa)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929184214,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929184214,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929184215,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929184215,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929184215,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929214216,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929214216,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1374d-6fb5-71da-ba32-6653f83916aa)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-tool-end": {
+      "sha256": "d22e6718d0bc30f43cd457981f35c13aa855b1793010793c74586aaf90897353",
+      "events": [
+        {
+          "at": 1791929215156,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "tool-end",
+          "os": "linux",
+          "session": "01a1374d-e8a7-7502-8c64-94de7716d166",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929215159,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929215159,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929215160,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791929215161,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791929215161,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791929215162,
+          "type": "edge.inject",
+          "eventName": "tool_execution_end",
+          "idle": false
+        },
+        {
+          "at": 1791929215162,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929215168,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1374d-e8a7-7502-8c64-94de7716d166)]\nM1"
+          ]
+        },
+        {
+          "at": 1791929215169,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929215169,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791929215170,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791929215170,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1374d-e8a7-7502-8c64-94de7716d166)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929215170,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929215170,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929215171,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929215171,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929215171,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929245171,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929245171,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1374d-e8a7-7502-8c64-94de7716d166)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-agent-end": {
+      "sha256": "f33316255d8e752b3646cf1ce592001ba444a7c3d1bcd848d0eca6044d4690cd",
+      "events": [
+        {
+          "at": 1791929246105,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "agent-end",
+          "os": "linux",
+          "session": "01a1374e-618c-7274-8356-597e7c4f7543",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929246107,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929246108,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929246109,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929246109,
+          "type": "edge.inject",
+          "eventName": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929246109,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929246115,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1374e-618c-7274-8356-597e7c4f7543)]\nM1"
+          ]
+        },
+        {
+          "at": 1791929246116,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929246116,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929246117,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929246117,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791929246117,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1374e-618c-7274-8356-597e7c4f7543)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929246117,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929246117,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929246118,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929246118,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929246118,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929276118,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929276118,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1374e-618c-7274-8356-597e7c4f7543)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "fork-settled": {
+      "sha256": "f45ffe2c6fce5d712f9f42a96468c2af62f23a58cf828413d311b643ec316d1d",
+      "events": [
+        {
+          "at": 1791929277033,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "fork",
+          "shape": "settled",
+          "os": "linux",
+          "session": "01a1374e-da54-70c1-a71a-6a8321ea2ad7",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929277035,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929277036,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929277037,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929277037,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929277038,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929277038,
+          "type": "edge.inject",
+          "eventName": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929277038,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791929277045,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929277046,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929277046,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929277046,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1374e-da54-70c1-a71a-6a8321ea2ad7)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929277047,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929277047,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929277047,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929277047,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929277047,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929307047,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929307047,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1374e-da54-70c1-a71a-6a8321ea2ad7)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-assistant-end": {
+      "sha256": "ed3ead5206d67af37933bbfeb6fb793f5d698a6a42e5b760e44b558a6a4edeae",
+      "events": [
+        {
+          "at": 1791929307968,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "assistant-end",
+          "os": "linux",
+          "session": "01a1374f-532b-7239-89c0-b963ace1e9fb",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929307971,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929307971,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929307972,
+          "type": "edge.inject",
+          "eventName": "message_end",
+          "idle": false
+        },
+        {
+          "at": 1791929307972,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929307978,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1374f-532b-7239-89c0-b963ace1e9fb)]\nM1"
+          ]
+        },
+        {
+          "at": 1791929307979,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929307979,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929307980,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791929307980,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1374f-532b-7239-89c0-b963ace1e9fb)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929307980,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929307980,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929307981,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929307981,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929307981,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929337982,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929337982,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1374f-532b-7239-89c0-b963ace1e9fb)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-tool-end": {
+      "sha256": "d6e4aeb25c9915cce7ff3ba76f8bf1924ebf5c1aee85e9c4ba47a1d92f23ad0e",
+      "events": [
+        {
+          "at": 1791929338937,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "tool-end",
+          "os": "linux",
+          "session": "01a1374f-cc2c-7234-a0f0-93d90fdc8cc9",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929338940,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929338940,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929338941,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791929338942,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791929338942,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791929338942,
+          "type": "edge.inject",
+          "eventName": "tool_execution_end",
+          "idle": false
+        },
+        {
+          "at": 1791929338942,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929338949,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a1374f-cc2c-7234-a0f0-93d90fdc8cc9)]\nM1"
+          ]
+        },
+        {
+          "at": 1791929338950,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929338950,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791929338951,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791929338951,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a1374f-cc2c-7234-a0f0-93d90fdc8cc9)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929338951,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929338951,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929338952,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929338952,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929338952,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929368952,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929368952,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a1374f-cc2c-7234-a0f0-93d90fdc8cc9)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-agent-end": {
+      "sha256": "9997ec338216b2c0d495d810eea992b7439cfa9504597a11206fea4a3110300d",
+      "events": [
+        {
+          "at": 1791929369887,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "agent-end",
+          "os": "linux",
+          "session": "01a13750-4512-779d-a298-f966577d5ec9",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929369890,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929369890,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929369891,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929369891,
+          "type": "edge.inject",
+          "eventName": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929369891,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929369897,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a13750-4512-779d-a298-f966577d5ec9)]\nM1"
+          ]
+        },
+        {
+          "at": 1791929369898,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929369899,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929369899,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929369899,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791929369899,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a13750-4512-779d-a298-f966577d5ec9)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929369899,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929369899,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929369900,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929369900,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929369900,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929399900,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929399900,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a13750-4512-779d-a298-f966577d5ec9)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-settled": {
+      "sha256": "bc7603d637e5d496db9e54da7b4ae63d7f9ff95b2da38a580fa5b631ee61c107",
+      "events": [
+        {
+          "at": 1791929400847,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "settled",
+          "os": "linux",
+          "session": "01a13750-be02-7153-a8ec-14bf2c88a123",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929400849,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929400849,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929400851,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929400851,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929400851,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929400852,
+          "type": "edge.inject",
+          "eventName": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929400852,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791929400859,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929400859,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929400860,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929400860,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a13750-be02-7153-a8ec-14bf2c88a123)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929400860,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929400860,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929400860,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929400860,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929400860,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929430861,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929430861,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a13750-be02-7153-a8ec-14bf2c88a123)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-idle": {
+      "sha256": "1935b075be901f73165df1a333c5bc8d4d66666ee4c1bf127b3696961d9b4352",
+      "events": [
+        {
+          "at": 1791929431802,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "idle",
+          "os": "linux",
+          "session": "01a13751-36ed-7796-a5a7-1e62d4043951",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929431802,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791929431809,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929431809,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": false
+        },
+        {
+          "at": 1791929431811,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929431811,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a13751-36ed-7796-a5a7-1e62d4043951)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929431813,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929431813,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929431813,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929431814,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929461810,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929461810,
+          "type": "result",
+          "consumed": [
+            "[Intercom agent message from Coordinator (01a13751-36ed-7796-a5a7-1e62d4043951)]\nM1"
+          ],
+          "errors": [],
+          "requests": 1,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-before-settle": {
+      "sha256": "3acffe2030786f6ceb07c3732856a2e17b20e664e118d6e53c41569039fbd3bc",
+      "events": [
+        {
+          "at": 1791929462743,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "before-settle",
+          "os": "linux",
+          "session": "01a13751-afc2-72d7-b122-6328f683cea6",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929462745,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929462745,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929462746,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929462747,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929462747,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929462747,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929462754,
+          "type": "queue_update",
+          "idle": false,
+          "steering": [
+            "[Intercom agent message from Coordinator (01a13751-afc2-72d7-b122-6328f683cea6)]\nM1"
+          ]
+        },
+        {
+          "at": 1791929462755,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929462755,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929462755,
+          "type": "queue_update",
+          "idle": false,
+          "steering": []
+        },
+        {
+          "at": 1791929462755,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a13751-afc2-72d7-b122-6328f683cea6)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929462755,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929462755,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929462756,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929462756,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929462756,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929492756,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929492756,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a13751-afc2-72d7-b122-6328f683cea6)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "upstream-input-cross-settle": {
+      "sha256": "81cd6e19eba4b41dfff957fe39b5f9c7b3001516d2ef88b7c710a6d6121f005c",
+      "events": [
+        {
+          "at": 1791929493680,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/upstream/dist/index.js",
+          "variant": "upstream",
+          "shape": "input-cross-settle",
+          "os": "linux",
+          "session": "01a13752-289b-7130-a835-8663b631e2b7",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929493682,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929493683,
+          "type": "consumed",
+          "text": "START",
+          "idle": false
+        },
+        {
+          "at": 1791929493684,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929493684,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929493685,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929493685,
+          "type": "transport.send",
+          "marker": "M1",
+          "idle": false
+        },
+        {
+          "at": 1791929493690,
+          "type": "input.held"
+        },
+        {
+          "at": 1791929493692,
+          "type": "transport.receipt",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929493692,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929493692,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929493692,
+          "type": "input.released"
+        },
+        {
+          "at": 1791929493693,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929493693,
+          "type": "consumed",
+          "text": "[Intercom agent message from Coordinator (01a13752-289b-7130-a835-8663b631e2b7)]\nM1",
+          "idle": false
+        },
+        {
+          "at": 1791929493693,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929493693,
+          "type": "agent_end",
+          "idle": false
+        },
+        {
+          "at": 1791929493693,
+          "type": "boundary",
+          "idle": false
+        },
+        {
+          "at": 1791929493694,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929523693,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929523693,
+          "type": "result",
+          "consumed": [
+            "START",
+            "[Intercom agent message from Coordinator (01a13752-289b-7130-a835-8663b631e2b7)]\nM1"
+          ],
+          "errors": [],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ]
+    },
+    "host-regression-final": {
+      "sha256": "45c43eebc0db88589996abe72df0c1caa0961863f4373c3cf6694b93543198af",
+      "events": [
+        {
+          "at": 1791929114358,
+          "type": "manifest",
+          "pi": "1.2.0",
+          "artifact": "/tmp/pi-intercom-2.OnAFFC/fork/dist/index.js",
+          "variant": "host",
+          "shape": "native-auth-race",
+          "os": "linux",
+          "session": "01a1374c-5ee7-7332-83ac-a956cb7c5d3c",
+          "deadlineMs": 30000,
+          "provider": "scripted-no-network",
+          "activeTools": [
+            "fixture_hold"
+          ]
+        },
+        {
+          "at": 1791929114361,
+          "type": "sdk.send",
+          "marker": "M1",
+          "idle": true
+        },
+        {
+          "at": 1791929114361,
+          "type": "sdk.returned",
+          "marker": "M1"
+        },
+        {
+          "at": 1791929114362,
+          "type": "auth.held"
+        },
+        {
+          "at": 1791929114362,
+          "type": "sdk.send",
+          "marker": "M2",
+          "idle": true
+        },
+        {
+          "at": 1791929114362,
+          "type": "sdk.returned",
+          "marker": "M2"
+        },
+        {
+          "at": 1791929114363,
+          "type": "agent_start",
+          "idle": false
+        },
+        {
+          "at": 1791929114363,
+          "type": "consumed",
+          "text": "M2",
+          "idle": false
+        },
+        {
+          "at": 1791929114364,
+          "type": "assistant.end",
+          "stopReason": "toolUse"
+        },
+        {
+          "at": 1791929114365,
+          "type": "tool.held"
+        },
+        {
+          "at": 1791929114365,
+          "type": "auth.released"
+        },
+        {
+          "at": 1791929114366,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929114366,
+          "type": "extension.error",
+          "event": "direct_sdk_send",
+          "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+        },
+        {
+          "at": 1791929114386,
+          "type": "observe.begin",
+          "boundMs": 30000,
+          "idle": true
+        },
+        {
+          "at": 1791929114386,
+          "type": "tool.released"
+        },
+        {
+          "at": 1791929114386,
+          "type": "tool.end",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "released"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "at": 1791929114387,
+          "type": "assistant.end",
+          "stopReason": "stop"
+        },
+        {
+          "at": 1791929114387,
+          "type": "agent_end",
+          "idle": true
+        },
+        {
+          "at": 1791929114388,
+          "type": "boundary",
+          "idle": true
+        },
+        {
+          "at": 1791929114388,
+          "type": "agent_settled",
+          "idle": true
+        },
+        {
+          "at": 1791929144392,
+          "type": "observe.end",
+          "idle": true,
+          "pending": 0
+        },
+        {
+          "at": 1791929144393,
+          "type": "result",
+          "consumed": [
+            "M2"
+          ],
+          "errors": [
+            {
+              "at": 1791929114366,
+              "type": "extension.error",
+              "event": "direct_sdk_send",
+              "error": "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            }
+          ],
+          "requests": 2,
+          "idle": true,
+          "pending": 0
+        }
+      ],
+      "expectedExit": 1,
+      "stderr": "node:internal/modules/run_main:107\n    triggerUncaughtException(\n    ^\n\nAssertionError [ERR_ASSERTION]: valid submitted inputs must be consumed once in submission order\n+ actual - expected\n\n  [\n-   'M1',\n    'M2'\n  ]\n\n    at file:///home/agentdev/workspaces/projects/.worktrees/pi-intercom/2-queued-delivery/docs/fixtures/2-queued-delivery/host-session.mjs:125:12 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: [ 'M2' ],\n  expected: [ 'M1', 'M2' ],\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v24.21.0\n"
+    }
+  },
+  "status": "On Hold; completed observations only; original stall not reproduced; no repair authorized"
+}
