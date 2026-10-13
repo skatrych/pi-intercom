@@ -55,21 +55,25 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
     const workers = sortWorkersByConnection(snapshot.config.agents.filter(agent => !agent.coordinator), snapshot.connections, now);
     // Connection is independent of historical activity and public reports.
     const wide = width >= 100;
+    const roleWidth = width >= 120 ? 12 : 0;
     const nameWidth = wide ? Math.min(22, Math.max(10, width - 100)) : Math.max(1, Math.min(10, width - 16));
     const activityWidth = 8, ageWidth = 16, reportWidth = 16;
-    const table = (name: string, connection: string, activity: string, age: string, detail: string, report = '—', tone = '90', selected = false) => {
+    const table = (name: string, connection: string, activity: string, age: string, detail: string, report = '—', tone = '90', selected = false, role = '') => {
       const prefix = `${selected ? '› ' : '  '}${cell(name, nameWidth)}  `;
+      const rolePart = roleWidth ? `${cell(role || '—', roleWidth)}  ` : '';
       const status = cell(connection, 12);
       const tail = `  ${cell(report, reportWidth)}  ${cell(activity, activityWidth)}${width >= 78 ? `  ${cell(age, ageWidth)}` : ''}${wide ? `  ${detail}` : ''}`;
       // Clip each lower-priority section independently so a truncated tail never
       // steals space from a fully fitting connection label. Styling is trusted.
       const namePart = clip(prefix, width);
-      const statusRoom = Math.max(0, width - visibleWidth(namePart));
+      const roleRoom = Math.max(0, width - visibleWidth(namePart));
+      const roleText = clip(rolePart, roleRoom);
+      const statusRoom = Math.max(0, roleRoom - visibleWidth(roleText));
       const statusPart = clip(status, statusRoom);
       const tailRoom = Math.max(0, statusRoom - visibleWidth(statusPart));
-      return (selected ? paint('1;36', namePart) : namePart) + paint(tone, statusPart) + dim(clip(tail, tailRoom));
+      return (selected ? paint('1;36', namePart) : namePart) + dim(roleText) + paint(tone, statusPart) + dim(clip(tail, tailRoom));
     };
-    lines.push(paint('1', table('Worker', 'Connection', 'Activity', 'Seen', 'Last activity', 'Report')));
+    lines.push(paint('1', table('Worker', 'Connection', 'Activity', 'Seen', 'Last activity', 'Report', '90', false, roleWidth ? 'Role' : '')));
     lines.push(dim(line('  ' + '─'.repeat(Math.max(0, width - 2)))));
     const selectedIndex = Math.min(workers.length - 1, Math.max(-1, options.selectedIndex ?? -1));
     const showDetails = Boolean(options.details && selectedIndex >= 0 && height >= 8);
@@ -95,7 +99,8 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
       ];
       const selected = start + offset === selectedIndex;
       const report = snapshot.reports?.find(report => report.sessionId === worker.sessionId && reportLabels[report.status]);
-      lines.push(table(worker.name, connection.state, activity, age, evidence, report ? reportLabels[report.status] : '—', tone, selected));
+      lines.push(table(worker.name, connection.state, activity, age, evidence, report ? reportLabels[report.status] : '—', tone, selected, worker.role ?? ''));
+      const roleDetail = line(`  Role: ${worker.role || 'none'}`);
       if (selected && showDetails && hasSaved) {
         const savedAge = (timestamp: string) => {
           const elapsed = now - Date.parse(timestamp);
@@ -119,6 +124,7 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
           line(`  Responsibility: ${worker.description || 'Not specified'}`),
           line(`  Observed status: ${activity} · ${age}`),
           line(`  Last activity: ${evidence}`),
+          roleDetail,
           ...(closeJob ? [line(`  Close updated: ${closeJob.updatedAt}`), line('  Workflow state is not proof all child processes terminated')] : []),
         ];
       } else if (selected && showDetails && report) {
@@ -136,12 +142,14 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
           line(`  Report: ${reportLabels[report.status]} · ${reportAge}`),
           line('  Self-reported, pending review'),
           ...wrapSummary(`Summary: ${report.summary}`, Math.max(0, width - 2), Math.max(0, detailBudget - 2 - contextRows.length)).map(text => line(`  ${text}`)),
+          roleDetail,
         ];
       } else if (selected && showDetails) selectedDetail = [
         ...connectionDetails,
         line(`  Responsibility: ${worker.description || 'Not specified'}`),
         line(`  Observed status: ${activity} · ${age}`),
         line(`  Last activity: ${evidence}`),
+        roleDetail,
       ];
     }
     if (workers.length > count && available > count) lines.push(dim(line(`  ${workers.length - count} more · rows ${count ? start + 1 : 0}–${start + count} of ${workers.length} · ↑↓ to browse`)));
