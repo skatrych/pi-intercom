@@ -188,9 +188,9 @@ test('rotated bounded probes retain not_checked evidence, then expire it truthfu
   h.setRows(310); h.monitor.start(); await settle(); h.tick(); await settle();
   assert.deepEqual(starts, ['w0', 'w1']);
   // w1 was previously not checked, and w0 is outside this rotated slice.
-  assert.match(h.monitor.render(140).join('\n'), /Worker-0\s+disconnected/);
+  assert.match(h.monitor.render(140).join('\n'), /Worker-0\s+—\s+disconnected/);
   time += 31000;
-  assert.match(h.monitor.render(140).join('\n'), /Worker-0\s+unknown/);
+  assert.match(h.monitor.render(140).join('\n'), /Worker-0\s+—\s+unknown/);
   h.monitor.close();
 });
 test('saved endpoint changes and removal invalidate cached checks without losing selection', async () => {
@@ -206,22 +206,22 @@ test('saved endpoint changes and removal invalidate cached checks without losing
   h.setRows(20); h.monitor.start(); await settle();
   // Sorted first roster selects Second; explicitly select the disconnected worker.
   h.monitor.handleInput('\x1b[B'); h.monitor.handleInput('\r');
-  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+disconnected/);
+  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+—\s+disconnected/);
   s = { ...s, config: { ...s.config, agents: s.config.agents.map(worker => worker.sessionId === 'w' ? { ...worker, port: 12002 } : worker) } };
   h.tick(); await settle();
-  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+unknown/);
+  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+—\s+unknown/);
   assert.match(h.monitor.render(140).join('\n'), /Checked: never/);
   assert.match(h.monitor.render(140).join('\n'), /Responsibility: Review only/);
   h.tick(); await settle();
-  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+disconnected/);
+  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+—\s+disconnected/);
   const saved = s.config.agents[0];
   s = { ...s, config: { ...s.config, agents: s.config.agents.slice(1) } };
   h.tick(); await settle();
-  assert.match(h.monitor.render(140).join('\n'), /› Second\s+connected/);
+  assert.match(h.monitor.render(140).join('\n'), /› Second\s+—\s+connected/);
   s = { ...s, config: { ...s.config, agents: [saved, ...s.config.agents] } };
   h.tick(); await settle();
-  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+unknown/);
-  assert.match(h.monitor.render(140).join('\n'), /› Second\s+connected/);
+  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+—\s+unknown/);
+  assert.match(h.monitor.render(140).join('\n'), /› Second\s+—\s+connected/);
   h.monitor.close();
 });
 test('not_checked result does not overwrite a prior verified check', async () => {
@@ -230,8 +230,8 @@ test('not_checked result does not overwrite a prior verified check', async () =>
     ? [connection('w', 'disconnected')]
     : [connection('w', 'unknown', 'not_checked', null)] });
   h.monitor.start(); await settle(); h.tick(); await settle();
-  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+disconnected/);
+  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+—\s+disconnected/);
   time += 31000; h.tick(); await settle();
-  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+unknown/);
+  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+—\s+unknown/);
   h.monitor.close();
 });

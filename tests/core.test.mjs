@@ -53,6 +53,9 @@ test('worker role round-trips as a logical name and legacy workers stay valid', 
   assert.throws(() => validateConfig({ ...saved, agents: [{ ...saved.agents[0], role: 'developer' }] }), /worker-only/);
   assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker('w3', 'Bad'), coordinator: false, role: '../developer' }] }), /invalid role/);
   assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker('w4', 'Injected'), coordinator: false, role: "developer';rm" }] }), /invalid role/);
+  for (const role of ['sessions', 'credentials', 'auth.json', 'history', 'cache', 'a'.repeat(65)]) {
+    assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker(`bad-${role}`, `Bad-${role}`), coordinator: false, role }] }), /invalid role/);
+  }
   await s.configure('c', { ...worker('w2', 'Other'), role: 'developer' });
   await s.configure('c', worker('w2', 'Renamed'));
   const kept = (await s.read()).agents.find(agent => agent.sessionId === 'w2');

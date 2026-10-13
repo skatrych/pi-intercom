@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { ActivityPhase, ActivityDetail } from './activity.js';
-import { ROLE_NAME } from './config.js';
+import { logicalRole } from './config.js';
 import { randomUUID } from 'node:crypto';
 import { appendFile, lstat, mkdir, opendir, rename, stat, unlink } from 'node:fs/promises';
 
@@ -59,7 +59,7 @@ export function sanitizeObservation(value: unknown): Observation | undefined {
   if (includes(['processing', 'thinking', 'responding', 'reading_files', 'editing_files', 'running_command', 'using_tool', 'multiple_tools', 'settled'], v.detail)) result.detail = v.detail;
   if (Number.isInteger(v.port) && Number(v.port) >= 1 && Number(v.port) <= 65535) result.port = Number(v.port);
   if (includes(['coordinator', 'worker', 'anonymous'], v.role)) result.role = v.role;
-  if (safeText(v.piRole, 64) && ROLE_NAME.test(v.piRole)) result.piRole = v.piRole;
+  if (safeText(v.piRole, 64) && logicalRole(v.piRole)) result.piRole = v.piRole;
   if (includes(OUTCOMES, v.outcome)) result.outcome = v.outcome;
   if (includes(ERROR_CODES, v.errorCode)) result.errorCode = v.errorCode;
   if (includes(OPERATIONS, v.operation)) result.operation = v.operation;

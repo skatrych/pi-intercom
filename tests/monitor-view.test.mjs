@@ -21,6 +21,19 @@ test('table-first layout separates activity from freshness and removes banners/c
   assert.equal(lines.length, 12);
   assert.match(lines.at(-1), /q quit/);
 });
+test('wide panes show the logical role beside the worker name', () => {
+  const s = snapshot();
+  s.config.agents[0].role = 'developer';
+  const wide = renderMonitor(s, 140, 18, now, false, { selectedIndex: 0, details: true });
+  assert.match(wide[0], /Worker\s+Role\s+Connection/);
+  assert.match(wide.join('\n'), /Builder\s+developer\s+unknown/);
+  assert.match(wide.join('\n'), /Reviewer\s+—\s+unknown/);
+  assert.match(wide.join('\n'), /Role: developer/);
+  const narrow = renderMonitor(s, 100, 18, now, false, { selectedIndex: 0, details: true });
+  assert.doesNotMatch(narrow[0], /\bRole\b/);
+  assert.match(narrow.join('\n'), /Role: developer/);
+  assert.match(narrow.join('\n'), /Responsibility:/);
+});
 test('narrow layout prioritizes connectivity; taller panes display more than five workers', () => {
   const s = snapshot();
   assert.match(renderMonitor(s, 60, 10, now).join('\n'), /Reviewer\s+unknown/);
@@ -69,7 +82,8 @@ test('public reports are distinct from observed activity and explicitly pending 
     const s = snapshot(); s.reports = [report(status)];
     const lines = renderMonitor(s, 140, 16, now, false, { selectedIndex: 0, details: true });
     assert.match(lines[0], /Connection\s+Report\s+Activity\s+Seen\s+Last activity/);
-    assert.match(lines[2], new RegExp(`Builder\\s+unknown\\s+${label}\\s+working\\s+3s ago`));
+    assert.match(lines[0], /Worker\s+Role\s+Connection/);
+    assert.match(lines[2], new RegExp(`Builder\\s+—\\s+unknown\\s+${label}\\s+working\\s+3s ago`));
     assert.match(lines.join('\n'), /self-reported, pending review/);
     assert.match(lines.join('\n'), /Summary: Please review this public result/);
     assert.doesNotMatch(lines.join('\n'), /approved|accepted|completed/i);
@@ -201,8 +215,8 @@ test('disconnected workers stay visible at bottom with active reports and indepe
   ];
   s.reports = [report('blocked', 'Still awaiting owner')];
   const lines = renderMonitor(s, 140, 22, now, false, { selectedIndex: 1, details: true });
-  assert.match(lines[2], /Reviewer\s+unknown/);
-  assert.match(lines[3], /› Builder\s+disconnected\s+Blocked\s+working/);
+  assert.match(lines[2], /Reviewer\s+—\s+unknown/);
+  assert.match(lines[3], /› Builder\s+—\s+disconnected\s+Blocked\s+working/);
   assert.match(lines.join('\n'), /Connection: disconnected · refused/);
   assert.match(lines.join('\n'), /Checked: 2026-09-26T11:59:58.000Z · 2s ago/);
   assert.match(lines.join('\n'), /Observed status: working · 3s ago/);
@@ -216,6 +230,6 @@ test('disconnected workers stay visible at bottom with active reports and indepe
     assert.ok(narrow.every(line => visibleWidth(line) <= width));
   }
   const stale = renderMonitor(s, 140, 12, now + 31000);
-  assert.match(stale[2], /Builder\s+unknown/);
+  assert.match(stale[2], /Builder\s+—\s+unknown/);
   assert.doesNotMatch(stale.join('\n'), /disconnected/);
 });
