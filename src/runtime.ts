@@ -91,6 +91,8 @@ export class Intercom {
   private initialId = '';
   responsibility?: Agent;
   private observer?: Observer;
+  /** A no-board Orchestrator must not create a board directory through logging before bootstrap. */
+  private observationEnabled = true;
   private closing?: Promise<void>;
   private reportWrites: Promise<void> = Promise.resolve();
   private pendingReports = 0;
@@ -151,6 +153,7 @@ export class Intercom {
     if (this.authorityReady) return;
     this.readyClaimBytes = readFileSync(path.join(this.store.root, 'coordinator-claim.md'), 'utf8');
     this.authorityReady = true;
+    this.observationEnabled = true;
     this.authorityDetail = 'coordinator action evidence is committed and this session is promoted';
     ++this.authorityEpoch;
   }
@@ -159,7 +162,7 @@ export class Intercom {
   private captureObserver(): (event: EventType, metadata?: EventMetadata) => void {
     const observer = this.observer;
     return (event, metadata = {}) => {
-      try { observer?.record(event, metadata); } catch { /* Logging cannot affect communication. */ }
+      try { if (this.observationEnabled) observer?.record(event, metadata); } catch { /* Logging cannot affect communication. */ }
     };
   }
   recordObservation(event: EventType, metadata: EventMetadata = {}): void { this.captureObserver()(event, metadata); }
@@ -197,10 +200,12 @@ export class Intercom {
     this.authorityReady = false;
     this.authorityDetail = 'not applicable';
     this.readyClaimBytes = undefined; this.bootEvidenceReady = false;
+    this.observationEnabled = !this.orchestratorLaunch();
     const generation = ++this.generation, assertValid = this.validity();
     let record = this.captureObserver();
     try {
       // Count the actual ancestor chain before discovery reads any config or observer creates state.
+      let countedRoot: string | undefined, countedBoard = false;
       if (this.orchestratorLaunch()) {
         const home = projectsHome({ projectsHome: this.options.adoption?.projectsHome ?? process.env[PROJECTS_HOME_ENV], homeDirectory: homedir() });
         const cwd = await realpath(this.host.cwd), root = await realpath(home);
@@ -209,10 +214,13 @@ export class Intercom {
         const boards = await countBoards(cwd, root);
         if (boards.length > 1 || (boards.length === 1 && boards[0] !== root)) fail('BOARD_COUNT: second or wrong board; stop, never cleanup');
         this.authorityEnabled = true;
+        countedRoot = root; countedBoard = boards.length === 1;
       }
-      const discovered = await ConfigStore.discover(this.host.cwd);
+      // Never discover above the already-counted projects home or fall back to an unrelated board.
+      const discovered = countedRoot ? (countedBoard ? new ConfigStore(countedRoot) : undefined) : await ConfigStore.discover(this.host.cwd);
       assertValid();
-      this.store = this.options.store?.(discovered?.root ?? this.host.cwd) ?? discovered ?? new ConfigStore(this.host.cwd);
+      this.store = this.options.store?.(discovered?.root ?? countedRoot ?? this.host.cwd) ?? discovered ?? new ConfigStore(countedRoot ?? this.host.cwd);
+      this.observationEnabled = !countedRoot || countedBoard;
       try { this.observer = this.options.observe ? this.options.observe(this.store.root, this.initialId) : new LocalObserver(this.store.root, this.initialId); } catch { /* Logging is optional on failure. */ }
       record = this.captureObserver();
       record('runtime.starting');

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { lstat } from 'node:fs/promises';
 import extension, { ADOPTION_CHANNEL } from '../dist/index.js';
 import { fixture } from './fixtures/adoption-support.mjs';
 import { commandContext, IDS } from './fixtures/adoption-fixture.mjs';
@@ -15,6 +16,25 @@ for (const launch of ['developer', 'metadata-only', 'contradictory']) test(`back
   const before = await f.board.read();
   assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).code, 'AUTH');
   assert.equal(await f.board.read(), before); assert.equal(f.ui.prompts.length, 0);
+});
+
+test('real adapter stays read-only while no-board host persists an ordinary non-coordinating turn', async t => {
+  const f = await fixture({ runtime: true, noBoard: true });
+  const keys = ['PI_ROLE_DIR', 'PI_ROLES_DIR', 'SWFACTORY_PROJECTS_HOME', 'PI_INTERCOM_WORKER_ROLE'];
+  const prior = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator'); process.env.PI_ROLES_DIR = path.join(f.home, 'roles'); process.env.SWFACTORY_PROJECTS_HOME = f.home; delete process.env.PI_INTERCOM_WORKER_ROLE;
+  const handlers = new Map(), bus = new Map();
+  t.after(async () => { await handlers.get('session_shutdown')?.(); await f.dispose(); for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
+    events: { on: (channel, handler) => { bus.set(channel, handler); return () => bus.delete(channel); } } });
+  const ctx = { ...f.context, sessionManager: { ...f.context.sessionManager, getBranch: () => [] }, ui: { notify() {}, setWidget() {} } };
+  await handlers.get('session_start')({}, ctx);
+  const offers = []; bus.get(ADOPTION_CHANNEL)({ offers }); assert.equal(offers.length, 1);
+  const prompt = await handlers.get('before_agent_start')({ systemPrompt: 'original fixture prompt' }, ctx);
+  assert.match(prompt.systemPrompt, /ordinary non-coordinating turn may persist/);
+  await handlers.get('agent_start')({}, ctx); await handlers.get('agent_settled')({}, ctx);
+  await handlers.get('session_shutdown')();
+  await assert.rejects(lstat(path.join(f.home, '.pi-intercom')), { code: 'ENOENT' });
 });
 
 test('bridge rejects copied session manager and uses captured UI, never caller dialogs', async t => {

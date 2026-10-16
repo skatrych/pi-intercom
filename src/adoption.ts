@@ -283,6 +283,7 @@ export async function runGit(args: string[], cwd: string): Promise<GitResult> {
 
 export class AdoptionWorkflow {
   private request?: Promise<Result>;
+  private readonly consumedDecisions = new WeakSet<Authority>();
   constructor(private readonly options: AdoptionOptions, private readonly git: (args: string[], cwd: string) => Promise<GitResult> = runGit) {}
 
   /** One request in flight. A second concurrent request never interleaves with a transaction. */
@@ -686,7 +687,7 @@ export class AdoptionWorkflow {
    * ended confirmation are typed into this session's own Pi UI: no parameter, argument, saved default,
    * or model text can supply them, and no decline produces a write.
    */
-  private async humanAdoptionDecision(context: CommandContext, surveyed: Survey, previousSessionId?: string): Promise<{ authority: Authority } | { stop: Result }> {
+  private async humanAdoptionDecision(context: CommandContext, surveyed: Survey, previousSessionId?: string, priorTransitionId?: string): Promise<{ authority: Authority } | { stop: Result }> {
     const identity = surveyed.identity, board = coordinator(surveyed.scanned!.config);
     const collision = surveyed.scanned!.config.agents.find(agent => agent.sessionId === identity.sessionId);
     if (collision !== undefined) {
@@ -700,6 +701,8 @@ export class AdoptionWorkflow {
     if (probe.state === 'connected') {
       return { stop: halt('OLD_CONNECTED', `configured coordinator ${board.sessionId} port ${board.port} still verifies at its endpoint; adoption stops and no record or config was written`) };
     }
+    const transitionId = priorTransitionId ?? (this.options.uuid?.() ?? randomUUID()).toLowerCase();
+    const previewHash = sha256(surveyed.scanned!.raw);
     if (previousSessionId === undefined) {
       const code = surveyed.claim ? 'CLAIM_OTHER' : 'ADOPTION_REQUIRED';
       const record = surveyed.claim ? `record ${surveyed.claim.coordinator.sessionId}/${surveyed.claim.coordinator.port}; ` : 'claim absent; ';
@@ -714,13 +717,14 @@ export class AdoptionWorkflow {
     const fenced = unchanged.filter(entry => entry.closeJob !== null && FENCED_STATES.includes(entry.closeJob.state));
     const confirmed = await context.ui.confirm({
       kind: 'adoptTransition',
-      prompt: `Adopt the board at ${surveyed.home}: coordinator ${board.sessionId} port ${board.port} -> ${identity.sessionId} port ${identity.port}. `
+      prompt: `Transition ${transitionId}; config SHA256 ${previewHash}. Adopt the board at ${surveyed.home}: coordinator ${board.sessionId} port ${board.port} -> ${identity.sessionId} port ${identity.port}. `
         + `Old endpoint probe: ${probe.state} (${probe.reason}) — disconnected and unknown are not evidence of termination. `
         + `Left unchanged: ${roster(unchanged)}${fenced.length ? `; close jobs reported and left fenced: ${fenced.map(entry => `${entry.name}/${entry.closeJob!.state}`).join(', ')}` : ''}. `
         + `No worker is sent anything, and nothing is resumed, removed, interrupted, reloaded or restarted. Confirm this exact transition.`,
     });
     if (!confirmed) return { stop: halt('CANCELLED', 'the exact transition was declined; no evidence, replacement or action is authorized') };
-    return { authority };
+    return { authority: Object.freeze({ ...authority, decision: Object.freeze({ transitionId, boardRoot: surveyed.home,
+      configSha256: previewHash, previous: Object.freeze({ sessionId: board.sessionId, port: board.port }), coordinator: Object.freeze({ sessionId: identity.sessionId, port: identity.port }) }) }) };
   }
   /** AC4: the authority reference and the exact ended wording, or a named refusal. */
   private async askAuthority(context: CommandContext, kind: 'first-coordinator declaration' | 'adoption', home: string, oldSessionId = '', preview = ''): Promise<Authority | { stop: Result }> {
@@ -739,7 +743,7 @@ export class AdoptionWorkflow {
     if (wording !== ENDED_WORDING(oldSessionId)) {
       return { stop: halt('CONFIRMATION', 'the required wording was not typed exactly; disconnected and unknown are not evidence of termination, and an approximation cannot confirm it') };
     }
-    return { record: record.trim(), wording, confirmedEndedAt: captured };
+    return { record: record.trim(), wording, confirmedEndedAt: (this.options.now?.() ?? new Date()).toISOString() };
   }
 
   // ---- the transaction -----------------------------------------------------------------
@@ -752,6 +756,11 @@ export class AdoptionWorkflow {
    */
   private async transaction(context: CommandContext, surveyed: Survey, board: Agent, authority: Authority, renewed?: ClaimRecord): Promise<Result> {
     const identity = surveyed.identity, home = surveyed.home, scanned = surveyed.scanned!;
+    const decision = authority.decision;
+    if (!decision || this.consumedDecisions.has(authority) || decision.boardRoot !== home || decision.configSha256 !== sha256(scanned.raw)
+      || decision.previous.sessionId !== board.sessionId || decision.previous.port !== board.port || decision.coordinator.sessionId !== identity.sessionId || decision.coordinator.port !== identity.port
+      || (renewed && decision.transitionId !== renewed.transitionId)) return halt('CONFIRMATION', 'the one-use human decision is absent, consumed or not bound to this exact transition preview');
+    this.consumedDecisions.add(authority);
     const store = this.options.storeFor(home);
     const epoch = this.options.readiness.close();
     const unchanged = leftUnchanged(scanned);
@@ -768,7 +777,7 @@ export class AdoptionWorkflow {
         const expected = patchCoordinatorEntry(scanned.raw, identity.sessionId, identity.port).after;
         const intent: ClaimRecord = {
           schemaVersion: 1,
-          transitionId: renewed?.transitionId ?? (this.options.uuid?.() ?? randomUUID()).toLowerCase(),
+          transitionId: decision.transitionId,
           phase: 'prepared',
           boardRoot: home,
           coordinator: { sessionId: identity.sessionId, port: identity.port },
@@ -894,7 +903,7 @@ export class AdoptionWorkflow {
       if (board.sessionId !== intent.previous.sessionId || board.port !== intent.previous.port || sha256(patchCoordinatorEntry(surveyed.scanned!.raw, identity.sessionId, identity.port).after) !== intent.configAfterSha256) return halt('RECOVERY_REQUIRED', 'prepared-before identity or expected replacement hash is inconsistent');
       // Prepared + exact old config: the decision is recorded, the takeover is not. A new human
       // decision and a refreshed authority/timestamp commit precede completion, same transition id.
-      const decided = await this.humanAdoptionDecision(context, surveyed, intent.previous.sessionId);
+      const decided = await this.humanAdoptionDecision(context, surveyed, intent.previous.sessionId, intent.transitionId);
       if ('stop' in decided) return decided.stop;
       return this.transaction(context, surveyed, board, decided.authority, intent);
     }
@@ -1139,7 +1148,11 @@ export async function bootClaimEvidence(input: { home: string; identity: { sessi
   }
   return { ready: true, detail: `${CLAIM_FILE} active evidence matches this board and session (commit ${commit})` };
 }
-interface Authority { record: string; wording: string; confirmedEndedAt: string }
+interface Authority {
+  record: string; wording: string; confirmedEndedAt: string;
+  decision?: { transitionId: string; boardRoot: string; configSha256: string;
+    previous: { sessionId: string; port: number }; coordinator: { sessionId: string; port: number } };
+}
 function declaration(surveyed: Survey, authority: Authority, options: { uuid?(): string; now?(): Date }): ClaimRecord {
   const hash = sha256(surveyed.scanned!.raw);
   return {

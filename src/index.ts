@@ -175,6 +175,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     // anonymous session: adoption and read-only status are exactly what those sessions need. The offer
     // closure reads the current runtime at emit time and re-checks this generation at invoke time.
     offerAdoptionBackend();
+    if (!current.coordinatorActionReady()) return; // held authority does not run boot cleanup/monitor checks
     try {
       if ((await current.state()).me?.coordinator) {
         try { await current.retireDashboardMetadata(); }
@@ -269,9 +270,13 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   pi.on('before_agent_start', async (event, ctx) => {
     context = ctx;
     if (!runtime) return;
-    const { me } = await runtime.state();
+    const state = await runtime.state().catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    const me = state?.me;
     const loaded = runtime.responsibility;
-    return { systemPrompt: event.systemPrompt + '\n\nPiIntercom: communicates; Pi decides orchestration. Responsibility is not a work assignment. Do not implement unrelated work from findings. After assigned work, report as instructed and wait; do not autonomously exit. Progress questions require reporting and continuing unless explicitly redirected. stop_worker remains disabled due to the host cancellation blocker. close_worker is a separate Linux Herdr background handoff-and-pane-close workflow: do not self-exit, remove registration, force kill or infer completion from job acceptance.\n' + (me && loaded ? `Identity: ${loaded.name} (${me.sessionId}). Responsibility: ${loaded.description}.` : 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.') };
+    return { systemPrompt: event.systemPrompt + '\n\nPiIntercom: communicates; Pi decides orchestration. Responsibility is not a work assignment. Do not implement unrelated work from findings. After assigned work, report as instructed and wait; do not autonomously exit. Progress questions require reporting and continuing unless explicitly redirected. stop_worker remains disabled due to the host cancellation blocker. close_worker is a separate Linux Herdr background handoff-and-pane-close workflow: do not self-exit, remove registration, force kill or infer completion from job acceptance.\n' + (!state ? 'No board is initialized: coordinator action is held. An ordinary non-coordinating turn may persist this Pi session; the human then uses /intercom-adopt status for the explicit projects-home bootstrap decision. Do not create a private board or edit claim/config state.' : me && loaded ? `Identity: ${loaded.name} (${me.sessionId}). Responsibility: ${loaded.description}.` : 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.') };
   });
   for (const [operation, description, parameters] of tools) {
     pi.registerTool({

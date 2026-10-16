@@ -19,7 +19,9 @@ Application role gating is not an OS sandbox against malicious same-user code.
 
 The expected projects home is `SWFACTORY_PROJECTS_HOME`, default `~/workspaces/projects`. Count
 `.pi-intercom` directories on **cwd→home ancestors**, before config discovery or initialization.
-Second/wrong/unsafe boards stop; no automatic cleanup. The skill's separate creation-time depth4
+Second/wrong/unsafe boards stop; no automatic cleanup. Orchestrator discovery is bounded to the
+counted projects home (never above it), and a prospective no-board observer cannot create a board
+via its log directory before deliberate bootstrap. The skill's separate creation-time depth4
 scan is not this ancestor check. No-board child cwd never creates a private board. Root bootstrap
 requires its own UI decision and a committed first-coordinator declaration.
 
@@ -28,7 +30,9 @@ the runtime ready endpoint and its health route establish the port. Neither is a
 Registered-worker ids and port collisions stop. A connected old endpoint unconditionally stops.
 Disconnected/unknown do not prove termination. The backend's captured Pi UI obtains an authority
 reference, exactly `I confirm coordinator <old-sessionId> ended`, then affirmative consent to the
-specific board/config/roster transition. Cancel/blank/false/stale preview changes nothing.
+specific board/config/roster transition. Its UUID and config hash are displayed before final consent;
+the immutable decision is one-use and the ended timestamp is captured after the wording. Cancel/
+blank/false/stale preview changes nothing.
 
 Under the common all-writer transaction, the workflow commits **prepared intent before replacement**,
 losslessly patches only the coordinator sessionId/port tokens, commits active evidence, and loads
@@ -99,7 +103,8 @@ node tests/fixtures/adoption-runner.mjs <fixed-case-name>
 ```
 
 `npm test` explicitly wires the fixture runner, independent claim/bridge/runtime tests, HTTP readiness
-phase/epoch/report-save/reminder barriers and barrier-controlled separate-process races/crashes.
+phase/epoch/report-save/reminder barriers, real-default-observer no-board/above-home boot guards,
+one-use preview binding and barrier-controlled separate-process races/crashes.
 Missing/unimplemented cases fail, never skip/green. Fixtures are isolated temporary git boards,
 persisted session data and ephemeral loopback listeners; no live board/ports/auth/Pi workers/models.
 The process-crash tests kill only their own disposable children, verify stale locks still stop other
