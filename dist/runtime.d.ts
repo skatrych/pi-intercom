@@ -4,7 +4,7 @@ import { listen, send, type Endpoint, type Envelope, type Kind } from './transpo
 import { probeWorker } from './connections.js';
 import { type CloseProvider } from './handoff.js';
 import { type ReminderClock } from './reminders.js';
-import { type CommandContext, type Result } from './adoption.js';
+import { type AdoptionPhase, type CommandContext, type Result } from './adoption.js';
 export declare const UNSUPPORTED_CANCELLATION = "Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).";
 export declare const ADOPTION_NOT_READY = "ADOPTION_NOT_READY";
 export interface Host {
@@ -49,6 +49,8 @@ export interface AdoptionDeps {
         id: string;
         path: string;
     }[]>;
+    phase(phase: AdoptionPhase): Promise<void>;
+    reportPhase(phase: 'admitted' | 'before-save' | 'after-save'): Promise<void>;
 }
 export declare class Intercom {
     readonly host: Host;
@@ -70,6 +72,7 @@ export declare class Intercom {
     private roleResolved;
     private resolvedRole?;
     private handoff?;
+    private readonly callbackEpoch;
     private reminders?;
     private reminderRevision;
     private reminderInvocation;
@@ -85,6 +88,7 @@ export declare class Intercom {
     private authorityReady;
     private authorityEpoch;
     private authorityDetail;
+    private readyClaimBytes?;
     private adoption?;
     /** Closed when an adoption or declaration transaction invalidated an earlier callback epoch. */
     private actionEpoch;
@@ -96,10 +100,15 @@ export declare class Intercom {
     workerSettled(successfulToolCallIds: ReadonlySet<string>): void;
     private captureObserver;
     recordObservation(event: EventType, metadata?: EventMetadata): void;
+    private readonly launchRoleDirectory;
+    private readonly launchRolesDirectory;
+    private readonly launchWorkerRole;
     constructor(host: Host, options: RuntimeOptions);
     private id;
     private validity;
     start(): Promise<void>;
+    private startServices;
+    private bootEvidenceReady;
     close(): Promise<void>;
     /**
      * ADR 0005 D3 preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
@@ -133,7 +142,7 @@ export declare class Intercom {
     /** Accept old configs, but retire the removed browser dashboard's discovery metadata. */
     retireDashboardMetadata(): Promise<void>;
     reload(): Promise<void>;
-    transmit(to: string, kind: Kind, payload?: Record<string, unknown>): Promise<void>;
+    transmit(to: string, kind: Kind, payload?: Record<string, unknown>, guard?: () => void): Promise<void>;
     report(): Promise<void>;
     /** Logical role for registration and status. Invalid metadata is omitted; it does not stop messaging. */
     private reportedRole;

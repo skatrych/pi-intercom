@@ -101,7 +101,7 @@ export default function intercomExtension(pi) {
     let monitorTask;
     async function ensureCoordinatorMonitor(current, ctx, started) {
         const isCurrent = () => started === generation && runtime === current;
-        if (!isCurrent())
+        if (!isCurrent() || !current.coordinatorActionReady())
             return;
         if (monitorTask?.runtime === current && monitorTask.generation === started) {
             monitorTask.dirty = true;
@@ -110,13 +110,13 @@ export default function intercomExtension(pi) {
         const check = async () => {
             try {
                 const { config, me, id } = await current.state();
-                if (!isCurrent() || !me?.coordinator || !config.agents.some(agent => !agent.coordinator))
+                if (!isCurrent() || !current.coordinatorActionReady() || !me?.coordinator || !config.agents.some(agent => !agent.coordinator))
                     return;
                 const monitor = await ensureMonitorPane({
                     root: current.store.root, sessionId: id,
                     script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
-                    assertCurrent: () => { if (!isCurrent())
-                        throw new Error('Coordinator session changed'); },
+                    assertCurrent: () => { if (!isCurrent() || !current.coordinatorActionReady())
+                        throw new Error('Coordinator session changed or adoption not ready'); },
                 });
                 if (isCurrent())
                     ctx.ui.notify(`Intercom status monitor: ${monitor.outcome}${monitor.pane ? ` (${monitor.pane})` : ''}`, 'info');
@@ -144,6 +144,8 @@ export default function intercomExtension(pi) {
     }
     pi.on('session_start', async (_event, ctx) => {
         const started = ++generation;
+        unsubscribeAdoption?.();
+        unsubscribeAdoption = undefined;
         activity.reset();
         const oldRuntime = runtime;
         runtime = undefined;
@@ -249,7 +251,7 @@ export default function intercomExtension(pi) {
                         return stopResult('SESSION_CHANGED', 'the runtime or session that offered this service is gone; no act was attempted');
                     if (!caller || typeof caller !== 'object' || typeof caller.sessionManager?.getSessionId !== 'function')
                         return stopResult('USAGE', 'a supported Pi command context is required; identity and confirmation are never serialized parameters');
-                    if (caller.sessionManager.getSessionId() !== captured.sessionManager.getSessionId())
+                    if (caller.sessionManager !== captured.sessionManager || caller.cwd !== captured.cwd || caller.sessionManager.getSessionId() !== captured.sessionManager.getSessionId())
                         return stopResult('SESSION_CHANGED', 'the command context session is not this runtime session; no act was attempted');
                     const waitForIdle = typeof caller.waitForIdle === 'function' ? () => caller.waitForIdle() : undefined;
                     return offered.adoptCoordinator(adoptionContext(captured, waitForIdle), verb, args ?? []);

@@ -1,4 +1,5 @@
 import { mkdir, readFile, realpath, rename, unlink, open, link, stat, rmdir } from 'node:fs/promises';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -79,8 +80,6 @@ export function validateConfig(value) {
     return c;
 }
 export const coordinator = (c) => c.agents.find(a => a.coordinator);
-const MAX_JSON_DEPTH = 16;
-const MAX_SPAN_NODES = 4096;
 /**
  * Strict JSON reader with byte spans and duplicate-key rejection.
  * Duplicate keys are ambiguous, so the lossless patch could not choose a token; they are a
@@ -91,7 +90,6 @@ export class JsonDocument {
     text;
     source;
     at = 0;
-    nodes = 0;
     constructor(text, source = 'document') {
         this.text = text;
         this.source = source;
@@ -113,8 +111,6 @@ export class JsonDocument {
         this.at++;
     }
     value(depth) {
-        if (depth > MAX_JSON_DEPTH || ++this.nodes > MAX_SPAN_NODES)
-            fail(`${this.source} exceeds the supported JSON shape`);
         this.skip();
         const start = this.at, character = this.text[this.at];
         let node;
@@ -267,22 +263,14 @@ function boundedKey(name) {
     const clean = name.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
     return JSON.stringify(clean.length > 64 ? `${clean.slice(0, 64)}…` : clean);
 }
-function materialize(node) {
-    if (node.members) {
-        const value = {};
-        for (const [name, child] of node.members)
-            value[name] = materialize(child);
-        return value;
-    }
-    if (node.items)
-        return node.items.map(materialize);
-    return node.value;
-}
 export const rawSpan = (text, span) => text.slice(span.start, span.end);
 export const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 function scanConfigDocument(raw) {
+    // JSON.parse owns the complete JSON grammar (including number syntax); the span scanner additionally
+    // rejects ambiguous duplicate keys and locates tokens without re-serializing tolerated fields.
+    const config = validateConfig(JSON.parse(raw));
     const root = new JsonDocument(raw).parse();
-    return { root, config: validateConfig(materialize(root)) };
+    return { root, config };
 }
 /** Parse, locate every agent entry's raw byte span, and apply the full schema validator. */
 export function scanConfig(raw) {
@@ -342,6 +330,8 @@ export class StaleConfigLock extends Error {
         super('PiIntercom: config transaction lock is held by another process');
         this.owner = owner;
     }
+}
+export class ConfigPreviewChanged extends Error {
 }
 export function named(c, name) {
     text(name, 'to', 128);
@@ -411,18 +401,23 @@ export class ConfigStore {
     async exclusive(run) {
         // Async-local, not instance, nesting: an adoption transaction may call other publication methods,
         // while two concurrent independent writes on the same instance must still serialize.
-        if (insideTransaction.getStore() === true)
+        const held = insideTransaction.getStore();
+        if (held?.has(this.file)) {
+            held.get(this.file)();
             return run();
+        }
         return this.outerQueue(async () => {
             const key = this.file;
             const previous = processQueues.get(key) ?? Promise.resolve();
             const operation = previous.then(async () => {
-                const release = await this.acquireLock();
+                const lock = await this.acquireLock();
+                const locks = new Map(held);
+                locks.set(this.file, lock.assertOwned);
                 try {
-                    return await insideTransaction.run(true, run);
+                    return await insideTransaction.run(locks, run);
                 }
                 finally {
-                    await release();
+                    await lock.release();
                 }
             });
             const settled = operation.then(() => undefined, () => undefined);
@@ -443,8 +438,41 @@ export class ConfigStore {
             return 'unreadable';
         }
     }
+    assertSafePaths() {
+        if (realpathSync(this.root) !== path.resolve(this.root))
+            fail('unsafe config root alias');
+        for (const directory of [this.root, path.dirname(this.file)]) {
+            try {
+                const info = lstatSync(directory);
+                if (!info.isDirectory() || info.isSymbolicLink())
+                    fail('unsafe config directory');
+            }
+            catch (error) {
+                if (error.code !== 'ENOENT')
+                    throw error;
+            }
+        }
+        try {
+            if (!lstatSync(this.file).isFile())
+                fail('unsafe config file');
+        }
+        catch (error) {
+            if (error.code !== 'ENOENT')
+                throw error;
+        }
+    }
+    publicationGuard(assertValid) {
+        this.assertSafePaths();
+        const guard = insideTransaction.getStore()?.get(this.file);
+        if (!guard)
+            fail('config publication requires its exclusive transaction');
+        guard();
+        assertValid();
+    }
     async acquireLock() {
+        this.assertSafePaths();
         await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
+        this.assertSafePaths();
         const directory = this.lockDirectory, token = randomUUID();
         try {
             await mkdir(directory, { mode: 0o700 });
@@ -487,15 +515,19 @@ export class ConfigStore {
         if (!await owned())
             fail('config transaction lock ownership is uncertain; nothing was removed and no publication');
         let released = false;
-        return async () => {
-            if (released)
-                return;
-            released = true;
-            if (!await owned())
-                fail('config transaction lock was taken over; refusing to release');
-            await unlink(ownerFile);
-            await rmdir(directory).catch(() => { });
+        const assertOwned = () => {
+            this.assertSafePaths();
+            if (released || lstatSync(directory).isSymbolicLink() || JSON.parse(readFileSync(ownerFile, 'utf8')).token !== token)
+                fail('config transaction ownership is uncertain; no publication or foreign release');
         };
+        return { assertOwned, release: async () => {
+                if (released)
+                    return;
+                assertOwned();
+                released = true;
+                await unlink(ownerFile);
+                await rmdir(directory);
+            } };
     }
     static async discover(cwd) {
         let at = path.resolve(cwd);
@@ -542,6 +574,7 @@ export class ConfigStore {
             const temp = await this.temporary({ version: 1, multiplexer: 'herdr', agents: [{ sessionId: id, name: 'Coordinator', coordinator: true, description: DEFAULT_DESCRIPTION, port: boundPort, projectDirectory: '.' }] });
             try {
                 assertValid();
+                this.publicationGuard(assertValid);
                 try {
                     await link(temp, this.file);
                 }
@@ -572,7 +605,7 @@ export class ConfigStore {
             // of this already synced/closed temp, never the mutation or any OS action
             // outside config persistence. The elapsed budget bounds retry initiation,
             // not the duration of an already-submitted OS rename.
-            assertValid();
+            this.publicationGuard(assertValid);
             if (attempt > 0 && now() - started >= RENAME_BUDGET_MS)
                 throw originalError;
             try {
@@ -598,6 +631,21 @@ export class ConfigStore {
             // Authority is re-checked after the lock is held, so a former coordinator's queued update is
             // refused once a completed adoption replaced the entry.
             requireCoordinator(c, id);
+            // Existing committed tenure evidence is also an ordinary-writer fence. In particular, an old
+            // coordinator cannot publish while another cooperating process holds unresolved prepared intent.
+            // The Orchestrator runtime additionally gates ABSENT evidence before any coordinator action.
+            try {
+                await readFile(path.join(this.root, 'coordinator-claim.md'));
+                const { bootClaimEvidence } = await import('./adoption.js');
+                const evidence = await bootClaimEvidence({ home: this.root, identity: coordinator(c) });
+                if (!evidence.ready)
+                    fail(`ADOPTION_NOT_READY: ${evidence.detail}`);
+            }
+            catch (error) {
+                if (error.code !== 'ENOENT')
+                    throw error;
+            }
+            assertValid();
             await mutate(c);
             assertValid();
             validateConfig(c);
@@ -626,14 +674,20 @@ export class ConfigStore {
             const scanned = await this.readStrict();
             input.assertValid();
             if (sha256(scanned.raw) !== input.previewRawSha256)
-                fail('config changed after the preview; a new preview and human decision are required');
+                throw new ConfigPreviewChanged('config changed after the preview; a new preview and human decision are required');
             input.assertPreview(scanned.config);
             if (scanned.config.agents.some(agent => agent.sessionId === input.sessionId))
                 fail('adopting session is already a configured entry');
+            if (scanned.config.agents.some(agent => agent.port === input.port))
+                fail('adopting port is already used by a configured entry');
             const patch = patchCoordinatorEntry(scanned.raw, input.sessionId, input.port);
             const temp = await this.writeTemporaryText(patch.after, input.assertValid);
             try {
-                await this.publish(temp, input.assertValid);
+                await this.publish(temp, () => {
+                    input.assertValid();
+                    if (sha256(readFileSync(this.file, 'utf8')) !== input.previewRawSha256)
+                        throw new ConfigPreviewChanged('config changed before publication');
+                });
             }
             catch (error) {
                 await unlink(temp).catch(() => { });

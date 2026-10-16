@@ -57,7 +57,6 @@ export declare class JsonDocument {
     private readonly text;
     private readonly source;
     private at;
-    private nodes;
     constructor(text: string, source?: string);
     parse(): Node;
     private skip;
@@ -105,6 +104,8 @@ export declare class StaleConfigLock extends Error {
     readonly owner: LockOwner | 'unreadable';
     constructor(owner: LockOwner | 'unreadable');
 }
+export declare class ConfigPreviewChanged extends Error {
+}
 export declare function named(c: Config, name: string): Agent;
 export declare function requireCoordinator(c: Config, id: string): Agent;
 export declare function directory(root: string, requested: string): Promise<string>;
@@ -149,6 +150,8 @@ export declare class ConfigStore {
     protected outerQueue<T>(run: () => Promise<T>): Promise<T>;
     protected exclusive<T>(run: () => Promise<T>): Promise<T>;
     private lockOwner;
+    private assertSafePaths;
+    private publicationGuard;
     private acquireLock;
     static discover(cwd: string): Promise<ConfigStore | undefined>;
     protected openTemporary(file: string): Promise<import("fs/promises").FileHandle>;
