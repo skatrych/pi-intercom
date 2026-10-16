@@ -33,7 +33,7 @@ const CASES = {
   'count-home': { own: 'coordinator', claim: 'matching', run: 'status', expect: { code: 'OK', exit: 0 } },
   'count-second': { own: 'fresh', extraBoard: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT_TWO', exit: 1 } },
   'count-second-empty': { own: 'fresh', extraBoardEmpty: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT_TWO', exit: 1 } },
-  'count-wrong': { own: 'coordinator', claim: 'none', boardAtChild: true, cwdChild: true, run: 'status', expect: { code: 'OK', exit: 0 } },
+    'count-wrong': { own: 'coordinator', claim: 'none', boardAtChild: true, cwdChild: true, run: 'status', expect: { code: 'BOARD_COUNT', exit: 1 } },
   'count-symlink': { own: 'coordinator', claim: 'matching', symlinkEscape: true, run: 'status', expect: { code: 'BOARD_PATH', exit: 1 } },
   'outside-home': { own: 'fresh', cwdOutside: true, expect: { code: 'BOARD_PATH', exit: 1 } },
   'no-board-child': { own: 'fresh', noBoard: true, cwdChild: true, expect: { code: 'NO_BOARD', exit: 0 } },
@@ -50,8 +50,11 @@ const CASES = {
   'claim-absent-anonymous': { own: 'fresh', claim: 'none', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ', 'roster-recorded', 'zero-worker-requests'] },
   'claim-malformed': { own: 'fresh', claim: 'malformed', answers: YES(), expect: { code: 'RECORD', exit: 1 } },
   'claim-uncommitted': { own: 'coordinator', claim: 'matching-uncommitted', expect: { code: 'RECORD', exit: 1 } },
-  'claim-board-disagree': { own: 'coordinator', claim: 'board-disagree', expect: { code: 'CLAIM_MISMATCH', exit: 1 } },
-  'claim-port-disagree': { own: 'coordinator', claim: 'port-disagree', expect: { code: 'CLAIM_MISMATCH', exit: 1 } },
+  // A committed record that does not name this session's pair is the record-other branch: it stops and
+  // reports all three pairs, whether it disagrees on session, on port, or on both.
+  'claim-board-disagree': { own: 'coordinator', claim: 'board-disagree', expect: { code: 'CLAIM_OTHER', exit: 1 }, assert: ['board-unchanged'] },
+  'claim-port-disagree': { own: 'coordinator', claim: 'port-disagree', expect: { code: 'CLAIM_OTHER', exit: 1 }, assert: ['board-unchanged'] },
+  'claim-root-disagree': { own: 'coordinator', claim: 'root-disagree', expect: { code: 'CLAIM_MISMATCH', exit: 1 }, assert: ['board-unchanged'] },
 
   // ---- AC3/AC4: identity, collisions, probe, wording, interaction.
   'fresh-anonymous': { own: 'fresh', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ', 'roster-recorded', 'zero-worker-requests', 'no-coordinator-tool-needed'] },
@@ -98,7 +101,10 @@ const CASES = {
 
   // ---- Transaction: lock, publication failure, active-evidence failure, recovery, promotion.
   'lock-contended': { own: 'fresh', lock: 'contended', answers: YES(), expect: { code: 'LOCKED', exit: 1 } },
-  'stale-lock': { own: 'fresh', lock: 'stale', answers: YES(), expect: { code: 'OK', exit: 0 } },
+  // Approved: an existing lock is contention whatever its owner looks like — dead, old or unreadable
+  // included. Stale locks are cleared by human maintenance, never by the blocked writer.
+  'stale-lock': { own: 'fresh', lock: 'stale', answers: YES(), expect: { code: 'LOCKED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
+  'lock-unreadable': { own: 'fresh', lock: 'unreadable', answers: YES(), expect: { code: 'LOCKED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'foreign-token': { own: 'fresh', lock: 'foreign', answers: YES(), expect: { code: 'LOCKED', exit: 1 } },
   'commit-rejected': { own: 'fresh', hook: 'reject', answers: YES(), expect: { code: 'GIT', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'publish-failed': { own: 'fresh', publish: 'fail', answers: YES(), expect: { code: 'PUBLISH', exit: 1 }, assert: ['no-active-evidence'] },
@@ -115,13 +121,13 @@ const CASES = {
     assert: ['exactly-one-swap', 'refreshed-intent', 'one-transition-id'],
     note: 'same transition id, no second swap, no second attempt.',
   },
-  'dirty-foreign': { own: 'fresh', preparedSwap: true, dirty: 'foreign', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
-  'dirty-partial': { own: 'fresh', preparedSwap: true, dirty: 'partial', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
-  'dirty-semantic': { own: 'fresh', preparedSwap: true, dirty: 'semantic', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
-  'dirty-staged': { own: 'fresh', preparedSwap: true, dirty: 'staged', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
-  'dirty-intent': { own: 'fresh', preparedSwap: true, dirty: 'intent', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
-  'dirty-config': { own: 'fresh', preparedSwap: true, dirty: 'config', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
-  'dirty-session': { own: 'fresh', preparedSwap: true, dirty: 'session', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'dirty-active-foreign': { own: 'fresh', preparedSwap: true, dirty: 'foreign', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'dirty-active-partial': { own: 'fresh', preparedSwap: true, dirty: 'partial', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'dirty-active-semantic-only': { own: 'fresh', preparedSwap: true, dirty: 'semantic', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'dirty-active-staged': { own: 'fresh', preparedSwap: true, dirty: 'staged', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'dirty-active-intent-changed': { own: 'fresh', preparedSwap: true, dirty: 'intent', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'dirty-active-config-changed': { own: 'fresh', preparedSwap: true, dirty: 'config', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'dirty-active-other-session': { own: 'fresh', preparedSwap: true, dirty: 'session', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
   'clean-advance': {
     own: 'fresh', preparedSwap: true, answers: YES(), expect: { code: 'RECOVERED', exit: 0 },
     assert: ['exactly-one-swap', 'no-second-swap'],
@@ -169,7 +175,6 @@ const CASES = {
  * silently: the approved plan requires these branches to be proven.
  */
 const NOT_PROVEN = [
-  'dirty-foreign', 'dirty-partial', 'dirty-semantic', 'dirty-staged', 'dirty-intent', 'dirty-config', 'dirty-session',
 ];
 
 const name = process.argv[2];

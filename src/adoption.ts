@@ -220,8 +220,8 @@ interface Survey {
   scanned?: ScannedConfig;
   identity: ResolvedIdentity;
   claimPath: string;
-  /** Set when the layout is an existing multi-project one, so adoption is not applicable. */
-  ordinary?: string;
+  /** Worktree bytes, kept for classification only: they never supply authority, identity or hashes. */
+  worktreeRaw?: string;
   claimRaw?: string;
   claim?: ClaimRecord;
   claimCommit?: string;
@@ -375,12 +375,11 @@ export class AdoptionWorkflow {
       return surveyed;
     }
     if (boards.length > 1) return { stop: halt('BOARD_COUNT_TWO', `a second board at ${boards[1]} is a creation-time failure, not a cleanup item; nothing was read or written`) };
-    // Exactly one board that is not the projects home is the existing multi-project case: discovery
-    // continues, and adoption declines because it only replaces the projects-home board's entry.
+    // Exactly one board that is not the projects home stops here, for `status` as well as for the
+    // workflow: a lone child board is a wrong board for this command, not a licence to keep looking. The
+    // approved table lists this case among the stop outcomes with zero writes.
     if (boards[0] !== canonicalHome) {
-      surveyed.ordinary = boards[0];
-      surveyed.lines.unshift(`BOARD COUNT: the only board is at ${boards[0]}, a child project; existing discovery applies and adoption declines`);
-      return surveyed;
+      return { stop: halt('BOARD_COUNT', `the only board is at ${boards[0]}, not the projects home ${canonicalHome}; stop with no writes rather than treat a child project's board as this one`) };
     }
     let scanned: ScannedConfig;
     try { scanned = await coded('CONFIG', () => this.options.storeFor(boards[0]).readStrict()); }
@@ -427,34 +426,41 @@ export class AdoptionWorkflow {
   }
   /** AC2: absent, uncommitted, malformed, or foreign evidence. None of them is approval. */
   private async readClaim(surveyed: Survey): Promise<Result | undefined> {
-    let raw: string;
+    // Worktree bytes are read only so they can be reported. They are never authority: an uncommitted
+    // record approves nothing, and a damaged worktree file must not hide a verified committed transition,
+    // because that combination is precisely the interrupted-writer state this workflow must recognize
+    // before any generic dirty-record refusal.
+    let raw: string | undefined;
     try { raw = await readFile(surveyed.claimPath, 'utf8'); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      return halt('RECORD', `${CLAIM_FILE} is present but unreadable: ${reason(error)}`);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return halt('RECORD', `${CLAIM_FILE} is present but unreadable: ${reason(error)}`);
+      }
     }
     let record: ClaimRecord;
-    try { record = parseClaim(raw); }
-    catch (error) { return halt('RECORD', `${CLAIM_FILE} is malformed: ${reason(error)}; a malformed record is neither absence nor approval`); }
-    const commit = await this.committedClaim(surveyed.home, raw);
+    // Committed evidence has precedence over the worktree file. A worktree that differs from its commit is
+    // not a refusal: it is exactly the interrupted-writer state reconciliation exists to classify, so
+    // refusing it here would make the approved recovery branch unreachable.
+    const commit = await this.latestClaimCommit(surveyed.home);
     if (commit === undefined) {
-      return halt('RECORD', `${CLAIM_FILE} does not equal its committed bytes; an uncommitted record is not evidence and not approval`);
+      // Nothing committed: the worktree is all there is, so it is refused on its own terms.
+      if (raw === undefined) return undefined;
+      try { parseClaim(raw); }
+      catch (error) { return halt('RECORD', `${CLAIM_FILE} is malformed: ${reason(error)}; a malformed record is neither absence nor approval`); }
+      return halt('RECORD', `${CLAIM_FILE} has no committed version; an uncommitted record is not evidence and not approval`);
     }
-    surveyed.claimRaw = raw;
+    const committed = await this.gitText(['show', `${commit}:${CLAIM_FILE}`], surveyed.home, { tolerate: true });
+    if (committed === undefined) return halt('RECORD', `${CLAIM_FILE} commit ${commit} cannot be read; nothing is inferred from an unreadable commit`);
+    try { record = parseClaim(committed); }
+    catch (error) { return halt('RECORD', `committed ${CLAIM_FILE} at ${commit.slice(0, 8)} is malformed: ${reason(error)}`); }
+    surveyed.claimRaw = committed;
     surveyed.claim = record;
     surveyed.claimCommit = commit;
+    surveyed.worktreeRaw = raw;
     if (record.boardRoot !== surveyed.home) return halt('CLAIM_MISMATCH', `record boardRoot ${record.boardRoot} is not this board root ${surveyed.home}`);
-    if (!surveyed.scanned) return;
-    const board = coordinator(surveyed.scanned.config);
-    if (record.coordinator.sessionId !== board.sessionId || record.coordinator.port !== board.port) {
-      return halt('CLAIM_MISMATCH', `record names session ${record.coordinator.sessionId} port ${record.coordinator.port} while the board entry is session ${board.sessionId} port ${board.port}; pending reconciliation, not permission`);
-    }
-  }
-  /** The latest claim-changing commit whose bytes match, or undefined when the worktree bytes are dirty. */
-  private async committedClaim(home: string, raw: string): Promise<string | undefined> {
-    const commit = await this.latestClaimCommit(home);
-    if (commit === undefined) return undefined;
-    return (await this.gitText(['show', `${commit}:${CLAIM_FILE}`], home, { tolerate: true })) === raw ? commit : undefined;
+    // A record/board pair mismatch is deliberately not refused here. Which of the committed before-hash or
+    // after-hash the board matches is what decides whether this is a prepared transition to advance, an
+    // adoption already completed, or an ambiguous state for a human.
   }
   /**
    * Read git history only, never the worktree file: dirty bytes never supply authority, previous
@@ -497,8 +503,11 @@ export class AdoptionWorkflow {
     const self = claim.coordinator.sessionId === surveyed.identity.sessionId && claim.coordinator.port === surveyed.identity.port;
     if (claim.phase === 'active') {
       if (!self) {
-        const board = surveyed.scanned ? coordinator(surveyed.scanned.config).sessionId : 'unknown';
-        return halt('CLAIM_OTHER', `record ${claim.coordinator.sessionId}; this session ${surveyed.identity.sessionId}; board ${board} — report both; wait for human decision`);
+        // All three pairs, with ports. A record that disagrees only on port would otherwise print the
+        // same session id three times, which tells an operator nothing actionable.
+        const entry = surveyed.scanned ? coordinator(surveyed.scanned.config) : undefined;
+        const pair = (sessionId: string, port: number) => `${sessionId}/${port}`;
+        return halt('CLAIM_OTHER', `record ${pair(claim.coordinator.sessionId, claim.coordinator.port)}; this session ${pair(surveyed.identity.sessionId, surveyed.identity.port)}; board ${entry ? pair(entry.sessionId, entry.port) : 'unknown'} — report both; wait for human decision`);
       }
       if (!this.options.responsibilityLoaded()) {
         const failure = await this.promote();
@@ -732,9 +741,16 @@ export class AdoptionWorkflow {
     if (intent.previous === null) return halt('RECOVERY_REQUIRED', `prepared transition ${intent.transitionId} has no recorded previous identity; a prepared record is never reinterpreted as a first declaration`);
     const board = surveyed.scanned ? coordinator(surveyed.scanned.config) : undefined;
     if (board === undefined) return halt('NO_BOARD', 'the board disappeared during reconciliation; nothing is written');
-    const clean = surveyed.claimRaw === renderClaim(intent);
+    // A staged claim file is someone else's staged content and never this finalization's bytes.
+    const staged = await this.trackedPaths(['diff', '--cached', '--name-only'], home);
+    if (staged.includes(CLAIM_FILE)) return halt('RECOVERY_REQUIRED', `${CLAIM_FILE} is staged by another writer; report the committed and staged bytes to the human, who resolves which content belongs to whom`);
+    if (surveyed.worktreeRaw === undefined) {
+      return halt('RECOVERY_REQUIRED', `${CLAIM_FILE} is absent from the worktree while ${intent.transitionId} is committed; restore it from commit ${intentCommit.slice(0, 8)} deliberately, not by this workflow`);
+    }
+    const worktree = surveyed.worktreeRaw;
+    const clean = worktree === renderClaim(intent);
     const derived = renderClaim({ ...intent, phase: 'active', intentCommit });
-    if (!clean && surveyed.claimRaw !== derived) {
+    if (!clean && worktree !== derived) {
       return halt('RECOVERY_REQUIRED', `worktree ${CLAIM_FILE} is neither the committed prepared record nor exactly derived active bytes; no rewrite, normalization, commit or replacement is performed`);
     }
     const hash = sha256(surveyed.scanned!.raw);
@@ -814,9 +830,11 @@ export class AdoptionWorkflow {
     if (toplevel === undefined || (await this.canonical(toplevel.trim())) !== home) {
       return halt('GIT', `projects home ${home} is not a git repository root; ${CLAIM_FILE} cannot be committed evidence`);
     }
+    // Every staged path is refused, the claim file included. Staging this one path is permitted only as
+    // the step immediately before its own path-scoped commit; a claim file already staged by someone else
+    // is someone else's content, and this workflow never commits it.
     const staged = await this.trackedPaths(['diff', '--cached', '--name-only'], home);
-    const foreign = staged.filter(file => file !== CLAIM_FILE);
-    if (foreign.length) return halt('GIT', `the git index already holds other paths (${foreign.join(', ')}); this workflow never commits them`);
+    if (staged.length) return halt('GIT', `the git index already holds staged paths (${staged.join(', ')}); this workflow never commits another path's staged content`);
     const unresolved = await this.unresolvedOperation(home);
     if (unresolved !== undefined) return halt('GIT', `an unresolved git operation is in progress (${unresolved}); nothing is written`);
     // Only tracked modifications are refused. An untracked path cannot be committed by
