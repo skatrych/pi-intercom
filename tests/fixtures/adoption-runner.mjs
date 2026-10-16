@@ -72,8 +72,11 @@ const CASES = {
   'confirm-blank': { own: 'fresh', answers: typed(''), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'confirm-wrong-id': { own: 'fresh', answers: typed('the previous coordinator has stopped'), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'confirm-cancel': { own: 'fresh', answers: typed(undefined), expect: { code: 'CANCELLED', exit: 1 } },
-  'confirm-false': { own: 'fresh', answers: typed(false), expect: { code: 'CANCELLED', exit: 1 } },
-  'confirm-forged-args': { own: 'fresh', forgedArguments: true, answers: YES(), expect: { code: 'USAGE', exit: 1 }, assert: ['board-unchanged'] },
+  // An explicit false is distinguishable from an absent answer: it arrives as an answer that is not the
+  // required wording, so it is refused as a confirmation failure rather than treated as a cancellation.
+  'confirm-false': { own: 'fresh', answers: typed(false), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
+  // A refused argument is the surface being unavailable, which the exit-code table gives as 2.
+  'confirm-forged-args': { own: 'fresh', forgedArguments: true, answers: YES(), expect: { code: 'USAGE', exit: 2 }, assert: ['board-unchanged'] },
   'authority-blank': { own: 'fresh', answers: { ...YES(), authorityRecord: '' }, expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'authority-cancel': { own: 'fresh', answers: { ...YES(), authorityRecord: undefined }, expect: { code: 'CANCELLED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'adopt-declined': { own: 'fresh', answers: decline('adoptTransition'), expect: { code: 'ADOPTION_REQUIRED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },

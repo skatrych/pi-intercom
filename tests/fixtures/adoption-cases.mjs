@@ -411,6 +411,7 @@ class Scenario {
     await fixture.claim.write(intent);
     this.intentCommit = await fixture.claim.commit();
     await fixture.board.write(after);
+    this.swappedRaw = after;
     this.preparedText = intent;
   }
 
@@ -564,9 +565,15 @@ class Scenario {
           break;
         }
         case 'no-second-swap': {
+          // Verified independently, not from an internal message: the board still holds exactly the bytes
+          // this transition published, and the committed record is the same transition now in active phase.
           const after = await this.fixture.board.read();
-          assert(after === this.finalExpected, 'expected no second replacement');
-          say(`ASSERT ${assertion} PASS: finalization committed evidence only, with no second replacement`);
+          const expected = this.spec.preparedSwap ? this.swappedRaw : patch(this.parts.config, this.originalRaw, this.ownIdValue, this.ownPort);
+          assert(after === expected, 'expected finalization to leave the published board untouched');
+          const record = this.parts.adoption.parseClaim(await this.fixture.claim.read());
+          assert(record.phase === 'active', `expected the finalized record to be active, observed ${record.phase}`);
+          assert(record.intentCommit !== null && record.intentCommit.length === 40, 'expected the finalized record to cite its intent commit');
+          say(`ASSERT ${assertion} PASS: same transition ${record.transitionId} finalized to active, board bytes unchanged`);
           break;
         }
         case 'no-extra-config-write': {
