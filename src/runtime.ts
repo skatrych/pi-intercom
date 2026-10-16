@@ -8,7 +8,7 @@ import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose, type CloseProvider, type HandoffKind } from './handoff.js';
-import { CoordinatorReminders, type ReminderClock } from './reminders.js';
+import { CoordinatorReminders, readReminderMinutesEnv, reminderIntervalMs, type ReminderClock } from './reminders.js';
 
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
 export interface Host {
@@ -65,6 +65,8 @@ export interface RuntimeOptions {
   /** Test seam; production defaults to 120 seconds, values above that are capped. */
   closeTimeoutMs?: number;
   reminderClock?: ReminderClock;
+  /** Test seam for the operator environment. Production reads process.env once per runtime start. */
+  reminderMinutesEnv?: () => string | undefined;
 }
 export class Intercom {
   store!: ConfigStore;
@@ -120,6 +122,9 @@ export class Intercom {
     this.roleResolved = false;
     this.resolvedRole = undefined;
     const generation = ++this.generation, assertValid = this.validity();
+    // Snapshot the reminder interval once for this runtime. A child tool cannot
+    // change this process environment, and Pi /reload restarts this runtime.
+    const reminderInterval = reminderIntervalMs((this.options.reminderMinutesEnv ?? readReminderMinutesEnv)());
     let record = this.captureObserver();
     try {
       const discovered = await ConfigStore.discover(this.host.cwd);
@@ -148,7 +153,7 @@ export class Intercom {
         isCoordinator: async () => { const fresh = await this.state(); assertValid(); return fresh.me?.coordinator === true; },
         busy: () => this.host.busy(),
         deliver: message => { assertValid(); this.host.deliver(message, false); },
-      }, this.options.reminderClock);
+      }, this.options.reminderClock, reminderInterval);
       this.handoff = new HandoffWorkflow({
         state: () => this.state(), assertCurrent: assertValid,
         update: async (mutate, guard) => {

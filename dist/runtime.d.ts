@@ -35,6 +35,8 @@ export interface RuntimeOptions {
     /** Test seam; production defaults to 120 seconds, values above that are capped. */
     closeTimeoutMs?: number;
     reminderClock?: ReminderClock;
+    /** Test seam for the operator environment. Production reads process.env once per runtime start. */
+    reminderMinutesEnv?: () => string | undefined;
 }
 export declare class Intercom {
     readonly host: Host;
