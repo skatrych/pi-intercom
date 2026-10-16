@@ -334,9 +334,16 @@ export class ConfigStore {
     // Missing, malformed and unreadable files propagate; never overwrite them.
     return (await this.readStrict()).config;
   }
-  /** The raw bytes and entry spans needed by the lossless replacement and by claim evidence. */
+  /**
+   * The raw bytes and entry spans needed by the lossless replacement and by claim evidence. Strict means
+   * validated: the document must parse under the span scanner *and* satisfy the board schema. Reading a
+   * board without validating it would let an unusable config reach an adoption decision, so an issue is
+   * an error rather than a warning.
+   */
   async readStrict(): Promise<ScannedConfig> {
-    return scanConfig(await readFile(this.file, 'utf8'));
+    const scanned = scanConfig(await readFile(this.file, 'utf8'));
+    validateConfig(scanned.config);
+    return scanned;
   }
   get lockDirectory(): string { return path.join(path.dirname(this.file), LOCK_DIRECTORY); }
   /**

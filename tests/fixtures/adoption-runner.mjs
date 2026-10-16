@@ -88,11 +88,12 @@ const CASES = {
   // ---- AC6: roster preservation and accepted config shapes.
   'two-workers-pending': { own: 'fresh', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['pending-job-listed', 'only-coordinator-tokens-differ'] },
   'minified-config': { own: 'fresh', config: 'minified', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ'] },
-  'unknown-field': { own: 'fresh', config: 'unknown-field', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ'] },
+  'unknown-field': { own: 'fresh', config: 'unknownField', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ'] },
+  'single-worker': { own: 'fresh', config: 'single', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ'] },
   'irregular-format': { own: 'fresh', config: 'irregular', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ'] },
-  'duplicate-keys': { own: 'fresh', config: 'duplicate-keys', answers: YES(), expect: { code: 'CONFIG', exit: 1 } },
-  'bad-version': { own: 'fresh', config: 'bad-version', answers: YES(), expect: { code: 'CONFIG', exit: 1 } },
-  'bad-schema': { own: 'fresh', config: 'bad-schema', answers: YES(), expect: { code: 'CONFIG', exit: 1 } },
+  'duplicate-keys': { own: 'fresh', config: 'duplicateKeys', answers: YES(), expect: { code: 'CONFIG', exit: 1 }, assert: ['board-unchanged'] },
+  'bad-version': { own: 'fresh', config: 'badVersion', answers: YES(), expect: { code: 'CONFIG', exit: 1 }, assert: ['board-unchanged'] },
+  'bad-schema': { own: 'fresh', config: 'badSchema', answers: YES(), expect: { code: 'CONFIG', exit: 1 }, assert: ['board-unchanged'] },
   'history-preserved': { own: 'fresh', seed: true, answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['history-preserved'] },
 
   // ---- Transaction: lock, publication failure, active-evidence failure, recovery, promotion.
@@ -101,7 +102,8 @@ const CASES = {
   'foreign-token': { own: 'fresh', lock: 'foreign', answers: YES(), expect: { code: 'LOCKED', exit: 1 } },
   'commit-rejected': { own: 'fresh', hook: 'reject', answers: YES(), expect: { code: 'GIT', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'publish-failed': { own: 'fresh', publish: 'fail', answers: YES(), expect: { code: 'PUBLISH', exit: 1 }, assert: ['no-active-evidence'] },
-  'session-changed-rename': { own: 'fresh', publish: 'invalidate', answers: YES(), expect: { code: 'SESSION_CHANGED', exit: 1 } },
+  'session-changed-rename': { own: 'fresh', publish: 'invalidate', answers: YES(), expect: { code: 'SESSION_CHANGED', exit: 1 }, assert: ['no-active-evidence'] },
+  'session-changed-after-publish': { own: 'fresh', publish: 'after-rename', answers: YES(), expect: { code: 'SESSION_CHANGED', exit: 1 }, assert: ['no-active-evidence', 'exactly-one-swap'] },
   'eperm-then-session-changed': { own: 'fresh', publish: 'eperm-then-invalidate', answers: YES(), expect: { code: 'SESSION_CHANGED', exit: 1 } },
   'active-commit-failed': {
     own: 'fresh', hook: 'active', answers: YES(), expect: { code: 'GIT', exit: 1 },
@@ -126,7 +128,7 @@ const CASES = {
     note: 'own prepared evidence is accepted without a new confirmation; the transition commits and promotion is reported.',
   },
   'promotion-failed': {
-    own: 'fresh', preparedSwap: true, promote: 'fail', reinvoke: true, answers: YES(),
+    own: 'fresh', preparedSwap: true, promote: 'fail', reinvoke: true, retryPromotion: true, answers: YES(),
     expect: { phase1: { code: 'PROMOTION_PENDING', exit: 1 }, phase2: { code: 'PROMOTION_PENDING', exit: 1 } },
     assert: ['no-extra-config-write', 'no-extra-record-commit'],
   },
@@ -167,10 +169,7 @@ const CASES = {
  * silently: the approved plan requires these branches to be proven.
  */
 const NOT_PROVEN = [
-  'publish-failed', 'session-changed-rename', 'eperm-then-session-changed',
-  'active-commit-failed', 'active-commit-failed-rerun',
   'dirty-foreign', 'dirty-partial', 'dirty-semantic', 'dirty-staged', 'dirty-intent', 'dirty-config', 'dirty-session',
-  'clean-advance', 'promotion-failed',
 ];
 
 const name = process.argv[2];

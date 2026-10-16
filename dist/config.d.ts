@@ -130,7 +130,12 @@ export declare class ConfigStore {
     constructor(root: string, options?: ConfigStoreOptions);
     /** Strict read: duplicate keys, trailing content and malformed JSON all propagate. */
     read(): Promise<Config>;
-    /** The raw bytes and entry spans needed by the lossless replacement and by claim evidence. */
+    /**
+     * The raw bytes and entry spans needed by the lossless replacement and by claim evidence. Strict means
+     * validated: the document must parse under the span scanner *and* satisfy the board schema. Reading a
+     * board without validating it would let an unusable config reach an adoption decision, so an issue is
+     * an error rather than a warning.
+     */
     readStrict(): Promise<ScannedConfig>;
     get lockDirectory(): string;
     /**

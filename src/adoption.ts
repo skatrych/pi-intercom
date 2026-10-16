@@ -383,7 +383,7 @@ export class AdoptionWorkflow {
       return surveyed;
     }
     let scanned: ScannedConfig;
-    try { scanned = await this.options.storeFor(boards[0]).readStrict(); }
+    try { scanned = await coded('CONFIG', () => this.options.storeFor(boards[0]).readStrict()); }
     catch (error) { return { stop: halt('CONFIG', `the board config is unreadable or invalid: ${reason(error)}; a malformed board is never repaired implicitly`) }; }
     surveyed.boardRoot = boards[0];
     surveyed.scanned = scanned;
@@ -648,24 +648,24 @@ export class AdoptionWorkflow {
           leftUnchanged: unchanged,
           rebriefSource: REBRIEF_SOURCE,
         };
-        const prepared = await this.writeCommit(home, renderClaim(intent), context, epoch);
+        const prepared = await coded('GIT', () => this.writeCommit(home, renderClaim(intent), context, epoch));
         if (prepared === undefined) {
           return { stop: halt('GIT', 'the prepared intent commit was not verifiable; the board is unchanged, no replacement happened, and the generated record is preserved in the worktree for inspection') };
         }
         await this.phase('prepared-committed');
-        const result = await store.replaceCoordinatorEntry({
+        const result = await coded('PUBLISH', () => store.replaceCoordinatorEntry({
           sessionId: identity.sessionId,
           port: identity.port,
           previewRawSha256: previewHash,
           assertPreview: config => {
             const current = coordinator(config);
-            if (current.sessionId !== board.sessionId || current.port !== board.port) fail('the coordinator entry changed after the preview; a new preview and a new human decision are required');
-            if (config.agents.length !== scanned.config.agents.length) fail('the roster changed after the preview; an old preview is never merged into a new roster');
-            if (config.agents.some(agent => agent.sessionId === identity.sessionId)) fail('the adopting session became a configured entry during the preview');
+            if (current.sessionId !== board.sessionId || current.port !== board.port) failAt('STALE_PREVIEW', 'the coordinator entry changed after the preview; a new preview and a new human decision are required');
+            if (config.agents.length !== scanned.config.agents.length) failAt('STALE_PREVIEW', 'the roster changed after the preview; an old preview is never merged into a new roster');
+            if (config.agents.some(agent => agent.sessionId === identity.sessionId)) failAt('SESSION_COLLISION', 'the adopting session became a configured entry during the preview');
             this.assertCurrent(context, epoch);
           },
           assertValid: () => this.assertCurrent(context, epoch),
-        });
+        }));
         if (sha256(result.after) !== intent.configAfterSha256) {
           return { stop: halt('PUBLISH', 'the published config does not match the committed expected hash; the transaction stops and no active evidence was written') };
         }
@@ -674,7 +674,7 @@ export class AdoptionWorkflow {
         if (reverified !== undefined) return { stop: reverified };
         const active: ClaimRecord = { ...intent, phase: 'active', intentCommit: prepared };
         await this.phase('before-active-write');
-        const activeCommit = await this.writeCommit(home, renderClaim(active), context, epoch);
+        const activeCommit = await coded('GIT', () => this.writeCommit(home, renderClaim(active), context, epoch));
         await this.phase('active-committed');
         if (activeCommit === undefined) {
           return { stop: halt('GIT', `the config was replaced and intent ${prepared} is committed, but the active evidence commit failed: fix the commit blocker and enter the same command, which recognizes this anchored prepared intent before any generic dirty refusal; no coordinator action, automatic retry, or rollback is performed`) };
@@ -875,10 +875,10 @@ export class AdoptionWorkflow {
   }
   /** Cheap local invariants. Pi's queue and the board lock are owned by ConfigStore's transaction. */
   private assertCurrent(context: CommandContext, epoch: number): void {
-    if (this.options.readiness.current() !== epoch) fail('the action-readiness epoch changed; this transaction stops without further effects');
-    if (this.options.endpointPort() === undefined) fail('this runtime endpoint is gone');
-    if (!context.isProjectTrusted()) fail('project trust was lost');
-    if (context.sessionManager.getSessionId() !== this.options.sessionId()) fail('the command context session is no longer this runtime session');
+    if (this.options.readiness.current() !== epoch) failAt('SESSION_CHANGED', 'the action-readiness epoch changed; this transaction stops without further effects');
+    if (this.options.endpointPort() === undefined) failAt('SESSION_CHANGED', 'this runtime endpoint is gone');
+    if (!context.isProjectTrusted()) failAt('TRUST', 'project trust was lost during the transaction');
+    if (context.sessionManager.getSessionId() !== this.options.sessionId()) failAt('SESSION_CHANGED', 'the command context session is no longer this runtime session');
   }
   /** A fixture barrier delays at a named phase boundary and never changes an outcome. */
   private async phase(name: AdoptionPhase): Promise<void> {
@@ -969,17 +969,29 @@ function bootDescription(state: BootState, board: Agent, own: Agent | undefined)
   return `own sessionId is absent, so this session is an anonymous worker while the board names ${board.name} (${board.sessionId}) (Runtime.start anonymous registration branch)`;
 }
 function codeFor(error: unknown): ResultCode {
+  if (error instanceof AdoptionFailure) return error.code;
   if (error instanceof StaleConfigLock) return 'LOCKED';
-  const message = String(error);
-  if (/commit|git /i.test(message)) return 'GIT';
-  if (/claim|record|evidence/i.test(message)) return 'RECORD';
-  if (/preview|changed after/i.test(message)) return 'STALE_PREVIEW';
-  if (/publish|rename/i.test(message)) return 'PUBLISH';
-  return 'STALE_PREVIEW';
+  // An unclassified internal error is an unavailable surface, never a named safety outcome. Reporting an
+  // unexpected failure as STALE_PREVIEW would tell an operator something specific that is not true.
+  return 'HOST';
 }
 function reason(error: unknown): string {
   const message = String(error).replace(/^PiIntercom:\s*/, '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
   return message.length > 240 ? `${message.slice(0, 240)}…` : message;
+}
+/**
+ * A named refusal raised at the call site that knows which step failed. Codes are never inferred from
+ * error prose: an unrelated internal error must not be reported to an operator as a specific safety
+ * verdict such as a stale preview.
+ */
+export class AdoptionFailure extends Error {
+  constructor(readonly code: ResultCode, message: string) { super(message); this.name = 'AdoptionFailure'; }
+}
+function failAt(code: ResultCode, message: string): never { throw new AdoptionFailure(code, message); }
+/** Run a step whose failure has one meaning, so its code comes from here rather than from wording. */
+async function coded<T>(code: ResultCode, run: () => Promise<T>): Promise<T> {
+  try { return await run(); }
+  catch (error) { if (error instanceof AdoptionFailure || error instanceof StaleConfigLock) throw error; throw new AdoptionFailure(code, reason(error)); }
 }
 function reasonOf(result: Result): string {
   return result.lines[result.lines.length - 1] ?? 'refused';

@@ -86,6 +86,33 @@ export const configs = {
         "createdAt":"${PENDING_JOB.createdAt}","updatedAt":"${PENDING_JOB.updatedAt}","deadlineAt":"${PENDING_JOB.deadlineAt}"}}
   ]}
   `,
+  /** An unknown top-level field and an unknown entry field, in ordinary formatting. */
+  unknownField: ports => `{
+      "version": 1,
+      "multiplexer": "herdr",
+      "writtenBy": "a newer tool",
+      "agents": [
+        {
+          "sessionId": "${IDS.gone}",
+          "name": "Coordinator",
+          "coordinator": true,
+          "description": "Coordinate workers.",
+          "port": ${ports.coordinator},
+          "projectDirectory": ".",
+          "futureField": { "kept": "verbatim" }
+        },
+        {
+          "sessionId": "${IDS.workerOne}",
+          "name": "Builder",
+          "coordinator": false,
+          "description": "Build assigned work.",
+          "port": ${ports.workerOne},
+          "projectDirectory": "app",
+          "unknownEntry": 7
+        }
+      ]
+    }
+    `.replace(/^ {4}/gm, ''),
   duplicateKeys: ports => `{
       "version": 1,
       "version": 1,
@@ -99,7 +126,12 @@ export const configs = {
   badSchema: ports => configs.full(ports).replace('"multiplexer": "herdr"', '"multiplexer": "screen"'),
 };
 
-export const configText = (style, ports) => (configs[style] ?? configs.full)(ports);
+// No fallback: an unrecognised shape silently becomes a valid board and the case proves nothing.
+export const configText = (style, ports) => {
+  const shape = configs[style];
+  if (!shape) throw new Error(`unknown config shape ${style}`);
+  return shape(ports);
+};
 
 /** Ephemeral loopback ports only. Never an existing or live port. */
 export async function bindEndpoint(sessionId, transport) {
@@ -149,9 +181,12 @@ export async function createFixture(options = {}) {
     },
     read: async () => readFile(configPath(), 'utf8'),
     scan: async () => scanConfig(await board.read()),
-    /** Structural checks only; the workflow reads raw bytes. */
+    /** Structural checks: validateConfig throws on an unusable board rather than reporting a list. */
     parsed: async () => JSON.parse(await board.read()),
-    issues: async () => validateConfig(JSON.parse(await board.read())),
+    invalid: async () => {
+      try { validateConfig(JSON.parse(await board.read())); return undefined; }
+      catch (error) { return String(error); }
+    },
   };
   const claim = {
     write: async text => writeFile(claimPath(), text),
