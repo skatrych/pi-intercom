@@ -27,8 +27,8 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 > **0.5.1:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
 >
 > **0.8.0:** Config is restricted to the session working directory. No parent search or explicit-parent override; shared-config subfolder launches are refused.
-
-> **0.7.0:** Coordinator-local five-minute reminders follow worker calls. Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
+>
+> **0.7.0:** Coordinator-local reminders follow worker calls, at a five-minute default that [you can configure](#reminder-interval). Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
 
 > **0.6.1:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
 
@@ -196,7 +196,7 @@ Anonymous `send`/`list` and all coordinator operations fail explicitly. Anonymou
 A coordinator-local timer wakes an idle agent to review delegated work. It is **not** an endpoint health ping, task assignment, worker retry, or crashed-process watchdog. It starts disarmed and does not change shared config or the wire protocol.
 
 - Valid coordinator calls to create, configure, resume, reload, request status from, message, or close a worker start/reset the timer **before the attempted operation**. A subsequent operation failure can still need follow-up, so it does not automatically cancel the timer.
-- Every five minutes, recheck coordinator identity and whether Pi is idle. Busy ticks are skipped, not queued. Worker replies, incoming reports, list/JSON status reads (including probes), and worker-to-worker/coordinator messages do not reset it.
+- At the configured interval (five minutes unless [`PI_INTERCOM_REMINDER_MINUTES`](#reminder-interval) says otherwise), recheck coordinator identity and whether Pi is idle. Busy ticks are skipped, not queued. Worker replies, incoming reports, list/JSON status reads (including probes), and worker-to-worker/coordinator messages do not reset it.
 - `intercom_stop_reminders({})` disables reminders until the next qualifying call. It does not cancel workers, close jobs or model work. There is no automatic reminder-count cutoff.
 - Timers are in memory only. Shutdown, Pi `/reload`, or session replacement disposes them; startup does not restore or replay them. Reset/stop invalidates stale callbacks and older in-flight calls cannot re-arm after a later stop.
 - Aborting the owning tool's Pi run also disarms its reminder generation when that AbortSignal is available. This is **not universal Escape/Stop detection**: the host may later be in a separate retry/compaction run whose abort does not reach the original signal. Use the explicit stop tool to disable reminders reliably.
@@ -206,11 +206,31 @@ The reminder contains only this fixed public text, never task payloads or privat
 
 > Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.
 >
-> If there is genuinely nothing to follow up on, call `intercom_stop_reminders`. Otherwise, reminders continue every five minutes; a new worker call resets the timer.
+> If there is genuinely nothing to follow up on, call `intercom_stop_reminders`. Otherwise, reminders continue at the configured interval; a new worker call resets the timer.
 >
 > This reminder does not authorize new work, retries, worker closure, or publication.
 
+The text is fixed and interval-neutral: it never contains the configured value, task payloads, or worker data.
+
 Reload the coordinator's extension to register the new tool and timer logic. No existing live session is armed merely by installing the change.
+
+#### Reminder interval
+
+`PI_INTERCOM_REMINDER_MINUTES` sets the coordinator reminder interval in **whole minutes**. It is read once per coordinator runtime start from that Pi process environment; the chosen interval then stays stable for that runtime, including every reset and rearm. Nothing is written to disk.
+
+```sh
+PI_INTERCOM_REMINDER_MINUTES=2 pi
+```
+
+```powershell
+$env:PI_INTERCOM_REMINDER_MINUTES = "2"; pi
+```
+
+- Accepted value: ASCII decimal digits only, surrounding whitespace ignored, leading zeros allowed, numeric value `1` to `35791` inclusive. `35791` is `floor(2147483647 / 60000)`, the largest whole-minute delay inside Node's signed 32-bit timeout maximum, so a long interval fires at the requested time instead of overflowing to a near-immediate tick.
+- Anything else — unset, blank or whitespace-only, `0`, `-5`, `+2`, `2.5`, `2e3`, `0x10`, `2min`, `NaN`, `35792`, or a value beyond a safe integer — silently falls back to the **5 minute** default. There is no throw, clamp, or disable, and an unusable value cannot block extension startup, worker operations, or scheduling. The raw value is never echoed into a reminder, notification, or log.
+- `0` is **not** a disable switch. `intercom_stop_reminders({})` remains the way to disable reminders until the next qualifying worker call.
+- Scope is the coordinator Pi process environment only. This option has **no `settings.json` support and no project/global precedence**: Pi 0.84.4 documents no extension-key settings API, so Intercom does not read Pi settings for it. Worker processes and shared workspace configuration are unaffected, and nothing watches or re-reads the value while a runtime runs.
+- Startup, Pi `/reload`, and session replacement each read it again for the new runtime; a `/reload` only re-reads the environment that process already has. A shell `export` executed as a child tool cannot change the already-running coordinator, so restart Pi with the new inherited environment to change an operator-provided interval. The new runtime still starts disarmed.
 
 ## Config and wire contracts
 
@@ -349,6 +369,12 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### Unreleased Configurable reminder interval
+
+- New coordinator-process environment variable `PI_INTERCOM_REMINDER_MINUTES` selects the reminder interval in whole minutes (trimmed ASCII digits, `1`-`35791`), read once per runtime start. Unset or unusable input keeps the existing five-minute default.
+- Reminder text and tool descriptions are interval-neutral instead of naming five minutes. All other scheduling, reset/rearm, authorization, busy-skip, and disposal semantics are unchanged, as is `intercom_stop_reminders` as the disable operation.
+- Local validation: 237 tests, typecheck and the isolated package gate on the approved base. See `tests/reminder-config.test.mjs` and `tests/reminders.test.mjs` for the parser, boundary, fake-clock delay, runtime-start snapshot, and default-path regressions.
 
 ### 0.8.0 Strict session-root isolation
 

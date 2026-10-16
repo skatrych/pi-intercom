@@ -51,10 +51,15 @@ export declare class ConfigStore {
     private readonly options;
     readonly file: string;
     private tail;
+    private canonicalRoot?;
     constructor(root: string, options?: ConfigStoreOptions);
+    private assertLocalPaths;
+    validateRoot(expectedCanonicalRoot: string): Promise<void>;
     read(): Promise<Config>;
     static discover(cwd: string): Promise<ConfigStore | undefined>;
+    static workspace(cwd: string, workspaceRoot: string): Promise<ConfigStore>;
     protected openTemporary(file: string): Promise<import("fs/promises").FileHandle>;
+    private cleanupTemporary;
     private temporary;
     initialize(id: string, boundPort: number, assertValid?: () => void): Promise<boolean>;
     private publish;
