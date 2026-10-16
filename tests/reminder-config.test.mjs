@@ -124,8 +124,10 @@ test('reminder text stays fixed, interval-neutral and free of operator input', (
 
 test('no tool description promises a fixed reminder interval', () => {
   const tools = new Map();
-  // Upstream 0.8.0 registers the --intercom-root flag at extension load; the fake must accept it.
-  extension({ registerTool: tool => tools.set(tool.name, tool), on: () => {}, registerFlag: () => {}, getFlag: () => undefined });
+  // The factory registers an adoption bus listener (fork) and the --intercom-root flag (upstream 0.8.0).
+  const channels = new Map();
+  const bus = { on: (channel, handler) => { const set = (channels.get(channel) ?? new Set()); set.add(handler); channels.set(channel, set); return () => { set.delete(handler); if (!set.size) channels.delete(channel); }; }, emit: (channel, data) => { for (const handler of [...(channels.get(channel) ?? [])]) handler(data); } };
+  extension({ registerTool: tool => tools.set(tool.name, tool), on: () => {}, events: bus, registerFlag: () => {}, getFlag: () => undefined });
   assert.ok(tools.has('intercom_stop_reminders'));
   for (const [name, tool] of tools) {
     assert.doesNotMatch(tool.description, /five[- ]minutes?|\bevery \d+ minutes?\b/i, name);

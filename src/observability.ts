@@ -9,10 +9,10 @@ export const LOG_FILE_PATTERN = /^writer-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 export const LOG_LIMITS = { fileBytes: 1024 * 1024, filesPerInstance: 3, queueEntries: 256, entryBytes: 4096, retentionMs: 7 * 24 * 60 * 60 * 1000, directoryBytes: 32 * 1024 * 1024, scanEntries: 4096, closeTimeoutMs: 250 } as const;
 export const EVENT_TYPES = ['runtime.starting', 'runtime.ready', 'runtime.closed', 'runtime.failed', 'config.changed', 'config.reloaded', 'transport.send', 'transport.receipt', 'transport.failed', 'transport.received', 'transport.rejected', 'registration.received', 'status.received', 'launch.result', 'host.submission', 'host.activity', 'host.ui_prompt'] as const;
 export type EventType = typeof EVENT_TYPES[number];
-const OUTCOMES = ['attempted', 'returned', 'failed', 'http_receipt', 'handler_failed', 'started', 'settled', 'snapshot', 'ended', 'written', 'removed', 'ready'] as const;
+const OUTCOMES = ['attempted', 'returned', 'failed', 'http_receipt', 'handler_failed', 'started', 'settled', 'snapshot', 'ended', 'written', 'removed', 'ready', 'blocked', 'suppressed'] as const;
 const ERROR_CODES = ['operation_failed', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EADDRINUSE', 'EACCES', 'EPERM', 'ENOENT', 'ENOSPC'] as const;
 const KINDS = ['message', 'report', 'registration', 'status', 'request_status', 'reload', 'stop', 'close', 'close_prepare', 'close_identity', 'close_request', 'handoff_report', 'close_ready', 'close_commit'] as const;
-const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize'] as const;
+const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize', 'adoption', 'declaration', 'promotion', 'reconciliation'] as const;
 export interface EventMetadata {
   peerSessionId?: string;
   peerName?: string;
@@ -25,6 +25,8 @@ export interface EventMetadata {
   role?: 'coordinator' | 'worker' | 'anonymous';
   /** Logical Pi role name. Distinct from the coordinator/worker/anonymous runtime role. */
   piRole?: string;
+  /** ADR 0005 adoption transition token. Correlation only: never authority, identity, or a path. */
+  transitionId?: string;
   outcome?: typeof OUTCOMES[number];
   errorCode?: typeof ERROR_CODES[number];
   operation?: typeof OPERATIONS[number];
@@ -60,6 +62,7 @@ export function sanitizeObservation(value: unknown): Observation | undefined {
   if (Number.isInteger(v.port) && Number(v.port) >= 1 && Number(v.port) <= 65535) result.port = Number(v.port);
   if (includes(['coordinator', 'worker', 'anonymous'], v.role)) result.role = v.role;
   if (safeText(v.piRole, 64) && logicalRole(v.piRole)) result.piRole = v.piRole;
+  if (safeText(v.transitionId, 64) && /^[0-9a-f-]+$/.test(v.transitionId)) result.transitionId = v.transitionId;
   if (includes(OUTCOMES, v.outcome)) result.outcome = v.outcome;
   if (includes(ERROR_CODES, v.errorCode)) result.errorCode = v.errorCode;
   if (includes(OPERATIONS, v.operation)) result.operation = v.operation;

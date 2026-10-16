@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError } from './observability.js';
@@ -10,7 +11,9 @@ import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose } from './handoff.js';
 import { CoordinatorReminders, readReminderMinutesEnv, reminderIntervalMs } from './reminders.js';
+import { AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, bootClaimEvidence, countBoards, projectsHome, stop } from './adoption.js';
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
+export const ADOPTION_NOT_READY = 'ADOPTION_NOT_READY';
 function requestedRole(role) {
     if (role === undefined)
         return undefined;
@@ -68,6 +71,39 @@ export class Intercom {
     reminders;
     reminderRevision = 0;
     reminderInvocation = 0;
+    /**
+     * ADR 0005 D3: coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
+     * projects-home board. It starts closed on unresolved evidence and opens only after committed active
+     * evidence and a successful write-free promotion. It gates coordinator tools, boot coordinator side
+     * effects, and this session's incoming registration/status/report/message/handoff effects, queued
+     * report persistence, notification, and reminder delivery. It never gates ordinary worker-targeted
+     * delivery, health, or read-only adoption status.
+     */
+    authorityEnabled = false;
+    authorityReady = false;
+    authorityEpoch = 0;
+    authorityDetail = 'not applicable';
+    adoption;
+    /** Closed when an adoption or declaration transaction invalidated an earlier callback epoch. */
+    actionEpoch() { return this.authorityEpoch; }
+    assertActionReady(epoch) {
+        if (!this.authorityEnabled || this.authorityReady)
+            return;
+        if (epoch !== undefined && epoch !== this.authorityEpoch)
+            fail(`${ADOPTION_NOT_READY}: the action-readiness epoch changed; this callback stops without further effects`);
+        fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}; no successful receipt, report persistence, registration change, reminder, or model turn is claimed for it`);
+    }
+    /** Close the local action epoch. Callers hold the returned value and fail once it changes. */
+    closeActionEpoch(detail = 'a coordinator transaction is in progress') {
+        this.authorityReady = false;
+        this.authorityDetail = detail;
+        return ++this.authorityEpoch;
+    }
+    openActionEpoch() {
+        this.authorityReady = true;
+        this.authorityDetail = 'coordinator action evidence is committed and this session is promoted';
+        ++this.authorityEpoch;
+    }
     workerStarted() { this.handoff?.workerStarted(); }
     workerSettled(successfulToolCallIds) { this.handoff?.workerSettled(successfulToolCallIds); }
     captureObserver() {
@@ -115,6 +151,9 @@ export class Intercom {
         this.registeredRoles.clear();
         this.roleResolved = false;
         this.resolvedRole = undefined;
+        this.authorityEnabled = false;
+        this.authorityReady = false;
+        this.authorityDetail = 'not applicable';
         const generation = ++this.generation, assertValid = this.validity();
         // Snapshot the reminder interval once for this runtime. A child tool cannot
         // change this process environment, and Pi /reload restarts this runtime.
@@ -155,6 +194,15 @@ export class Intercom {
                 throw error;
             }
             this.endpoint = endpoint;
+            // ADR 0005 D3: an Orchestrator launch counts the board and can hold here, before any board write or
+            // coordinator side effect. Binding a health endpoint is not an authority grant, and a held session
+            // still answers read-only `/intercom-adopt status`.
+            const held = await this.preflight(previous, assertValid);
+            if (held !== undefined) {
+                record('runtime.ready', { port: endpoint.port, role: 'anonymous', outcome: 'ready' });
+                this.host.notify(`Intercom Orchestrator held at 127.0.0.1:${endpoint.port}; ${held} Enter /intercom-adopt status.`);
+                return;
+            }
             if (!previous) {
                 const initialized = await this.store.initialize(this.id(), this.endpoint.port, assertValid);
                 if (initialized)
@@ -166,7 +214,19 @@ export class Intercom {
             this.reminders = new CoordinatorReminders({
                 isCoordinator: async () => { const fresh = await this.state(); assertValid(); return fresh.me?.coordinator === true; },
                 busy: () => this.host.busy(),
-                deliver: message => { assertValid(); this.host.deliver(message, false); },
+                // A reminder is an epoch-bound delivery. A closed epoch is suppressed where it fires, with no
+                // buffer, no queued later delivery, and no replay.
+                deliver: message => {
+                    try {
+                        assertValid();
+                        this.assertActionReady();
+                    }
+                    catch (error) {
+                        this.captureObserver()('host.submission', { outcome: 'suppressed' });
+                        throw error;
+                    }
+                    this.host.deliver(message, false);
+                },
             }, this.options.reminderClock, reminderInterval);
             this.handoff = new HandoffWorkflow({
                 state: () => this.state(), assertCurrent: assertValid,
@@ -186,15 +246,9 @@ export class Intercom {
                 busy: () => this.host.busy(), provider: this.options.closeProvider, timeoutMs: this.options.closeTimeoutMs,
             });
             if (me?.coordinator) {
-                await this.handoff.recover();
-                assertValid();
-                try {
-                    this.observer?.maintain?.();
-                }
-                catch { /* No cleanup failure affects readiness. */ }
-                await this.store.update(this.id(), c => { requireCoordinator(c, this.id()).port = this.endpoint.port; }, assertValid);
-                assertValid();
-                record('config.changed', { operation: 'port_update', outcome: 'written', port: this.endpoint.port });
+                // Responsibility load is write-free and always runs, so an unresolved-claim coordinator still has
+                // its identity. Recovery, observer maintenance and the port refresh are config writes and stay
+                // behind D3's action readiness.
                 try {
                     await this.reload();
                 }
@@ -203,7 +257,22 @@ export class Intercom {
                     this.host.notify(`Name/responsibility synchronization failed: ${String(e)}`);
                 }
                 assertValid();
-                this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
+                if (this.authorityEnabled && !this.authorityReady) {
+                    record('host.submission', { outcome: 'blocked', errorCode: 'operation_failed' });
+                    this.host.notify(`Intercom Coordinator endpoint at 127.0.0.1:${this.endpoint.port}; ${this.authorityDetail}; coordinator tools, close recovery, observer maintenance and the port refresh are fenced until /intercom-adopt resolves it.`);
+                }
+                else {
+                    await this.handoff.recover();
+                    assertValid();
+                    try {
+                        this.observer?.maintain?.();
+                    }
+                    catch { /* No cleanup failure affects readiness. */ }
+                    await this.store.update(this.id(), c => { requireCoordinator(c, this.id()).port = this.endpoint.port; }, assertValid);
+                    assertValid();
+                    record('config.changed', { operation: 'port_update', outcome: 'written', port: this.endpoint.port });
+                    this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
+                }
             }
             else {
                 if (me) {
@@ -290,6 +359,111 @@ export class Intercom {
             if (this.closing === closing)
                 this.closing = undefined;
         }
+    }
+    /**
+     * ADR 0005 D3 preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
+     * this process's captured configuration, never from a request. Counts `.pi-intercom` directories along
+     * cwd -> projects home before any write, then classifies and applies the claim gate. Returns a held
+     * reason when no board may be written, and throws when the board layout itself is unsafe.
+     */
+    async preflight(previous, assertValid) {
+        if (!this.orchestratorLaunch())
+            return undefined;
+        const home = projectsHome({ projectsHome: this.options.adoption?.projectsHome ?? process.env[PROJECTS_HOME_ENV], homeDirectory: homedir() });
+        const cwd = await realpath(this.host.cwd), canonicalHome = await realpath(home);
+        const relative = path.relative(canonicalHome, cwd);
+        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+            throw new Error(`PiIntercom: cwd ${cwd} is outside projects home ${canonicalHome}; an Orchestrator session reads or writes no board`);
+        }
+        const boards = await countBoards(cwd, canonicalHome);
+        if (boards.length > 1) {
+            throw new Error(`PiIntercom: a second board at ${boards[1]} is a creation-time failure, not a cleanup item; nothing was read or written`);
+        }
+        if (boards.length === 1 && boards[0] !== canonicalHome) {
+            throw new Error(`PiIntercom: the only board is at ${boards[0]}, not the projects home ${canonicalHome}; stop`);
+        }
+        this.authorityEnabled = true;
+        if (boards.length === 0) {
+            assertValid();
+            return cwd === canonicalHome
+                ? 'no board exists at the projects home; first-board initialization happens only as an explicit /intercom-adopt decision'
+                : `no board exists between ${cwd} and ${canonicalHome}; a private board is never created in a child directory`;
+        }
+        const own = previous?.agents.find(agent => agent.sessionId === this.id());
+        const board = previous ? previous.agents.find(agent => agent.coordinator) : undefined;
+        if (board && own?.sessionId === board.sessionId) {
+            const evidence = await bootClaimEvidence({ home: canonicalHome, identity: { sessionId: this.id(), port: this.endpoint.port } });
+            if (evidence.ready) {
+                this.openActionEpoch();
+                return undefined;
+            }
+            this.closeActionEpoch(evidence.detail);
+            return undefined;
+        }
+        this.closeActionEpoch(own && !own.coordinator
+            ? `this session is registered as worker ${own.name}: a registered worker is never promoted, and adoption needs a fresh session id`
+            : 'this session is an anonymous worker on this board: adoption is required, and no declaration or coordinator action is permitted without it');
+        return undefined;
+    }
+    /** Canonical launch role only: `<PI_ROLES_DIR or ~/.pi/roles>/orchestrator`, captured from this process. */
+    orchestratorLaunch() {
+        const configured = this.host.roleDirectory ?? process.env.PI_ROLE_DIR;
+        const roles = this.options.adoption?.rolesDirectory ?? this.host.rolesDirectory ?? process.env.PI_ROLES_DIR ?? path.join(homedir(), '.pi', 'roles');
+        if (!configured || !configured.trim())
+            return false;
+        return path.resolve(configured) === path.resolve(roles, ORCHESTRATOR_ROLE);
+    }
+    /** True once the claim gate permits coordinator action, or when the gate does not apply to this session. */
+    coordinatorActionReady() { return !this.authorityEnabled || this.authorityReady; }
+    responsibilityLoaded() { return this.responsibility !== undefined; }
+    /**
+     * ADR 0005 D7: in-place promotion. No `start`, `close`, `HandoffWorkflow.recover`, extension reload,
+     * worker action, monitor or pane operation, log maintenance, report clearing, session replacement, or
+     * job-state rewrite. It reads config and loads this session's responsibility from the new entry only.
+     */
+    async promoteCoordinator() {
+        const record = this.captureObserver(), assertValid = this.validity();
+        const { me } = await this.state();
+        assertValid();
+        if (!me?.coordinator)
+            fail('promotion requires this session to be the coordinator entry on this board');
+        this.responsibility = { ...me };
+        this.authorityEnabled = true;
+        this.openActionEpoch();
+        assertValid();
+        record('config.reloaded', { role: 'coordinator', outcome: 'written' });
+        this.host.notify(`Intercom responsibility loaded for ${me.name} as Coordinator; promotion is in place, with no extension reload, worker action, or work turn started.`);
+    }
+    /**
+     * The sole adoption entry point. The backend checks its own authorization independently of whether any
+     * command was installed, discovered, or visible: role, session identity, and the command context are
+     * re-verified inside the workflow, and a manually bypassed frontend still fails here.
+     */
+    async adoptCoordinator(context, verb, args = []) {
+        if (!this.orchestratorLaunch())
+            return stop('AUTH', ['this Pi process was not launched as the canonical Orchestrator role; no adoption backend is offered']);
+        const workflow = this.adoption ??= new AdoptionWorkflow({
+            roleDirectory: this.host.roleDirectory ?? process.env.PI_ROLE_DIR,
+            rolesDirectory: this.options.adoption?.rolesDirectory ?? this.host.rolesDirectory ?? process.env.PI_ROLES_DIR ?? path.join(homedir(), '.pi', 'roles'),
+            ...(this.options.adoption?.projectsHome ? { projectsHome: this.options.adoption.projectsHome } : {}),
+            storeFor: root => this.options.store?.(root) ?? new ConfigStore(root),
+            sessionId: () => this.id(),
+            busy: () => this.host.busy(),
+            endpointPort: () => this.endpoint?.port,
+            probe: (agent, options) => (this.options.probe ?? probeWorker)(agent, { signal: this.probeController.signal, ...options }),
+            promote: () => this.promoteCoordinator(),
+            responsibilityLoaded: () => this.responsibilityLoaded(),
+            // The workflow owns epoch transitions: it closes before preparing intent and opens only after
+            // committed active evidence plus a successful write-free promotion. A read-only `status` never
+            // closes it, so a resolved coordinator cannot lose readiness by looking at its own board.
+            readiness: {
+                close: detail => this.closeActionEpoch(detail),
+                current: () => this.actionEpoch(),
+                open: () => this.openActionEpoch(),
+            },
+            listSessions: this.options.adoption?.listSessions ?? (async () => { throw new Error('no Pi session store is wired'); }),
+        });
+        return workflow.run(context, verb, args);
     }
     async state() {
         const assertValid = this.validity();
@@ -384,10 +558,15 @@ export class Intercom {
     async handleReceive(message) {
         const record = this.captureObserver();
         const assertValid = this.validity();
+        // D3: an incoming callback binds the epoch it was admitted in. A callback that crosses a closed
+        // readiness epoch stops at its next side effect, with no buffered or replayed delivery later.
+        const epoch = this.actionEpoch();
+        const assertReady = () => { assertValid(); this.assertActionReady(epoch); };
         const receivedFence = message.kind === 'status' ? this.resumeFences.get(message.from) : undefined;
         const eligibleAnnouncement = receivedFence?.submitted ? receivedFence : undefined;
         const { id, config, me } = await this.state();
         assertValid();
+        assertReady();
         if (message.to !== id)
             fail('recipient session ID mismatch (stale endpoint)');
         const sender = config.agents.find(a => a.sessionId === message.from);
@@ -395,6 +574,7 @@ export class Intercom {
         const metadata = { peerSessionId: message.from, peerName: sender?.name, correlationId: message.correlationId, kind: message.kind, busy };
         const notify = (purpose, content) => {
             assertValid();
+            assertReady();
             record('host.submission', { ...metadata, outcome: 'attempted' });
             try {
                 this.host.deliver(`[Intercom ${purpose} from ${sender?.name ?? 'unconfigured worker'} (${message.from})]\n${content}`, busy);
@@ -409,6 +589,7 @@ export class Intercom {
         if (HANDOFF_KINDS.includes(message.kind)) {
             if (!this.handoff || !me || (!me.coordinator && !this.responsibility))
                 fail('handoff requires a configured, responsibility-loaded worker');
+            assertReady();
             await this.handoff.receive(message.kind, message.from, message.payload);
             return;
         }
@@ -418,10 +599,12 @@ export class Intercom {
                 fail('coordinator cannot report as worker');
             if (message.kind === 'registration') {
                 const projectDirectory = await directory(this.store.root, message.payload.projectDirectory);
+                assertReady();
                 // No agent entry or placeholder. A reported role is remembered only until explicit configure stores it.
                 if (message.payload.role !== undefined) {
                     if (!logicalRole(message.payload.role))
                         fail('invalid role');
+                    assertReady();
                     this.registeredRoles.set(message.from, message.payload.role);
                 }
                 const reportedRole = typeof message.payload.role === 'string' ? message.payload.role : undefined;
@@ -429,13 +612,16 @@ export class Intercom {
                 notify('registration', JSON.stringify({ sessionId: message.from, port: message.payload.port, projectDirectory, ...(reportedRole ? { role: reportedRole } : {}) }) + '\nThis is connection information, not a work assignment. Configure explicitly, then reload separately.');
             }
             else {
-                if (sender)
+                if (sender) {
+                    assertReady();
                     await this.store.update(id, c => {
                         const entry = c.agents.find(a => a.sessionId === message.from && !a.coordinator);
                         if (entry)
                             entry.port = message.payload.port;
                     }, assertValid);
+                }
                 assertValid();
+                assertReady();
                 const fence = sender && this.resumeFences.get(sender.sessionId);
                 if (fence && fence === eligibleAnnouncement) {
                     fence.announced = true;
@@ -466,19 +652,31 @@ export class Intercom {
             const payload = reportPayload(message.payload);
             if (this.pendingReports >= 64)
                 fail('report queue full; no report stored');
+            // Admission is refused before anything is stored, cleared, or acknowledged: no successful receipt
+            // for unsaved evidence, and no accept-and-buffer.
+            assertReady();
             this.pendingReports++;
             const pending = this.reportWrites.then(async () => {
                 assertValid();
+                assertReady();
                 const fresh = await this.state();
                 requireCoordinator(fresh.config, id);
+                assertReady();
                 if (!fresh.config.agents.some(agent => agent.sessionId === message.from && !agent.coordinator))
                     fail('reporting worker is no longer configured');
                 await saveWorkerReport(this.store.root, { version: 1, sessionId: message.from, ...payload, updatedAt: new Date().toISOString() }, assertValid);
                 assertValid();
                 try {
+                    assertReady();
                     notify('worker report', `Report: ${payload.status}\n${payload.summary}\nThis is a worker-authored public report, not approval or verified completion. Evaluate it before deciding any next step. Clearing retires the report only; it does not resume or complete work.`);
                 }
-                catch {
+                catch (error) {
+                    // Saved bytes are never rolled back or cleared, and a blocked notification is never reported as
+                    // a delivery, an unsaved report, or an approval. It stays visible through stored-report reads.
+                    if (String(error).includes(ADOPTION_NOT_READY)) {
+                        record('host.submission', { ...metadata, outcome: 'blocked' });
+                        fail('Report stored; coordinator notification blocked/not submitted; inspect stored report before any resend');
+                    }
                     fail('Report stored, but coordinator notification failed or became uncertain; do not blindly resend');
                 }
             });
@@ -546,6 +744,9 @@ export class Intercom {
         const assertValid = this.validity();
         const { id, config, me } = await this.state();
         assertValid();
+        // D3: the claim gate precedes coordinator-initiated tools, including list, worker_status and send.
+        if (me?.coordinator)
+            this.assertActionReady();
         if (operation === 'worker_status') {
             if (!me)
                 fail('worker_status requires a configured session');
