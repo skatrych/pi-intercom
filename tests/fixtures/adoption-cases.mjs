@@ -320,7 +320,9 @@ class Scenario {
             await fixture.claim.write('# Coordinator claim\n\n```json\n{ "not": "committed evidence" }\n```\n');
             break;
           case 'root':
-            await fixture.extra.boardAt('app');
+            // INCOMPLETE: the second board is placed in a child directory, which is exactly the shape an
+            // upward re-count cannot observe. Kept as the failing evidence for the guard that is missing.
+            await fixture.extra.boardAt('app-late');
             break;
           case 'generation':
             this.runtimeSession = 'replaced-mid-dialog';

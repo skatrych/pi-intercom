@@ -639,6 +639,17 @@ export class AdoptionWorkflow {
       const published = await store.transaction<{ stop: Result } | { prepared: string; activeCommit: string }>(async () => {
         const reentered = await this.options.probe({ sessionId: board.sessionId, port: board.port });
         if (reentered.state === 'connected') return { stop: halt('OLD_CONNECTED', `configured coordinator ${board.sessionId} port ${board.port} verified connected inside the transaction; nothing was written`) };
+        // INCOMPLETE / NOT A FIX, preserved deliberately. Approved sequencing asks for a board re-count
+        // inside the lock (ADR 0005:101) rather than only in the read-only preview, and this is that
+        // re-count. It does not close the `root-changed` gap: `countBoards` walks upward from cwd to the
+        // projects home, so a board that appears in a *child* directory is invisible to it by
+        // construction. Closing that gap needs a different guard - a re-scan of the in-scope directories
+        // for `.pi-intercom` - which is a design decision for the next owner, not a repair to attempt
+        // here. Left in place, unverified, because removing it would hide the requirement.
+        const recounted = await countBoards(surveyed.cwd, home);
+        if (recounted.length !== 1 || recounted[0] !== home) {
+          return { stop: halt('STALE_PREVIEW', `the board count changed while the decision was open (${recounted.join(', ') || 'none'}); a new preview and a new human decision are required, and nothing was written`) };
+        }
         const now = this.options.now?.() ?? new Date();
         const expected = patchCoordinatorEntry(scanned.raw, identity.sessionId, identity.port).after;
         const intent: ClaimRecord = {
