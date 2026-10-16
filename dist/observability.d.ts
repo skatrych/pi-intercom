@@ -13,10 +13,10 @@ export declare const LOG_LIMITS: {
 };
 export declare const EVENT_TYPES: readonly ["runtime.starting", "runtime.ready", "runtime.closed", "runtime.failed", "config.changed", "config.reloaded", "transport.send", "transport.receipt", "transport.failed", "transport.received", "transport.rejected", "registration.received", "status.received", "launch.result", "host.submission", "host.activity", "host.ui_prompt"];
 export type EventType = typeof EVENT_TYPES[number];
-declare const OUTCOMES: readonly ["attempted", "returned", "failed", "http_receipt", "handler_failed", "started", "settled", "snapshot", "ended", "written", "removed", "ready"];
+declare const OUTCOMES: readonly ["attempted", "returned", "failed", "http_receipt", "handler_failed", "started", "settled", "snapshot", "ended", "written", "removed", "ready", "blocked", "suppressed"];
 declare const ERROR_CODES: readonly ["operation_failed", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EADDRINUSE", "EACCES", "EPERM", "ENOENT", "ENOSPC"];
 declare const KINDS: readonly ["message", "report", "registration", "status", "request_status", "reload", "stop", "close", "close_prepare", "close_identity", "close_request", "handoff_report", "close_ready", "close_commit"];
-declare const OPERATIONS: readonly ["configure_worker", "set_multiplexer", "remove_worker", "create_worker", "resume_worker", "port_update", "initialize"];
+declare const OPERATIONS: readonly ["configure_worker", "set_multiplexer", "remove_worker", "create_worker", "resume_worker", "port_update", "initialize", "adoption", "declaration", "promotion", "reconciliation"];
 export interface EventMetadata {
     peerSessionId?: string;
     peerName?: string;
@@ -29,6 +29,8 @@ export interface EventMetadata {
     role?: 'coordinator' | 'worker' | 'anonymous';
     /** Logical Pi role name. Distinct from the coordinator/worker/anonymous runtime role. */
     piRole?: string;
+    /** ADR 0005 adoption transition token. Correlation only: never authority, identity, or a path. */
+    transitionId?: string;
     outcome?: typeof OUTCOMES[number];
     errorCode?: typeof ERROR_CODES[number];
     operation?: typeof OPERATIONS[number];

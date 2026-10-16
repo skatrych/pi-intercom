@@ -6,10 +6,10 @@ export const LOG_DIRECTORY = '.pi-intercom/logs';
 export const LOG_FILE_PATTERN = /^writer-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl(?:\.[12]|\.closed)?$/;
 export const LOG_LIMITS = { fileBytes: 1024 * 1024, filesPerInstance: 3, queueEntries: 256, entryBytes: 4096, retentionMs: 7 * 24 * 60 * 60 * 1000, directoryBytes: 32 * 1024 * 1024, scanEntries: 4096, closeTimeoutMs: 250 };
 export const EVENT_TYPES = ['runtime.starting', 'runtime.ready', 'runtime.closed', 'runtime.failed', 'config.changed', 'config.reloaded', 'transport.send', 'transport.receipt', 'transport.failed', 'transport.received', 'transport.rejected', 'registration.received', 'status.received', 'launch.result', 'host.submission', 'host.activity', 'host.ui_prompt'];
-const OUTCOMES = ['attempted', 'returned', 'failed', 'http_receipt', 'handler_failed', 'started', 'settled', 'snapshot', 'ended', 'written', 'removed', 'ready'];
+const OUTCOMES = ['attempted', 'returned', 'failed', 'http_receipt', 'handler_failed', 'started', 'settled', 'snapshot', 'ended', 'written', 'removed', 'ready', 'blocked', 'suppressed'];
 const ERROR_CODES = ['operation_failed', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EADDRINUSE', 'EACCES', 'EPERM', 'ENOENT', 'ENOSPC'];
 const KINDS = ['message', 'report', 'registration', 'status', 'request_status', 'reload', 'stop', 'close', 'close_prepare', 'close_identity', 'close_request', 'handoff_report', 'close_ready', 'close_commit'];
-const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize'];
+const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize', 'adoption', 'declaration', 'promotion', 'reconciliation'];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function safeText(value, max) {
     return typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
@@ -45,6 +45,8 @@ export function sanitizeObservation(value) {
         result.role = v.role;
     if (safeText(v.piRole, 64) && logicalRole(v.piRole))
         result.piRole = v.piRole;
+    if (safeText(v.transitionId, 64) && /^[0-9a-f-]+$/.test(v.transitionId))
+        result.transitionId = v.transitionId;
     if (includes(OUTCOMES, v.outcome))
         result.outcome = v.outcome;
     if (includes(ERROR_CODES, v.errorCode))

@@ -10,6 +10,7 @@ import { ConfigStore } from '../dist/config.js';
 import { Intercom } from '../dist/runtime.js';
 import { listen, send } from '../dist/transport.js';
 import { readObservationSnapshot } from '../dist/snapshot.js';
+import { ADOPTION_CHANNEL, ADOPTION_PROTOCOL } from '../dist/index.js';
 
 // These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
@@ -26,9 +27,19 @@ async function adapter(t) {
   const inheritedHerdr = process.env.HERDR_ENV;
   delete process.env.HERDR_ENV;
   const tools = new Map(), events = new Map(), messages = [], notices = [], names = [], widgets = [];
+  const channels = new Map();
+  // Pi's public event bus delivers synchronously to handlers that return before their first await.
+  const bus = {
+    on: (channel, handler) => {
+      const handlers = channels.get(channel) ?? new Set();
+      handlers.add(handler); channels.set(channel, handlers);
+      return () => { handlers.delete(handler); if (!handlers.size) channels.delete(channel); };
+    },
+    emit: (channel, data) => { for (const handler of [...(channels.get(channel) ?? [])]) handler(data); },
+  };
   let id = 'adapter-coordinator', idle = true, name = '', failName = false;
   const pi = {
-    registerTool: tool => tools.set(tool.name, tool), on: (event, handler) => events.set(event, handler),
+    registerTool: tool => tools.set(tool.name, tool), on: (event, handler) => events.set(event, handler), events: bus,
     getSessionName: () => name,
     setSessionName: value => { if (failName) throw new Error('injected name failure'); name = value; names.push(value); },
     sendUserMessage: (content, options) => messages.push({ content, options }),
@@ -46,6 +57,8 @@ async function adapter(t) {
     }
   });
   return { root, ctx, tools, events, messages, notices, names, widgets,
+    // What a role-local frontend sees: exactly the offers registered so far, without invoking any.
+    adoptionOffers: () => { const payload = { offers: [] }; bus.emit(ADOPTION_CHANNEL, payload); return payload.offers; },
     setId: value => { id = value; }, setIdle: value => { idle = value; }, failName: value => { failName = value; },
     setDelivery: deliver => { pi.sendUserMessage = deliver; },
     start: () => events.get('session_start')({}, ctx),
@@ -116,9 +129,17 @@ test('handoff settlement observes only persisted successful tool IDs and new inp
 });
 
 test('single extension registers all agreed tools without starting resources in factory', async () => {
-  const tools = new Map(), events = new Map();
-  extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler) });
+  const tools = new Map(), events = new Map(), channels = new Map();
+  const factoryBus = {
+    on: (channel, handler) => { channels.set(channel, handler); return () => channels.delete(channel); },
+    emit: (channel, data) => channels.get(channel)?.(data),
+  };
+  // Factory registration registers tools, session event handlers, and one adoption service listener.
+  // It starts no resources, opens no listener, writes no config, and invokes no adoption.
+  extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler), events: factoryBus });
   assert.equal(tools.size, 16);
+  assert.deepEqual([...channels.keys()], [ADOPTION_CHANNEL]);
+  assert.equal(ADOPTION_PROTOCOL, 1);
   assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
@@ -134,6 +155,14 @@ test('single extension registers all agreed tools without starting resources in 
   assert.match(tools.get('intercom_stop_reminders').description, /Coordinator only/);
   assert.deepEqual(Object.keys(tools.get('intercom_stop_reminders').parameters.properties), []);
   await assert.rejects(tools.get('intercom_list').execute('test', {}, undefined, undefined, {}), /not initialized/);
+  // Before any session starts, discovery yields no runnable service, and a malformed payload is ignored.
+  const beforeStart = { offers: [] };
+  factoryBus.emit(ADOPTION_CHANNEL, beforeStart);
+  assert.equal(beforeStart.offers.length, 1);
+  const refused = await beforeStart.offers[0].run({ sessionManager: { getSessionId: () => 'anything' } }, 'status');
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, 'SESSION_CHANGED');
+  assert.equal(refused.exitCode, 1);
   await events.get('session_shutdown')();
   await events.get('session_shutdown')();
 });

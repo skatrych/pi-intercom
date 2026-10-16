@@ -4,6 +4,7 @@ import { Type } from 'typebox';
 import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMutationQueue } from '@earendil-works/pi-coding-agent';
 import { ConfigStore } from './config.js';
 import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
+import { stop } from './adoption.js';
 import { launchers } from './launcher.js';
 import { ensureMonitorPane } from './monitor-launcher.js';
 import { createActivityTracker } from './activity.js';
@@ -37,15 +38,57 @@ export function resumeSessionDirectory(cwd, envSessionDir = process.env.PI_CODIN
     const sessionDir = settings.getSessionDir();
     return sessionDir ? path.resolve(cwd, sessionDir) : undefined;
 }
-// Participate in Pi's own per-file mutation queue as well as Intercom serialization.
+// Participate in Pi's own per-file mutation queue as well as Intercom serialization. Only the outer
+// queue is overridden: ConfigStore owns the order, and a nested acquisition would deadlock Pi's queue.
 class PiConfigStore extends ConfigStore {
-    update(id, mutate, assertValid) {
-        return withFileMutationQueue(this.file, () => super.update(id, mutate, assertValid));
+    outerQueue(run) {
+        return withFileMutationQueue(this.file, run);
     }
 }
+/**
+ * Supported `pi.events` discovery channel for the role-local frontend. Versioned in the channel name.
+ * The payload carries no identity, port, role, path, or confirmation: the offered closure is process-local
+ * and is never serialized, so this bridge is neither an authorization token nor a security boundary.
+ */
+export const ADOPTION_CHANNEL = 'swactory:coordinator-adoption:v1';
+export const ADOPTION_PROTOCOL = 1;
+/** Narrow, non-throwing view of a foreign payload: only a known shape can receive an offer. */
+export function adoptionDiscovery(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return undefined;
+    const offers = value.offers;
+    return Array.isArray(offers) ? { offers: offers } : undefined;
+}
+/**
+ * All answers and authority data come from the backend's own captured Pi context. A caller supplies only
+ * a supported command-only control (`waitForIdle`), never a dialog implementation, identity, or decision.
+ */
+function adoptionContext(captured, waitForIdle) {
+    return {
+        cwd: captured.cwd,
+        mode: captured.mode,
+        hasUI: captured.hasUI,
+        isProjectTrusted: () => captured.isProjectTrusted(),
+        isIdle: () => captured.isIdle(),
+        sessionManager: {
+            getSessionId: () => captured.sessionManager.getSessionId(),
+            getSessionFile: () => captured.sessionManager.getSessionFile(),
+            getSessionDir: () => captured.sessionManager.getSessionDir(),
+        },
+        ui: {
+            // Host signature is `input(title, placeholder)` and `confirm(title, message)` in both the developed
+            // against 0.84.4 and the intended 1.2.0 public API. A dismissal resolves undefined, which is a stop.
+            input: async ({ prompt }) => captured.ui.input('Intercom coordinator adoption', prompt),
+            confirm: async ({ prompt }) => captured.ui.confirm('Intercom coordinator adoption', prompt),
+        },
+        ...(waitForIdle ? { waitForIdle } : {}),
+    };
+}
+function stopResult(code, line) { return stop(code, [line]); }
 export default function intercomExtension(pi) {
     let runtime;
     let context;
+    let unsubscribeAdoption;
     let generation = 0;
     let activityOutcome = 'snapshot';
     const activity = createActivityTracker((phase, detail) => {
@@ -124,6 +167,12 @@ export default function intercomExtension(pi) {
             notify: text => ctx.ui.notify(text, 'info'),
         }, {
             launch: launcher.launch, store: root => new PiConfigStore(root),
+            adoption: {
+                // The actual session directory, including `--session-dir`, never a guessed default and never the
+                // most-recent session file. Pi's own list is the machine source for the sessionId.
+                listSessions: async (cwd, sessionDir) => (await SessionManager.list(cwd, sessionDir ?? resumeSessionDirectory(cwd)))
+                    .map(session => ({ id: session.id, path: session.path })),
+            },
             closeProvider: createCloseProvider({
                 sessionId: () => context.sessionManager.getSessionId(),
                 sessionFile: () => context.sessionManager.getSessionFile(),
@@ -143,6 +192,10 @@ export default function intercomExtension(pi) {
             await current.close();
             return;
         }
+        // Offer the backend for every started session, including one held before a board write or an
+        // anonymous session: adoption and read-only status are exactly what those sessions need. The offer
+        // closure reads the current runtime at emit time and re-checks this generation at invoke time.
+        offerAdoptionBackend();
         try {
             if ((await current.state()).me?.coordinator) {
                 try {
@@ -167,11 +220,44 @@ export default function intercomExtension(pi) {
     pi.on('session_shutdown', async () => {
         generation++;
         activity.reset();
+        unsubscribeAdoption?.();
+        unsubscribeAdoption = undefined;
         const oldRuntime = runtime;
         runtime = undefined;
         context = undefined;
         await oldRuntime?.close();
     });
+    /**
+     * Offer the deterministic backend to a role-local frontend through Pi's own event bus. The handler is
+     * synchronous, so a frontend sees its offer count before any act. It never runs anything during
+     * discovery, and an offered closure re-checks its captured generation and session when invoked.
+     * Offering is not permission: the backend independently authorizes every invocation. Re-registered on
+     * each session start and removed on shutdown, so a stale service can never be offered.
+     */
+    function offerAdoptionBackend() {
+        unsubscribeAdoption?.();
+        unsubscribeAdoption = pi.events.on(ADOPTION_CHANNEL, value => {
+            const discovery = adoptionDiscovery(value);
+            if (!discovery)
+                return;
+            const started = generation, offered = runtime, captured = context;
+            discovery.offers.push({
+                protocol: ADOPTION_PROTOCOL,
+                run: async (rawContext, verb, args) => {
+                    const caller = rawContext;
+                    if (!offered || !captured || started !== generation || runtime !== offered)
+                        return stopResult('SESSION_CHANGED', 'the runtime or session that offered this service is gone; no act was attempted');
+                    if (!caller || typeof caller !== 'object' || typeof caller.sessionManager?.getSessionId !== 'function')
+                        return stopResult('USAGE', 'a supported Pi command context is required; identity and confirmation are never serialized parameters');
+                    if (caller.sessionManager.getSessionId() !== captured.sessionManager.getSessionId())
+                        return stopResult('SESSION_CHANGED', 'the command context session is not this runtime session; no act was attempted');
+                    const waitForIdle = typeof caller.waitForIdle === 'function' ? () => caller.waitForIdle() : undefined;
+                    return offered.adoptCoordinator(adoptionContext(captured, waitForIdle), verb, args ?? []);
+                },
+            });
+        });
+    }
+    offerAdoptionBackend();
     pi.on('input', (_event, ctx) => {
         context = ctx;
         runtime?.workerStarted(); // New owner input invalidates a pending close-readiness epoch.
