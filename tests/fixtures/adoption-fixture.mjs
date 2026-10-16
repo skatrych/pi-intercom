@@ -160,6 +160,8 @@ export async function createFixture(options = {}) {
   };
 
   await mkdir(path.join(home, 'app', 'web'), { recursive: true });
+  await mkdir(path.join(home, 'roles', 'orchestrator'), { recursive: true });
+  await mkdir(path.join(home, 'roles', 'developer'), { recursive: true });
   await gitOk(['init', '-q', '--initial-branch=main']);
   await gitOk(['config', 'user.email', 'fixture@example.invalid']);
   await gitOk(['config', 'user.name', 'Intercom Fixture']);
@@ -207,10 +209,10 @@ export async function createFixture(options = {}) {
   };
   const session = {
     /** One persisted Pi session header, the shape Pi writes as the first line of a session file. */
-    persist: async (id, directory = sessions) => {
+    persist: async (id, directory = sessions, cwd = home) => {
       const file = path.join(directory, `2026-10-16T09-00-00-000Z_${id}.jsonl`);
       await mkdir(path.dirname(file), { recursive: true });
-      await writeFile(file, `${JSON.stringify({ type: 'session', version: 3, id, timestamp: '2026-10-16T09:00:00.000Z', cwd: home })}\n`);
+      await writeFile(file, `${JSON.stringify({ type: 'session', version: 3, id, timestamp: '2026-10-16T09:00:00.000Z', cwd })}\n`);
       return file;
     },
     header: async file => JSON.parse((await readFile(file, 'utf8')).split('\n', 1)[0]),
@@ -248,7 +250,7 @@ export async function createFixture(options = {}) {
     await writeFile(path.join(reportDirectory, 'a'.repeat(64) + '.json'), '{"version":1,"status":"blocked","summary":"seed"}\n');
     await writeFile(path.join(home, '.pi-intercom/keep.txt'), 'do not touch\n');
     await session.persist(IDS.gone, path.join(home, '.pi/old-sessions'));
-    const read = async directory => (await readdir(directory)).sort();
+    const read = async directory => Object.fromEntries(await Promise.all((await readdir(directory)).sort().map(async name => [name, await readFile(path.join(directory, name), 'utf8')])));
     return {
       logDirectory, reportDirectory,
       snapshot: async () => ({

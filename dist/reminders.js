@@ -73,6 +73,7 @@ export class CoordinatorReminders {
         return !this.disposed && this.generation === generation && this.tick === tick;
     }
     schedule(generation) {
+        const assertReady = this.host.captureGuard?.();
         this.cancel = this.timer.schedule(() => {
             if (this.disposed || generation !== this.generation)
                 return;
@@ -86,9 +87,25 @@ export class CoordinatorReminders {
             this.checking = true;
             void (async () => {
                 try {
+                    try {
+                        assertReady?.();
+                    }
+                    catch {
+                        if (this.current(generation, tick))
+                            this.stop();
+                        return;
+                    }
                     const coordinator = await this.host.isCoordinator();
                     if (!this.current(generation, tick))
                         return;
+                    try {
+                        assertReady?.();
+                    }
+                    catch {
+                        if (this.current(generation, tick))
+                            this.stop();
+                        return;
+                    }
                     if (!coordinator) {
                         this.stop();
                         return;

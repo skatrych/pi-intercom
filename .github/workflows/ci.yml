@@ -24,3 +24,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run check:package
+      - name: Install intended public host in disposable CI prefix
+        run: npm install --prefix "${{ runner.temp }}/pi-adoption-host" --no-package-lock --no-audit --no-fund @earendil-works/pi-coding-agent@1.2.0
+      - name: Verify adoption public host API and packed source
+        env:
+          PI_ADOPTION_HOST_ROOT: ${{ runner.temp }}/pi-adoption-host/node_modules/@earendil-works/pi-coding-agent
+        run: npm run test:adoption-host

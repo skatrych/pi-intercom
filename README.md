@@ -110,7 +110,29 @@ Created/resumed workers receive `--intercom-root /absolute/session/root` explici
 
 **Upgrade note:** Existing subfolder workers cannot rejoin a parent roster by supplying a flag. Their saved history/config entries are retained, but launching them in a subfolder with the parent's config is refused. Use workers whose configured directory is the coordinator root, and explicitly describe any subfolder work in their assignment. Independent sessions started in subfolders use only their own local config; ancestor files are left untouched.
 
+Ordinary non-Orchestrator startup uses only that local config; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before reading any config: second/wrong/unsafe boards stop, and no-board startup is held for a deliberate root bootstrap decision rather than silently creating a child board. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators. Coordinator actions and boot side effects are held until committed matching claim evidence and local responsibility are ready.
+
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
+
+## Fresh Orchestrator coordinator context
+
+The sole replacement path is fork `Intercom.adoptCoordinator`, invoked by the human through
+`/intercom-adopt` in the separately installed Swactory **Orchestrator-only** role frontend.
+`/intercom-adopt status` is read-only; the skill explains the same route. No model-callable adoption
+tool, writable HTTP endpoint, terminal helper, JSON edit or worker rebinding is supplied. The backend
+independently checks captured launch role, current persisted session/endpoint, trust, idle state,
+collisions, immutable preview and direct human UI answers. Connected old endpoint stops;
+disconnected/unknown never proves termination.
+
+Prepared intent is committed before the coordinator-only lossless token patch; active evidence and
+write-free in-place promotion precede authority. Config tools, incoming callbacks, queued report
+saves and reminders are fenced through failures. Reinvoke the **same command** for anchored evidence
+finalization or write-free promotion retry; never replay a swap. Workers, pending jobs and history
+remain untouched. Existing workers route to the new coordinator from disk on their next send;
+**adoption itself requires no worker reload/restart**. Installation/code reload is a different step.
+All config-publishing processes must first be upgraded to the common filesystem-lock contract;
+stale locks require human maintenance, never automatic reclamation. This change does not authorize
+agents to merge/release/install/adopt live. See [backend, recovery and proof contract](references/coordinator-adoption.md).
 
 ## Explicit workflow
 
@@ -255,7 +277,7 @@ Legacy coordinator-only `dashboardPort` values are accepted for migration, but t
 
 Workers have `coordinator:false` and an existing project directory equal to root or below it. Writes canonicalize directories and check real paths (including symlink escapes). Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
 
-Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. Updates are serialized, join Pi's file-mutation queue, validate, fsync a temporary file and atomically rename. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
+Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. All publications share Pi's file-mutation queue → process-local per-file queue → owner-token filesystem mutex; contention stops without stealing/replay. Updates recheck coordinator authority after lock acquisition, validate, fsync a temporary file and atomically rename. Adoption commits intent first and losslessly changes only the two coordinator identity value tokens; ordinary writes retain their normal serialization. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
 
 HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.1 also exposes side-effect-free `GET /intercom/health`, returning only protocol version and current session ID; it does not submit messages/model turns or write config. Envelope:
 

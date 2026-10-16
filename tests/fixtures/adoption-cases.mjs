@@ -58,7 +58,7 @@ const KNOWN_KEYS = new Set(['own', 'role', 'config', 'noBoard', 'boardAtChild', 
   'symlinkEscape', 'outsideCwd', 'cwdChild', 'cwdOutside', 'session', 'sessionDir', 'seed', 'claim', 'lock', 'hook',
   'ports', 'ownHealth', 'oldEndpoint', 'reconnect', 'answers', 'noUi', 'forgedArguments', 'during', 'preparedSwap',
   'dirty', 'reinvoke', 'promote', 'promoted', 'publish', 'expect', 'assert', 'note', 'run', 'runtime', 'runtimeCase',
-  'race', 'crash', 'untrusted', 'busy']);
+  'race', 'crash', 'untrusted', 'busy', 'retryPromotion']);
 
 /** An unrecognised spec key would silently stop testing anything, so it is a hard error. */
 function assertSpec(spec) {
@@ -120,16 +120,20 @@ class Scenario {
     // listener only when the case requires a reachable or malformed old coordinator.
     const own = fixture.track(await bindEndpoint(this.spec.ownHealth === 'mismatch' ? 'endpoint-impostor' : this.ownIdValue, this.parts.transport));
     this.ownPort = own.port;
-    let coordinatorPort = OWN_PORTS.coordinator;
-    if (specHasOldEndpoint(this.spec)) {
-      const identity = this.spec.oldEndpoint === 'matching' || this.spec.oldEndpoint === 'after-dialog' ? IDS.gone : undefined;
-      this.old = fixture.track(await bindEndpoint(identity ?? IDS.gone, this.parts.transport));
+    const unused = await bindEndpoint('fixture-reserved-closed', this.parts.transport);
+    let coordinatorPort = unused.port; await unused.close();
+    const workerOne = await bindEndpoint(IDS.workerOne, this.parts.transport);
+    const workerOnePort = workerOne.port; await workerOne.close();
+    const workerTwo = await bindEndpoint(IDS.workerTwo, this.parts.transport);
+    const workerTwoPort = workerTwo.port; await workerTwo.close();
+    if (['matching', 'after-dialog', 'malformed'].includes(this.spec.oldEndpoint)) {
+      this.oldConnected = this.spec.oldEndpoint === 'matching';
+      this.old = fixture.track(await this.parts.transport.listen(0, async () => { throw new Error('no messages'); }, () => ({ version: 1, sessionId: this.oldConnected ? IDS.gone : 'fixture-nonmatching-health' })));
       coordinatorPort = this.old.port;
-      if (this.spec.oldEndpoint === 'malformed') { /* a listener that answers with nothing useful */ }
     }
     // A session that is already the coordinator entry has refreshed that entry to its own bound port at
     // boot, so the board must name the real ephemeral port for the identity/gate pair to match.
-    this.ports = { coordinator: this.spec.own === 'coordinator' ? this.ownPort : coordinatorPort, workerOne: OWN_PORTS.workerOne, workerTwo: OWN_PORTS.workerTwo };
+    this.ports = { coordinator: this.spec.own === 'coordinator' ? this.ownPort : coordinatorPort, workerOne: workerOnePort, workerTwo: workerTwoPort };
     if (typeof this.spec.ports === 'function') Object.assign(this.ports, this.spec.ports(this.ownPort));
     // Board.
     this.configStyle = this.spec.config ?? 'full';
@@ -150,8 +154,8 @@ class Scenario {
     }
     // Persisted Pi session.
     this.sessionDir = this.spec.session === 'custom-dir' ? path.join(fixture.home, '.pi', 'custom-sessions') : fixture.sessions;
-    if (this.spec.session !== 'unpersisted') this.sessionFile = await fixture.session.persist(this.ownIdValue, this.sessionDir);
-    if (this.spec.session === 'wrong-header') this.sessionFile = await fixture.session.persist('a-different-session', this.sessionDir);
+    if (this.spec.session !== 'unpersisted') this.sessionFile = await fixture.session.persist(this.ownIdValue, this.sessionDir, this.cwd());
+    if (this.spec.session === 'wrong-header') this.sessionFile = await fixture.session.persist('a-different-session', this.sessionDir, this.cwd());
     if (this.spec.seed) { this.seedSnapshot = await fixture.seeded(); this.seedBefore = await this.seedSnapshot.snapshot(); }
     // Claim evidence.
     await this.buildClaim();
@@ -174,11 +178,9 @@ class Scenario {
     this.recorded = recorder();
     // A two-slot epoch, exactly as the runtime implements it: close/invalid/open.
     this.readiness = {
-      current: 0, invalid: 0, openFlag: true,
-      close: () => { if (this.readiness.current !== 0) this.readiness.invalid = this.readiness.current; this.readiness.current = 0; this.readiness.openFlag = false; return 0; },
-      invalid: 0,
-      open: () => { if (this.readiness.current === 0) this.readiness.current = this.readiness.invalid; this.readiness.openFlag = this.readiness.current !== 0; return this.readiness.current; },
-      current2: () => this.readiness.current,
+      current: 0, openFlag: false,
+      close: () => { this.readiness.openFlag = false; return ++this.readiness.current; },
+      open: () => { this.readiness.openFlag = true; return ++this.readiness.current; },
     };
     // The human types exactly the sentence the prompt displays, taken from the product's own constant.
     const wording = ENDED_FOR(this.spec);
@@ -204,6 +206,10 @@ class Scenario {
     if (this.spec.untrusted && this.spec.trusted === undefined) this.context.isProjectTrusted = () => false;
     if (this.spec.busy) this.context.isIdle = () => false;
     if (this.spec.during) this.installDuringHook();
+    if (this.spec.reconnect) {
+      const confirm = this.context.ui.confirm;
+      this.context.ui.confirm = async options => { const result = await confirm(options); this.oldConnected = true; return result; };
+    }
     if (this.spec.preparedSwap) await this.reachPreparedSwap();
     if (this.spec.dirty) await this.applyDirty();
     // Installed last: the fixture's own commits must succeed, and only the product's later commit
@@ -234,7 +240,13 @@ class Scenario {
       roleDirectory: path.join(fixture.home, ROLES.directory, this.spec.role === 'developer' ? 'developer' : ROLES.orchestrator),
       rolesDirectory: path.join(fixture.home, ROLES.directory),
       projectsHome: fixture.home,
-      storeFor: root => new (this.parts.config.ConfigStore)(root, this.storeOptions()),
+      storeFor: root => {
+        const options = this.storeOptions();
+        return new this.parts.config.ConfigStore(root, { ...options, rename: async (from, to) => {
+          if (options.rename) await options.rename(from, to); else await rename(from, to);
+          this.swaps++;
+        } });
+      },
       sessionId: () => this.runtimeSession,
       busy: () => this.spec.busy === true,
       endpointPort: () => this.ownPort,
@@ -242,6 +254,7 @@ class Scenario {
       promote: async () => {
         this.promotions++;
         if (this.spec.promote === 'fail' && this.promoteFailures === 0) { this.promoteFailures++; throw new Error('injected promotion failure'); }
+        this.loaded = true;
       },
       responsibilityLoaded: () => this.responsibilityLoaded(),
       readiness: {
@@ -258,7 +271,7 @@ class Scenario {
     };
   }
   responsibilityLoaded() {
-    return this.spec.promoted === true && this.spec.claim === 'matching';
+    return this.loaded === true || (this.spec.promoted === true && this.spec.claim === 'matching');
   }
   storeOptions() {
     const fixture = this.fixture;
@@ -304,25 +317,26 @@ class Scenario {
   installDuringHook() {
     const fixture = this.fixture;
     const inner = this.context.ui;
+    let changed = false;
     this.context.ui = {
       input: options => inner.input(options),
       confirm: async options => {
         const answer = await inner.confirm(options);
-        if (!answer) return answer;
+        if (!answer || changed) return answer;
+        changed = true;
         switch (this.spec.during) {
           case 'roster': {
             const raw = await fixture.board.read();
-            await fixture.board.write(raw.replace('"multiplexer": "herdr"', '"multiplexer": "herdr",\n  // fixture: another writer added a worker during the dialog'.replace(/^[^\n]*$/, 'x')));
-            // The rewrite above is deliberately a byte change, not a semantic one: the preview is stale.
+            this.concurrentRaw = raw.replace('"multiplexer": "herdr"', '"multiplexer": "herdr",\n  "concurrentRosterRevision": 1');
+            await fixture.board.write(this.concurrentRaw);
             break;
           }
           case 'record':
             await fixture.claim.write('# Coordinator claim\n\n```json\n{ "not": "committed evidence" }\n```\n');
             break;
           case 'root':
-            // INCOMPLETE: the second board is placed in a child directory, which is exactly the shape an
-            // upward re-count cannot observe. Kept as the failing evidence for the guard that is missing.
-            await fixture.extra.boardAt('app-late');
+            // The launch cwd is app; this new board is ON the actual cwd→projects-home chain.
+            await fixture.extra.boardAt('app');
             break;
           case 'generation':
             this.runtimeSession = 'replaced-mid-dialog';
@@ -351,8 +365,8 @@ class Scenario {
       boardRoot: fixture.home,
       coordinator: { sessionId: IDS.gone, port: this.ports.coordinator },
       date: '2026-10-16',
-      authority: { kind: 'adoption', record: 'issue skatrych/swactory#31', confirmedEndedAt: '2026-10-16T09:00:00.000Z', wording: ENDED_WORDING(IDS.gone) },
-      previous: { sessionId: 'older-session', port: 41999, claimDate: null },
+      authority: { kind: 'first-coordinator declaration', record: 'fixture initial declaration', confirmedEndedAt: null, wording: 'fixture initial declaration' },
+      previous: null,
       previousRecordCommit: null,
       configBeforeSha256: before,
       configAfterSha256: before,
@@ -371,11 +385,16 @@ class Scenario {
       'prepared-kept': record => ({ ...record, phase: 'prepared', coordinator: { sessionId: this.ownIdValue, port: this.ownPort }, configAfterSha256: after }),
       'prepared-swapped': record => ({ ...record, phase: 'prepared', coordinator: { sessionId: this.ownIdValue, port: this.ownPort }, configBeforeSha256: before, configAfterSha256: after }),
       'active-kept': record => ({ ...record, coordinator: { sessionId: this.ownIdValue, port: this.ownPort }, configBeforeSha256: before, configAfterSha256: after }),
-      mixed: record => ({ ...record, phase: 'prepared', configBeforeSha256: 'f'.repeat(64), configAfterSha256: 'e'.repeat(64) }),
+      mixed: record => ({ ...record, phase: 'prepared', coordinator: { sessionId: this.ownIdValue, port: this.ownPort }, configBeforeSha256: 'f'.repeat(64), configAfterSha256: 'e'.repeat(64) }),
     };
     if (!(kind in variants)) throw new Error(`unknown claim variant ${kind}`);
     const variant = variants[kind];
     const record = variant ? variant(base) : null;
+    if (record?.phase === 'prepared') {
+      record.leftUnchanged = this.parts.adoption.leftUnchanged(await fixture.board.scan());
+      record.previous = { sessionId: IDS.gone, port: this.ports.coordinator, claimDate: null };
+      record.authority = { kind: 'adoption', record: 'issue31 fixture', confirmedEndedAt: '2026-10-16T09:00:00.000Z', wording: ENDED_WORDING(IDS.gone) };
+    }
     if (record === null) {
       await fixture.claim.write('# Coordinator claim\n\n```json\n{ "schemaVersion": 1,\n```\n');
       return;
@@ -407,7 +426,7 @@ class Scenario {
       configBeforeSha256: sha256(raw),
       configAfterSha256: sha256(after),
       intentCommit: null,
-      leftUnchanged: [],
+      leftUnchanged: this.parts.adoption.leftUnchanged(await fixture.board.scan()),
       rebriefSource: 'handoff.md (open assignments)',
     });
     await fixture.claim.write(intent);
@@ -423,11 +442,10 @@ class Scenario {
     const parsed = this.parts.adoption.parseClaim(this.preparedText);
     // The derived active record is produced by replacing exactly the two tokens a completing writer would
     // change, so it parses: the mismatch under test is the missing commit, not a broken file.
-    const derived = this.preparedText
-      .replace('"phase": "prepared"', '"phase": "active"')
-      .replace(`"intentCommit": ${JSON.stringify(this.intentCommit)}`, '"intentCommit": "pending"');
+    const derived = renderClaim({ ...parsed, phase: 'active', intentCommit: this.intentCommit });
     void renderClaim; void parsed;
     switch (this.spec.dirty) {
+      case 'active': await fixture.claim.write(derived); break;
       case 'foreign': await fixture.claim.write('# Coordinator claim\n\n```json\n{\n  "schemaVersion": 9\n}\n```\n'); break;
       case 'partial': await fixture.claim.write(derived.slice(0, derived.length - 40)); break;
       case 'semantic': await fixture.claim.write(derived.replace('"date": "2026-10-16"', '"date": "2026-10-17"')); break;
@@ -470,6 +488,8 @@ class Scenario {
   async run() {
     if (this.done) return { ok: false, code: 'NO_CHANGE', exitCode: 1, lines: [] };
     this.beforeRaw = await this.fixture.board.read().catch(() => undefined);
+    this.beforeClaim = await this.fixture.claim.readOrUndefined();
+    this.beforeHead = await this.fixture.claim.head();
     this.commitsBefore = (await this.fixture.git(['rev-list', '--count', 'HEAD'])).stdout.trim();
     const workflow = await this.workflow();
     this.firstWorkflow = workflow;
@@ -482,6 +502,8 @@ class Scenario {
    * exactly what the first phase left behind. */
   async rerun() {
     if (this.spec.hook) await this.fixture.hooks.allow();
+    this.expectedAfter = await this.fixture.board.read();
+    this.recordCommitsBefore = (await this.fixture.claim.log()).length;
     const workflow = await this.workflow();
     return workflow.run(this.context, 'adopt', []);
   }
@@ -531,7 +553,7 @@ class Scenario {
         }
         case 'board-unchanged': {
           const after = await this.fixture.board.read();
-          assert(after === this.originalRaw, 'expected the board byte-identical');
+          assert(after === (this.concurrentRaw ?? this.originalRaw), 'expected the current board byte-identical (including the concurrent writer change)');
           say(`ASSERT ${assertion} PASS: board bytes unchanged`);
           break;
         }
@@ -551,6 +573,7 @@ class Scenario {
           const after = await this.fixture.board.read();
           const expected = patch(this.parts.config, this.originalRaw, this.ownIdValue, this.ownPort);
           assert(after === expected, 'expected exactly one coordinator replacement in total');
+          assert(this.swaps === (this.spec.preparedSwap ? 0 : 1), `unexpected config rename count ${this.swaps}`);
           say(`ASSERT ${assertion} PASS: exactly one coordinator replacement across both phases`);
           break;
         }
@@ -572,6 +595,7 @@ class Scenario {
           const after = await this.fixture.board.read();
           const expected = this.spec.preparedSwap ? this.swappedRaw : patch(this.parts.config, this.originalRaw, this.ownIdValue, this.ownPort);
           assert(after === expected, 'expected finalization to leave the published board untouched');
+          assert(this.swaps === (this.spec.preparedSwap || this.spec.claim === 'prepared-swapped' ? 0 : 1), `unexpected replacement count ${this.swaps}`);
           const record = this.parts.adoption.parseClaim(await this.fixture.claim.read());
           assert(record.phase === 'active', `expected the finalized record to be active, observed ${record.phase}`);
           assert(record.intentCommit !== null && record.intentCommit.length === 40, 'expected the finalized record to cite its intent commit');
@@ -593,7 +617,12 @@ class Scenario {
         default: throw new Error(`unknown assertion ${assertion}`);
       }
     }
-    if (last !== undefined) void last;
+    if (last && !this.spec.during && ['CONFIRMATION', 'CANCELLED', 'AUTH', 'MODE', 'SESSION_COLLISION', 'PORT_COLLISION', 'OLD_CONNECTED', 'IDENTITY', 'SESSION_UNPERSISTED', 'CLAIM_OTHER', 'CLAIM_MISMATCH', 'RECOVERY_REQUIRED'].includes(last.code)) {
+      assert(await this.fixture.board.read().catch(() => undefined) === this.beforeRaw, 'refused invocation changed board');
+      assert(await this.fixture.claim.readOrUndefined() === this.beforeClaim, 'refused invocation rewrote/normalized claim evidence');
+      assert(await this.fixture.claim.head() === this.beforeHead, 'refused invocation changed HEAD');
+      say('ASSERT refused-no-publication PASS: board, record bytes and HEAD unchanged');
+    }
   }
 }
 

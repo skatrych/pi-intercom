@@ -14,6 +14,7 @@ const WORDING = '{old}';
 /** The accepted path: every decision answered affirmatively, wording typed exactly. */
 const YES = () => ({
   boardInitialize: 'confirm',
+  adoptionDecision: 'confirm',
   adoptTransition: 'confirm',
   authorityRecord: 'confirm',
   endedWording: { kind: 'prompt', value: WORDING },
@@ -31,12 +32,12 @@ const typed = value => ({ ...YES(), endedWording: { kind: 'prompt', value } });
 const CASES = {
   // ---- AC1: count and classification. A second board matters when the upward walk from cwd reaches it.
   'count-home': { own: 'coordinator', claim: 'matching', run: 'status', expect: { code: 'OK', exit: 0 } },
-  'count-second': { own: 'fresh', extraBoard: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT_TWO', exit: 1 } },
-  'count-second-empty': { own: 'fresh', extraBoardEmpty: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT_TWO', exit: 1 } },
+  'count-second': { own: 'fresh', extraBoard: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT', exit: 1 } },
+  'count-second-empty': { own: 'fresh', extraBoardEmpty: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT', exit: 1 } },
     'count-wrong': { own: 'coordinator', claim: 'none', boardAtChild: true, cwdChild: true, run: 'status', expect: { code: 'BOARD_COUNT', exit: 1 } },
   'count-symlink': { own: 'coordinator', claim: 'matching', symlinkEscape: true, run: 'status', expect: { code: 'BOARD_PATH', exit: 1 } },
   'outside-home': { own: 'fresh', cwdOutside: true, expect: { code: 'BOARD_PATH', exit: 1 } },
-  'no-board-child': { own: 'fresh', noBoard: true, cwdChild: true, expect: { code: 'NO_BOARD', exit: 0 } },
+  'no-board-child': { own: 'fresh', noBoard: true, cwdChild: true, expect: { code: 'NO_BOARD', exit: 1 } },
   'no-board-root-declined': { own: 'fresh', noBoard: true, answers: decline('boardInitialize'), expect: { code: 'CANCELLED', exit: 1 } },
   'no-board-root-confirmed': {
     own: 'fresh', noBoard: true, answers: YES(), expect: { code: 'DECLARED', exit: 0 },
@@ -46,7 +47,7 @@ const CASES = {
   // ---- AC2: the five claim-gate outcomes.
   'claim-absent-self': { own: 'coordinator', claim: 'none', answers: YES(), expect: { code: 'DECLARED', exit: 0 } },
   'claim-active-self': { own: 'coordinator', claim: 'matching', expect: { code: 'CLAIM_OK', exit: 0 } },
-  'claim-other-declined': { own: 'fresh', claim: 'matching', answers: decline('adoptTransition'), expect: { code: 'CLAIM_OTHER', exit: 1 } },
+  'claim-other-declined': { own: 'fresh', claim: 'matching', answers: decline('adoptionDecision'), expect: { code: 'CLAIM_OTHER', exit: 1 } },
   'claim-absent-anonymous': { own: 'fresh', claim: 'none', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ', 'roster-recorded', 'zero-worker-requests'] },
   'claim-malformed': { own: 'fresh', claim: 'malformed', answers: YES(), expect: { code: 'RECORD', exit: 1 } },
   'claim-uncommitted': { own: 'coordinator', claim: 'matching-uncommitted', expect: { code: 'RECORD', exit: 1 } },
@@ -76,10 +77,11 @@ const CASES = {
   // required wording, so it is refused as a confirmation failure rather than treated as a cancellation.
   'confirm-false': { own: 'fresh', answers: typed(false), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   // A refused argument is the surface being unavailable, which the exit-code table gives as 2.
+  'confirm-final-false': { own: 'fresh', answers: decline('adoptTransition'), expect: { code: 'CANCELLED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'confirm-forged-args': { own: 'fresh', forgedArguments: true, answers: YES(), expect: { code: 'USAGE', exit: 2 }, assert: ['board-unchanged'] },
   'authority-blank': { own: 'fresh', answers: { ...YES(), authorityRecord: '' }, expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'authority-cancel': { own: 'fresh', answers: { ...YES(), authorityRecord: undefined }, expect: { code: 'CANCELLED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'adopt-declined': { own: 'fresh', answers: decline('adoptTransition'), expect: { code: 'ADOPTION_REQUIRED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
+  'adopt-declined': { own: 'fresh', answers: decline('adoptionDecision'), expect: { code: 'ADOPTION_REQUIRED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'no-ui': { own: 'fresh', noUi: true, expect: { code: 'MODE', exit: 1 } },
   'untrusted': { own: 'fresh', untrusted: true, answers: YES(), expect: { code: 'TRUST', exit: 1 } },
   'busy-host': { own: 'fresh', busy: true, answers: YES(), expect: { code: 'BUSY', exit: 1 } },
@@ -87,8 +89,8 @@ const CASES = {
 
   // ---- Stale input: anything that changes while decisions are open.
   'roster-changed': { own: 'fresh', during: 'roster', answers: YES(), expect: { code: 'STALE_PREVIEW', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'record-changed': { own: 'fresh', during: 'record', answers: YES(), expect: { code: 'RECORD', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'root-changed': { own: 'fresh', during: 'root', answers: YES(), expect: { code: 'STALE_PREVIEW', exit: 1 } },
+  'record-changed': { own: 'fresh', during: 'record', answers: YES(), expect: { code: 'STALE_PREVIEW', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
+  'root-changed': { own: 'fresh', cwdChild: true, during: 'root', answers: YES(), expect: { code: 'STALE_PREVIEW', exit: 1 } },
   'generation-changed': { own: 'fresh', during: 'generation', answers: YES(), expect: { code: 'SESSION_CHANGED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
 
   // ---- AC6: roster preservation and accepted config shapes.
@@ -119,9 +121,9 @@ const CASES = {
     assert: ['exactly-one-swap'], note: 'config stays adopted; no rollback; the claim stays a committed prepared intent, so a second invocation is a deterministic recovery rather than a fresh attempt.',
   },
   'active-commit-failed-rerun': {
-    own: 'fresh', hook: 'active', preparedSwap: true, reinvoke: true, answers: YES(),
-    expect: { phase1: { code: 'GIT', exit: 1 }, phase2: { code: 'GIT', exit: 1 } },
-    assert: ['exactly-one-swap', 'refreshed-intent', 'one-transition-id'],
+    own: 'fresh', hook: 'active', reinvoke: true, answers: YES(),
+    expect: { phase1: { code: 'GIT', exit: 1 }, phase2: { code: 'RECOVERED', exit: 0 } },
+    assert: ['exactly-one-swap', 'no-second-swap'],
     note: 'same transition id, no second swap, no second attempt.',
   },
   'dirty-active-foreign': { own: 'fresh', preparedSwap: true, dirty: 'foreign', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
@@ -131,6 +133,11 @@ const CASES = {
   'dirty-active-intent-changed': { own: 'fresh', preparedSwap: true, dirty: 'intent', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
   'dirty-active-config-changed': { own: 'fresh', preparedSwap: true, dirty: 'config', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
   'dirty-active-other-session': { own: 'fresh', preparedSwap: true, dirty: 'session', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
+  'prepared-old': { own: 'fresh', claim: 'prepared-kept', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['exactly-one-swap', 'refreshed-intent', 'one-transition-id'] },
+  'prepared-new': { own: 'fresh', claim: 'prepared-swapped', answers: YES(), expect: { code: 'RECOVERED', exit: 0 }, assert: ['no-second-swap'] },
+  'active-new': { own: 'fresh', answers: YES(), reinvoke: true, expect: { phase1: { code: 'OK', exit: 0 }, phase2: { code: 'CLAIM_OK', exit: 0 } }, assert: ['exactly-one-swap', 'no-second-swap'] },
+  'mixed-hashes': { own: 'fresh', claim: 'mixed', answers: YES(), expect: { code: 'RECOVERY_REQUIRED', exit: 1 }, assert: ['board-unchanged'] },
+  'dirty-active-cancel': { own: 'fresh', preparedSwap: true, dirty: 'active', answers: decline('finalizeTransition'), expect: { code: 'CANCELLED', exit: 1 } },
   'clean-advance': {
     own: 'fresh', preparedSwap: true, answers: YES(), expect: { code: 'RECOVERED', exit: 0 },
     assert: ['exactly-one-swap', 'no-second-swap'],
@@ -138,7 +145,7 @@ const CASES = {
   },
   'promotion-failed': {
     own: 'fresh', preparedSwap: true, promote: 'fail', reinvoke: true, retryPromotion: true, answers: YES(),
-    expect: { phase1: { code: 'PROMOTION_PENDING', exit: 1 }, phase2: { code: 'PROMOTION_PENDING', exit: 1 } },
+    expect: { phase1: { code: 'PROMOTION_PENDING', exit: 1 }, phase2: { code: 'CLAIM_OK', exit: 0 } },
     assert: ['no-extra-config-write', 'no-extra-record-commit'],
   },
 
@@ -155,7 +162,24 @@ const CASES = {
   'send-destination-changes': { runtime: true, runtimeCase: 'send-destination-changes', expect: { code: 'ASSERTIONS', exit: 0 } },
   'promoted-endpoint': { runtime: true, runtimeCase: 'promoted-endpoint', expect: { code: 'ASSERTIONS', exit: 0 } },
 
+  'callbacks-after-swap': { runtime: true },
+  'callbacks-active-dirty': { runtime: true },
+  'callbacks-commit-failed': { runtime: true },
+  'callbacks-before-promotion': { runtime: true },
+  'callbacks-promotion-pending': { runtime: true },
+  'callbacks-cross-epoch': { runtime: true },
+  'handoff-cross-epoch': { runtime: true },
+  'queued-report-cross-epoch': { runtime: true },
+  'stored-report-notify-cross-epoch': { runtime: true },
+  'reminder-cross-epoch': { runtime: true },
+
   // ---- Race table. Each needs two live participants.
+  'status-wins': { race: true },
+  'adoption-wins': { race: true },
+  'queued-old-update': { race: true },
+  'initialize-race': { race: true },
+  'handoff-write-race': { race: true },
+  'two-adopters': { race: true },
   'race-outer-queue': { race: true, expect: { code: 'ASSERTIONS', exit: 0 } },
   'race-process-queue': { race: true, expect: { code: 'ASSERTIONS', exit: 0 } },
   'race-filesystem': { race: true, expect: { code: 'ASSERTIONS', exit: 0 } },

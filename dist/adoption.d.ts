@@ -18,7 +18,7 @@ export declare const CONFIG_DIRECTORY = ".pi-intercom";
 export declare const REBRIEF_SOURCE = "handoff.md (open assignments)";
 export declare const ENDED_WORDING: (sessionId: string) => string;
 export type ExitCode = 0 | 1 | 2;
-export type ResultCode = 'OK' | 'DECLARED' | 'CLAIM_OK' | 'RECOVERED' | 'AUTH' | 'MODE' | 'TRUST' | 'SESSION_CHANGED' | 'BUSY' | 'BOARD_COUNT' | 'BOARD_COUNT_TWO' | 'BOARD_PATH' | 'NO_BOARD' | 'CONFIG' | 'RECORD' | 'CLAIM_OTHER' | 'CLAIM_MISMATCH' | 'ADOPTION_REQUIRED' | 'SESSION_UNPERSISTED' | 'IDENTITY' | 'SESSION_COLLISION' | 'PORT_COLLISION' | 'OLD_CONNECTED' | 'CONFIRMATION' | 'CANCELLED' | 'STALE_PREVIEW' | 'LOCKED' | 'GIT' | 'PUBLISH' | 'RECOVERY_REQUIRED' | 'ADOPTION_NOT_READY' | 'PROMOTION_PENDING' | 'BACKEND' | 'HOST' | 'USAGE';
+export type ResultCode = 'OK' | 'DECLARED' | 'CLAIM_OK' | 'RECOVERED' | 'AUTH' | 'MODE' | 'TRUST' | 'SESSION_CHANGED' | 'BUSY' | 'BOARD_COUNT' | 'BOARD_PATH' | 'NO_BOARD' | 'CONFIG' | 'RECORD' | 'CLAIM_OTHER' | 'CLAIM_MISMATCH' | 'ADOPTION_REQUIRED' | 'SESSION_UNPERSISTED' | 'IDENTITY' | 'SESSION_COLLISION' | 'PORT_COLLISION' | 'OLD_CONNECTED' | 'CONFIRMATION' | 'CANCELLED' | 'STALE_PREVIEW' | 'LOCKED' | 'GIT' | 'PUBLISH' | 'RECOVERY_REQUIRED' | 'ADOPTION_NOT_READY' | 'PROMOTION_PENDING' | 'BACKEND' | 'HOST' | 'USAGE';
 export interface Result {
     ok: boolean;
     code: ResultCode;
@@ -108,12 +108,13 @@ export interface CommandContext {
     };
     waitForIdle?(): Promise<void>;
 }
-export type AdoptionPhase = 'prepared-committed' | 'published' | 'before-active-write' | 'active-committed' | 'promoted';
+export type AdoptionPhase = 'before-intent' | 'prepared-committed' | 'published' | 'before-active-write' | 'active-written' | 'active-committed' | 'before-promotion' | 'promoted';
 export interface AdoptionOptions {
     /** Canonical launch role directory captured from this process at startup. Never request-supplied. */
     roleDirectory?: string;
     rolesDirectory?: string;
     projectsHome?: string;
+    workerRole?: string;
     storeFor(root: string): ConfigStore;
     sessionId(): string;
     busy(): boolean;
@@ -192,6 +193,13 @@ export declare class AdoptionWorkflow {
      * identity, confirmation, timestamps, roster or hashes.
      */
     private latestClaimCommit;
+    private verifyActiveAnchor;
+    /** Snapshot actual ancestor directories, not a descendant tree scan (ADR D3). */
+    private pathSnapshot;
+    /** Synchronous final guard also runs on every platform rename retry. */
+    private assertPaths;
+    /** Revalidate the full immutable preview under the same all-writer lock, before intent or finalization. */
+    private assertSnapshot;
     private canonical;
     private decide;
     /** State (a): only an explicitly confirmed first board at the projects home, never in a child cwd. */
@@ -224,6 +232,7 @@ export declare class AdoptionWorkflow {
      * previous identity, confirmation, timestamps, roster or hashes from uncommitted bytes.
      */
     private reconcile;
+    private openReady;
     private promote;
     /**
      * Write outside any repository mutation, then commit this one path. An existing record with different
@@ -233,7 +242,7 @@ export declare class AdoptionWorkflow {
     /** Refuse unsafe layout, a non-repository home, a non-empty index, or unrelated worktree changes. */
     private assertGitSafe;
     private trackedPaths;
-    /** Paths git reports as changed, with untracked ones marked so they can be told apart. */
+    /** Paths git reports as changed; no failed git query counts as an empty result. */
     private dirtyPaths;
     private unresolvedOperation;
     /** `git commit --only <claim>` with argv, then verify HEAD, its changed-path set, and the bytes. */

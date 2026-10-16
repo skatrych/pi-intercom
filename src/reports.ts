@@ -55,6 +55,9 @@ async function regularOrAbsent(file: string): Promise<void> {
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 }
 
+/** Safe named refusal supplied by the runtime, never raw guard or filesystem diagnostics. */
+export class ReportPublicationRefused extends Error {}
+
 /** Persist only the explicitly authored public report; clear is an atomic tombstone. */
 export async function saveWorkerReport(root: string, report: WorkerReport, assertCurrent?: () => void): Promise<void> {
   let temporary: string | undefined;
@@ -80,7 +83,10 @@ export async function saveWorkerReport(root: string, report: WorkerReport, asser
     assertCurrent?.();
     await rename(temporary, target);
     temporary = undefined;
-  } catch { throw new Error('Worker report could not be saved.'); }
+  } catch (error) {
+    if (error instanceof ReportPublicationRefused) throw error;
+    throw new Error('Worker report could not be saved.');
+  }
   finally {
     if (temporary && ownsTemporary && dir) {
       // Cleanup only our own unpublished temporary file, even if authorization expired.
