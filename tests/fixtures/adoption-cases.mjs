@@ -178,7 +178,7 @@ class Scenario {
     this.recorded = recorder();
     // A two-slot epoch, exactly as the runtime implements it: close/invalid/open.
     this.readiness = {
-      current: 0, openFlag: false,
+      current: 0, openFlag: this.spec.promoted === true,
       close: () => { this.readiness.openFlag = false; return ++this.readiness.current; },
       open: () => { this.readiness.openFlag = true; return ++this.readiness.current; },
     };
@@ -261,6 +261,7 @@ class Scenario {
         close: this.readiness.close,
         open: () => { this.readiness.open(); return this.readiness.current; },
         current: () => this.readiness.current,
+        ready: () => this.readiness.openFlag,
       },
       listSessions: async (cwd, sessionDir) => {
         if (this.spec.session === 'store-missing') return [];

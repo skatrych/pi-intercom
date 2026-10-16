@@ -40,7 +40,7 @@ export async function fixture(options = {}) {
     endpointPort: () => endpoint?.port,
     probe: (agent, opts) => f.probeWorker(agent, opts),
     promote: async () => { state.promotions++; state.loaded = true; }, responsibilityLoaded: () => state.loaded,
-    readiness: { close: () => { state.ready = false; return ++state.epoch; }, current: () => state.epoch, open: () => { state.ready = true; return ++state.epoch; } },
+    readiness: { close: () => { state.ready = false; return ++state.epoch; }, current: () => state.epoch, ready: () => state.ready, open: () => { state.ready = true; return ++state.epoch; } },
     listSessions: async () => [{ id, path: sessionFile }],
   };
   const workflow = overrides => new AdoptionWorkflow({ ...workflowOptions, ...overrides });

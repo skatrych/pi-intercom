@@ -13,7 +13,7 @@ import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose } from './handoff.js';
 import { CoordinatorReminders } from './reminders.js';
-import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, bootClaimEvidence, countBoards, projectsHome, stop } from './adoption.js';
+import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, bootClaimEvidence, committedActiveClaimMatches, countBoards, projectsHome, stop } from './adoption.js';
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
 export const ADOPTION_NOT_READY = 'ADOPTION_NOT_READY';
 function requestedRole(role) {
@@ -106,7 +106,7 @@ export class Intercom {
                 const raw = readFileSync(path.join(this.store.root, 'coordinator-claim.md'), 'utf8');
                 const config = validateConfig(JSON.parse(readFileSync(this.store.file, 'utf8')));
                 const board = coordinator(config);
-                if (raw === this.readyClaimBytes && board.sessionId === this.initialId && board.port === this.endpoint?.port && this.responsibility?.coordinator)
+                if (raw === this.readyClaimBytes && committedActiveClaimMatches(this.store.root, raw) && board.sessionId === this.initialId && board.port === this.endpoint?.port && this.responsibility?.coordinator)
                     return;
             }
             catch { /* Changed or unavailable evidence closes authority, never approves it. */ }
@@ -122,10 +122,13 @@ export class Intercom {
         return ++this.authorityEpoch;
     }
     openActionEpoch() {
-        if (this.authorityReady)
+        if (this.authorityReady) {
+            this.assertActionReady();
             return;
+        }
         this.readyClaimBytes = readFileSync(path.join(this.store.root, 'coordinator-claim.md'), 'utf8');
         this.authorityReady = true;
+        this.assertActionReady(); // close again if committed evidence changed across the promotion awaits
         this.observationEnabled = true;
         this.authorityDetail = 'coordinator action evidence is committed and this session is promoted';
         ++this.authorityEpoch;
@@ -502,6 +505,7 @@ export class Intercom {
             readiness: {
                 close: detail => this.closeActionEpoch(detail),
                 current: () => this.actionEpoch(),
+                ready: () => this.coordinatorActionReady(),
                 // Readiness is a claim about verified state, not a flag to raise: it opens only once this session
                 // actually holds the coordinator responsibility the committed evidence names. A failed promotion
                 // therefore leaves it closed, and PROMOTION_PENDING stays not-ready.

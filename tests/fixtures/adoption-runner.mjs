@@ -31,7 +31,7 @@ const typed = value => ({ ...YES(), endedWording: { kind: 'prompt', value } });
 
 const CASES = {
   // ---- AC1: count and classification. A second board matters when the upward walk from cwd reaches it.
-  'count-home': { own: 'coordinator', claim: 'matching', run: 'status', expect: { code: 'OK', exit: 0 } },
+  'count-home': { own: 'coordinator', claim: 'matching', promoted: true, run: 'status', expect: { code: 'OK', exit: 0 } },
   'count-second': { own: 'fresh', extraBoard: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT', exit: 1 } },
   'count-second-empty': { own: 'fresh', extraBoardEmpty: 'app', cwdChild: true, expect: { code: 'BOARD_COUNT', exit: 1 } },
     'count-wrong': { own: 'coordinator', claim: 'none', boardAtChild: true, cwdChild: true, run: 'status', expect: { code: 'BOARD_COUNT', exit: 1 } },
