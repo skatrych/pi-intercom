@@ -187,8 +187,6 @@ export declare class AdoptionWorkflow {
     private resolveIdentity;
     /** AC2: absent, uncommitted, malformed, or foreign evidence. None of them is approval. */
     private readClaim;
-    /** The latest claim-changing commit whose bytes match, or undefined when the worktree bytes are dirty. */
-    private committedClaim;
     /**
      * Read git history only, never the worktree file: dirty bytes never supply authority, previous
      * identity, confirmation, timestamps, roster or hashes.

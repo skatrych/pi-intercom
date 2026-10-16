@@ -311,15 +311,9 @@ export interface ConfigStoreOptions {
   now?: () => number;
   /** Diagnostic identity written into the transaction lock. Never an authorization value. */
   lockOwner?: () => { sessionId: string };
-  /** Liveness probe override, so a proof can name a dead owner deterministically. */
-  pidAlive?: (pid: number) => boolean;
-  /** Tolerance before an abandoned lock may be reclaimed. */
-  staleLockMs?: number;
 }
 const LOCK_DIRECTORY = 'config.lock';
 const LOCK_OWNER_FILE = 'owner.json';
-/** A crashed writer's lock is reclaimed only after this much time has passed. */
-const STALE_LOCK_TOLERANCE_MS = 60_000;
 /** Process-local per-file serialization shared by every store instance for the same path. */
 const processQueues = new Map<string, Promise<void>>();
 /** Marks the async chain that already holds this store's transaction, so nested publications reuse it. */
@@ -384,20 +378,6 @@ export class ConfigStore {
       return value;
     } catch { return 'unreadable'; }
   }
-  /** Default liveness probe; injectable so a proof can name a dead owner deterministically. */
-  private pidAlive(pid: number): boolean {
-    const probe = this.options.pidAlive ?? ((candidate: number) => {
-      try { process.kill(candidate, 0); return true; }
-      catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
-    });
-    return probe(pid);
-  }
-  /** Only an old enough leftover is reclaimed, so a slow writer is never run over. */
-  private expired(acquiredAt: string): boolean {
-    const acquired = Date.parse(acquiredAt);
-    if (!Number.isFinite(acquired)) return false;
-    return (this.options.now?.() ?? Date.now()) - acquired >= (this.options.staleLockMs ?? STALE_LOCK_TOLERANCE_MS);
-  }
   private async acquireLock(): Promise<() => Promise<void>> {
     await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const directory = this.lockDirectory, token = randomUUID();
@@ -405,15 +385,12 @@ export class ConfigStore {
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'EEXIST') throw error;
-      const owner = await this.lockOwner();
-      // A lock we cannot interpret is not provably abandoned, and a live owner is contention. Only a
-      // record whose process is demonstrably gone and whose age passed the tolerance may be reclaimed,
-      // once, by a single retry: an unbounded loop could outlive a slow legitimate writer instead.
-      if (owner === 'unreadable' || this.pidAlive(owner.pid) || !this.expired(owner.acquiredAt)) throw new StaleConfigLock(owner);
-      await unlink(path.join(directory, LOCK_OWNER_FILE)).catch(() => {});
-      await rmdir(directory).catch(() => {});
-      try { await mkdir(directory, { mode: 0o700 }); }
-      catch { throw new StaleConfigLock(owner); }
+      // Any existing lock is contention and stops here: unreadable, old, or naming a process that
+      // appears dead included. Owner death cannot be established from this process, and a contender that
+      // deletes a lock it does not own can erase a fresh owner between that owner's own steps, which
+      // destroys the exclusivity the lock exists to provide. Stale locks are cleared by human
+      // maintenance once the owner's state is established, never by the blocked writer.
+      throw new StaleConfigLock(await this.lockOwner());
     }
     const ownerFile = path.join(directory, LOCK_OWNER_FILE);
     const owned = async (): Promise<boolean> => {
@@ -429,11 +406,10 @@ export class ConfigStore {
       }) + '\n');
       await written.sync();
     } finally { await written.close().catch(() => {}); }
-    if (!await owned()) {
-      await unlink(ownerFile).catch(() => {});
-      await rmdir(directory).catch(() => {});
-      fail('config transaction lock ownership is uncertain; no publication');
-    }
+    // Nothing is deleted on uncertainty. If this path no longer holds our token, whatever is there is
+    // someone else's, and removing it could erase a fresh owner's lock. Stop and leave the state exactly
+    // as found, so a human establishes the owner's state before anything clears it.
+    if (!await owned()) fail('config transaction lock ownership is uncertain; nothing was removed and no publication');
     let released = false;
     return async () => {
       if (released) return;

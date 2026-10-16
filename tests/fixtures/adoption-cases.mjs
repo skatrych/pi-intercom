@@ -156,19 +156,15 @@ class Scenario {
     // Claim evidence.
     await this.buildClaim();
     // Locks and hooks.
-    // Liveness and age are explicit, so no case depends on real elapsed time or on a real pid.
-    this.lockFacts = { alive: false, ageMs: 10 * 60_000 };
-    if (this.spec.lock === 'stale' || this.spec.lock === 'contended' || this.spec.lock === 'foreign') {
-      const alive = this.spec.lock === 'contended';
-      this.lockFacts = { alive, ageMs: this.spec.lock === 'foreign' ? 0 : 10 * 60_000 };
+    // Every variant names a foreign token. Liveness and age are recorded only so a regression that
+    // resumes inferring them has something to trip over: none of them may change the outcome.
+    if (this.spec.lock) {
+      const ageMs = this.spec.lock === 'foreign' ? 0 : 10 * 60_000;
       const directory = path.join(fixture.home, '.pi-intercom', 'config.lock');
       await mkdir(directory, { recursive: true });
-      await writeFile(path.join(directory, 'owner.json'), JSON.stringify({
-        token: 'a-token-that-is-not-ours',
-        pid: alive ? 4242 : 999999,
-        sessionId: 'another-session',
-        acquiredAt: new Date(Date.now() - this.lockFacts.ageMs).toISOString(),
-      }));
+      const owner = { token: 'a-token-that-is-not-ours', sessionId: 'another-session', acquiredAt: new Date(Date.now() - ageMs).toISOString() };
+      if (this.spec.lock !== 'unreadable') owner.pid = this.spec.lock === 'contended' ? 4242 : 999999;
+      await writeFile(path.join(directory, 'owner.json'), this.spec.lock === 'unreadable' ? '{ "not": [' : JSON.stringify(owner));
     }
 
     // Runtime session identity is mutable so a generation change can be proven mid-flight.
@@ -267,11 +263,6 @@ class Scenario {
   storeOptions() {
     const fixture = this.fixture;
     const options = {};
-    if (this.lockFacts) {
-      options.pidAlive = () => this.lockFacts.alive;
-      options.staleLockMs = 60_000;
-      options.now = () => Date.now();
-    }
     if (this.spec.publish === 'fail') options.rename = async () => { throw Object.assign(new Error('injected publication failure'), { code: 'EIO' }); };
     // The session changes and the retry loop's own pre-rename check must notice before it retries.
     if (this.spec.publish === 'invalidate') {
@@ -372,7 +363,8 @@ class Scenario {
       matching: record => record,
       'matching-uncommitted': record => record,
       malformed: null,
-      'board-disagree': record => ({ ...record, coordinator: { sessionId: IDS.gone, port: 41555 } }),
+      'board-disagree': record => ({ ...record, coordinator: { sessionId: 'another-coordinator', port: 41555 } }),
+      'root-disagree': record => ({ ...record, boardRoot: path.join(fixture.home, 'elsewhere') }),
       'port-disagree': record => ({ ...record, coordinator: { sessionId: IDS.gone, port: this.ports.coordinator + 1 } }),
       'prepared-kept': record => ({ ...record, phase: 'prepared', coordinator: { sessionId: this.ownIdValue, port: this.ownPort }, configAfterSha256: after }),
       'prepared-swapped': record => ({ ...record, phase: 'prepared', coordinator: { sessionId: this.ownIdValue, port: this.ownPort }, configBeforeSha256: before, configAfterSha256: after }),

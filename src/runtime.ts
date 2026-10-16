@@ -116,8 +116,11 @@ export class Intercom {
   /** Closed when an adoption or declaration transaction invalidated an earlier callback epoch. */
   private actionEpoch(): number { return this.authorityEpoch; }
   private assertActionReady(epoch?: number): void {
-    if (!this.authorityEnabled || this.authorityReady) return;
+    // Checked first and unconditionally: a caller that captured an epoch is asserting that its own
+    // readiness window still stands. Readiness becoming true later does not validate an older window, so
+    // a stale epoch is refused even after the epoch has been reopened.
     if (epoch !== undefined && epoch !== this.authorityEpoch) fail(`${ADOPTION_NOT_READY}: the action-readiness epoch changed; this callback stops without further effects`);
+    if (!this.authorityEnabled || this.authorityReady) return;
     fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}; no successful receipt, report persistence, registration change, reminder, or model turn is claimed for it`);
   }
   /** Close the local action epoch. Callers hold the returned value and fail once it changes. */
@@ -388,7 +391,14 @@ export class Intercom {
       readiness: {
         close: detail => this.closeActionEpoch(detail),
         current: () => this.actionEpoch(),
-        open: () => this.openActionEpoch(),
+        // Readiness is a claim about verified state, not a flag to raise: it opens only once this session
+        // actually holds the coordinator responsibility the committed evidence names. A failed promotion
+        // therefore leaves it closed, and PROMOTION_PENDING stays not-ready.
+        open: () => {
+          if (!this.responsibilityLoaded()) fail(`${ADOPTION_NOT_READY}: promotion is incomplete, so coordinator action readiness stays closed`);
+          this.openActionEpoch();
+          return this.authorityEpoch;
+        },
       },
       listSessions: this.options.adoption?.listSessions ?? (async () => { throw new Error('no Pi session store is wired'); }),
     });
