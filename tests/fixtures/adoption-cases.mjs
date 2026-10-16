@@ -448,7 +448,14 @@ class Scenario {
       case 'active': await fixture.claim.write(derived); break;
       case 'foreign': await fixture.claim.write('# Coordinator claim\n\n```json\n{\n  "schemaVersion": 9\n}\n```\n'); break;
       case 'partial': await fixture.claim.write(derived.slice(0, derived.length - 40)); break;
-      case 'semantic': await fixture.claim.write(derived.replace('"date": "2026-10-16"', '"date": "2026-10-17"')); break;
+      case 'semantic': {
+        const semanticOnly = derived.replace('"schemaVersion": 1,', '"schemaVersion": 1 ,');
+        const payload = text => JSON.parse(text.split('```json\n')[1].split('\n```')[0]);
+        assert(JSON.stringify(payload(semanticOnly)) === JSON.stringify(payload(derived)), 'semantic-only fixture must preserve every JSON value');
+        assert(semanticOnly !== derived, 'semantic-only fixture must differ in raw bytes');
+        await fixture.claim.write(semanticOnly);
+        break;
+      }
       case 'staged': await fixture.claim.write(derived); await fixture.gitOk(['add', 'coordinator-claim.md']); break;
       case 'intent': {
         // A different committed intent: the anchor the worktree was derived from no longer matches.

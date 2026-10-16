@@ -59,6 +59,17 @@ async function adoptionWins(kind = 'status') {
     assert.equal((await f.board.parsed()).multiplexer, 'herdr');
   });
 }
+async function queuedOldUpdate() {
+  await withProcesses({}, async (f, start) => {
+    const old = start({ action: 'update', hold: 'queued' }); await old.wait('barrier');
+    const adopter = start({ action: 'adopt' }); const adopted = await adopter.wait('done');
+    assert.equal(adopted.result.code, 'OK', JSON.stringify(adopted));
+    const active = await f.board.read();
+    old.release(); const stale = await old.wait('done');
+    assert.equal(stale.type, 'failure'); assert.match(stale.message, /coordinator permission required/);
+    assert.equal(await f.board.read(), active, 'prequeued old authority cannot publish after acquiring the lock');
+  });
+}
 async function twoAdopters() {
   await withProcesses({}, async (f, start) => {
     await f.session.persist(IDS.other);
@@ -125,7 +136,8 @@ export async function raceCase(name, spec) {
   try {
     if (spec.crash) await crashProof(spec.crash);
     else if (['race-outer-queue', 'race-process-queue', 'status-wins'].includes(name)) await statusWins();
-    else if (['race-filesystem', 'adoption-wins', 'queued-old-update'].includes(name)) await adoptionWins();
+    else if (['race-filesystem', 'adoption-wins'].includes(name)) await adoptionWins();
+    else if (name === 'queued-old-update') await queuedOldUpdate();
     else if (['race-reminder-handoff-restart', 'handoff-write-race'].includes(name)) await statusWins('handoff');
     else if (name === 'initialize-race') await initializeRace();
     else if (name === 'race-claim-cleanup') await claimChanged();

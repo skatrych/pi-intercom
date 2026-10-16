@@ -60,6 +60,11 @@ process.on('message', async message => {
         process.send({ type: 'result', result: await store.read() });
       } finally { await runtime.close(); }
     } else if (action === 'update') {
+      if (hold === 'queued') {
+        const before = await store.read();
+        if (before.agents[0].sessionId !== IDS.gone) throw Error('fixture must queue while old id still governs');
+        await wait('queued');
+      }
       const config = await store.update(IDS.gone, async config => {
         if (hold === 'locked') await wait('locked');
         config.multiplexer = 'none';
