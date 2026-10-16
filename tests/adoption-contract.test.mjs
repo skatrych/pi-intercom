@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { writeFile, rename, mkdir, symlink, readFile } from 'node:fs/promises';
+import { appendFile, writeFile, rename, mkdir, symlink, readFile, lstat } from 'node:fs/promises';
 import { fixture, barrier } from './fixtures/adoption-support.mjs';
 import { bootClaimEvidence, renderClaim, parseClaim } from '../dist/adoption.js';
 import { ConfigStore } from '../dist/config.js';
@@ -91,4 +91,39 @@ test('nested transaction on another board still acquires that board mutex', asyn
   await mkdir(path.join(b.home, '.pi-intercom/config.lock'));
   await assert.rejects(new ConfigStore(a.home).transaction(() => new ConfigStore(b.home).update('gone-coordinator', c => { c.multiplexer = 'none'; })), /lock is held/);
   assert.equal((await b.board.parsed()).multiplexer, 'herdr');
+});
+
+test('old-authority update already queued on the local store cannot publish after adoption', async t => {
+  const f = await fixture(); t.after(f.dispose);
+  const gate = barrier(), store = new ConfigStore(f.home);
+  const workflow = f.workflow({ storeFor: () => store, phase: async phase => { if (phase === 'prepared-committed') await gate.wait(); } });
+  const adoption = workflow.run(f.context, 'adopt'); await gate.reached;
+  let mutated = false;
+  const old = store.update('gone-coordinator', () => { mutated = true; });
+  const refused = assert.rejects(old, /coordinator permission required/);
+  gate.release(); assert.equal((await adoption).ok, true); await refused;
+  assert.equal(mutated, false); assert.equal((await f.board.parsed()).multiplexer, 'herdr');
+});
+
+test('outer queue precedes local filesystem acquisition, which precedes mutation', async t => {
+  const f = await fixture(); t.after(f.dispose); const gate = barrier(), order = [];
+  class QueuedStore extends ConfigStore {
+    async outerQueue(run) { await gate.wait(); order.push('outer'); return run(); }
+  }
+  const store = new QueuedStore(f.home);
+  const pending = store.update('gone-coordinator', async config => {
+    assert.equal((await lstat(store.lockDirectory)).isDirectory(), true);
+    order.push('mutate'); config.multiplexer = 'none';
+  });
+  await gate.reached; await assert.rejects(lstat(store.lockDirectory), { code: 'ENOENT' });
+  gate.release(); await pending; assert.deepEqual(order, ['outer', 'mutate']);
+});
+
+test('concurrent historical log append is retained while adoption preserves all seeded evidence bytes', async t => {
+  const f = await fixture(); t.after(f.dispose);
+  const historical = await f.seeded(), before = await historical.snapshot();
+  const name = Object.keys(before.logs)[0], appended = '{"version":1,"event":"fixture.concurrent-worker-append"}\n';
+  const result = await f.workflow({ phase: async phase => { if (phase === 'prepared-committed') await appendFile(path.join(historical.logDirectory, name), appended); } }).run(f.context, 'adopt');
+  assert.equal(result.ok, true, result.lines.join('\n'));
+  assert.deepEqual(await historical.snapshot(), { ...before, logs: { ...before.logs, [name]: before.logs[name] + appended } });
 });
