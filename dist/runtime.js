@@ -60,6 +60,8 @@ export class Intercom {
     configuredFile;
     responsibility;
     observer;
+    /** A no-board Orchestrator must not create a board directory through logging before bootstrap. */
+    observationEnabled = true;
     closing;
     reportWrites = Promise.resolve();
     pendingReports = 0;
@@ -128,6 +130,7 @@ export class Intercom {
             return;
         this.readyClaimBytes = readFileSync(path.join(this.store.root, 'coordinator-claim.md'), 'utf8');
         this.authorityReady = true;
+        this.observationEnabled = true;
         this.authorityDetail = 'coordinator action evidence is committed and this session is promoted';
         ++this.authorityEpoch;
     }
@@ -137,7 +140,8 @@ export class Intercom {
         const observer = this.observer;
         return (event, metadata = {}) => {
             try {
-                observer?.record(event, metadata);
+                if (this.observationEnabled)
+                    observer?.record(event, metadata);
             }
             catch { /* Logging cannot affect communication. */ }
         };
@@ -189,6 +193,7 @@ export class Intercom {
         this.authorityDetail = 'not applicable';
         this.readyClaimBytes = undefined;
         this.bootEvidenceReady = false;
+        this.observationEnabled = !this.orchestratorLaunch();
         const generation = ++this.generation, assertValid = this.validity();
         // Snapshot the reminder interval once for this runtime. A child tool cannot
         // change this process environment, and Pi /reload restarts this runtime.
@@ -197,6 +202,7 @@ export class Intercom {
         let record = this.captureObserver();
         try {
             // Count the actual ancestor chain before discovery reads any config or observer creates state.
+            let countedRoot, countedBoard = false;
             if (this.orchestratorLaunch()) {
                 const home = projectsHome({ projectsHome: this.options.adoption?.projectsHome ?? process.env[PROJECTS_HOME_ENV], homeDirectory: homedir() });
                 const cwd = await realpath(this.host.cwd), root = await realpath(home);
@@ -207,12 +213,21 @@ export class Intercom {
                 if (boards.length > 1 || (boards.length === 1 && boards[0] !== root))
                     fail('BOARD_COUNT: second or wrong board; stop, never cleanup');
                 this.authorityEnabled = true;
+                countedRoot = root;
+                countedBoard = boards.length === 1;
             }
+            // Upstream 0.8.0: an explicit --intercom-root must canonically equal the session cwd; a parent
+            // root is never honored. Fork Orchestrator launches carry no such flag, so the counted
+            // projects-home board below is the only way a session binds an ancestor board, and it is still
+            // pinned and revalidated by the checks underneath exactly like a session-local root.
             const discovered = this.options.workspaceRoot !== undefined
                 ? await ConfigStore.workspace(this.host.cwd, this.options.workspaceRoot)
-                : await ConfigStore.discover(this.host.cwd);
+                : countedRoot
+                    // Never discover above the already-counted projects home or fall back to an unrelated board.
+                    ? (countedBoard ? new ConfigStore(countedRoot) : undefined)
+                    : await ConfigStore.discover(this.host.cwd);
             assertValid();
-            const root = discovered?.root ?? await realpath(this.host.cwd);
+            const root = discovered?.root ?? await realpath(countedRoot ?? this.host.cwd);
             assertValid();
             this.store = this.options.store?.(root) ?? discovered ?? new ConfigStore(root);
             if (this.store.root !== root || this.store.file !== path.join(root, '.pi-intercom', 'config.json'))
@@ -221,6 +236,7 @@ export class Intercom {
             this.configuredFile = this.store.file;
             await this.store.validateRoot(root);
             assertValid();
+            this.observationEnabled = !countedRoot || countedBoard;
             const previous = discovered ? await this.store.read() : undefined;
             assertValid();
             try {

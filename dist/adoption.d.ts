@@ -170,6 +170,7 @@ export declare class AdoptionWorkflow {
     private readonly options;
     private readonly git;
     private request?;
+    private readonly consumedDecisions;
     constructor(options: AdoptionOptions, git?: (args: string[], cwd: string) => Promise<GitResult>);
     /** One request in flight. A second concurrent request never interleaves with a transaction. */
     run(context: CommandContext, verb: string, args?: string[]): Promise<Result>;

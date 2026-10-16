@@ -70,6 +70,8 @@ export declare class Intercom {
     private configuredFile?;
     responsibility?: Agent;
     private observer?;
+    /** A no-board Orchestrator must not create a board directory through logging before bootstrap. */
+    private observationEnabled;
     private closing?;
     private reportWrites;
     private pendingReports;

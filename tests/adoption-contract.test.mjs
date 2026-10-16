@@ -119,6 +119,30 @@ test('outer queue precedes local filesystem acquisition, which precedes mutation
   gate.release(); await pending; assert.deepEqual(order, ['outer', 'mutate']);
 });
 
+test('confirmation is bound to displayed UUID/hash, timestamped after wording, and consumed once', async t => {
+  const f = await fixture(); t.after(f.dispose);
+  const transitionId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', before = await f.board.read();
+  let time = '2026-10-16T00:00:00.000Z';
+  const input = f.context.ui.input;
+  f.context.ui = { ...f.context.ui, input: async options => {
+    const value = await input(options);
+    if (options.kind === 'endedWording') time = '2026-10-16T01:00:00.000Z';
+    return value;
+  } };
+  const workflow = f.workflow({ uuid: () => transitionId, now: () => new Date(time) });
+  const transaction = workflow.transaction.bind(workflow); let captured;
+  workflow.transaction = (...args) => { captured = args; return transaction(...args); };
+  assert.equal((await workflow.run(f.context, 'adopt')).ok, true);
+  const record = parseClaim(await f.claim.read());
+  const preview = f.ui.prompts.find(prompt => prompt.kind === 'adoptTransition').prompt;
+  assert.ok(preview.includes(transitionId)); assert.ok(preview.includes(f.sha256(before)));
+  assert.equal(record.transitionId, transitionId); assert.equal(record.authority.confirmedEndedAt, time);
+  const head = await f.claim.head(), active = await f.board.read();
+  assert.equal((await transaction(...captured)).code, 'CONFIRMATION');
+  assert.equal(await f.claim.head(), head); assert.equal(await f.board.read(), active);
+  assert.equal(f.ui.prompts.filter(prompt => prompt.kind === 'adoptTransition').length, 1);
+});
+
 test('concurrent historical log append is retained while adoption preserves all seeded evidence bytes', async t => {
   const f = await fixture(); t.after(f.dispose);
   const historical = await f.seeded(), before = await historical.snapshot();
