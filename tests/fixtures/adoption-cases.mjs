@@ -2,7 +2,7 @@
 // Every function here builds disposable fixture state, runs the real fork code in dist/, and asserts a
 // specific expected outcome. An unimplemented scenario fails loudly instead of passing vacuously.
 
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -170,7 +170,7 @@ class Scenario {
         acquiredAt: new Date(Date.now() - this.lockFacts.ageMs).toISOString(),
       }));
     }
-    if (this.spec.hook) await installHook(fixture, this.spec.hook);
+
     // Runtime session identity is mutable so a generation change can be proven mid-flight.
     this.runtimeSession = this.ownIdValue;
     this.promotions = 0;
@@ -210,6 +210,9 @@ class Scenario {
     if (this.spec.during) this.installDuringHook();
     if (this.spec.preparedSwap) await this.reachPreparedSwap();
     if (this.spec.dirty) await this.applyDirty();
+    // Installed last: the fixture's own commits must succeed, and only the product's later commit
+    // is the one under test.
+    if (this.spec.hook) await installHook(fixture, this.spec.hook);
     if (this.spec.crash === 'before-intent') {
       say(`CASE ${this.name} PHASE 1`);
       say('ADDITIONAL: nothing was written; a killed process before the first commit leaves no record, no config change, and no takeover');
@@ -270,7 +273,24 @@ class Scenario {
       options.now = () => Date.now();
     }
     if (this.spec.publish === 'fail') options.rename = async () => { throw Object.assign(new Error('injected publication failure'), { code: 'EIO' }); };
-    if (this.spec.publish === 'invalidate') options.rename = async () => { this.runtimeSession = 'replaced-session'; throw Object.assign(new Error('injected invalidation before rename'), { code: 'EIO' }); };
+    // The session changes and the retry loop's own pre-rename check must notice before it retries.
+    if (this.spec.publish === 'invalidate') {
+      options.platform = 'win32';
+      options.delay = async () => {};
+      let calls = 0;
+      options.rename = async () => {
+        calls++;
+        this.runtimeSession = 'replaced-session';
+        if (calls === 1) throw Object.assign(new Error('injected interruption'), { code: 'EPERM' });
+        throw new Error('the retry must never be attempted once the session changed');
+      };
+    }
+    // Publication itself succeeds, and the session changes right after it: the post-publication
+    // reverification must stop before any active evidence, with no rollback of the published config.
+    if (this.spec.publish === 'after-rename') options.rename = async (from, to) => {
+      await rename(from, to);
+      this.runtimeSession = 'replaced-after-publication';
+    };
     if (this.spec.publish === 'eperm-then-invalidate') {
       options.platform = 'win32';
       options.now = (() => { let clock = 0; return () => clock; });

@@ -264,4 +264,13 @@ export declare function bootClaimEvidence(input: {
     ready: boolean;
     detail: string;
 }>;
+/**
+ * A named refusal raised at the call site that knows which step failed. Codes are never inferred from
+ * error prose: an unrelated internal error must not be reported to an operator as a specific safety
+ * verdict such as a stale preview.
+ */
+export declare class AdoptionFailure extends Error {
+    readonly code: ResultCode;
+    constructor(code: ResultCode, message: string);
+}
 export {};
