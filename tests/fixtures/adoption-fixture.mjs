@@ -1,0 +1,314 @@
+// Test-only fixture kit for ADR 0005 / issue #31. NOT a supported operation and NOT shipped: nothing in
+// src/ imports it. It builds a temporary projects-home git repository with a hand-written
+// `.pi-intercom/config.json`, a persisted Pi session header, an ephemeral loopback endpoint standing in
+// for "this runtime's ready notification", and a mock Pi UI. No live board, installed role, real port,
+// Pi worker, model turn, or cancellation is involved.
+
+import { execFile } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const dist = async name => import(path.join(ROOT, 'dist', name));
+const execute = promisify(execFile);
+
+export const IDS = { gone: 'gone-coordinator', fresh: 'fresh-orchestrator', workerOne: 'worker-one', workerTwo: 'worker-two', other: 'another-session' };
+/** A role tree of the shape `pi-role` uses, so the canonical launch-role check has something real. */
+export const ROLES = { directory: 'roles', orchestrator: 'orchestrator' };
+
+const PENDING_JOB = { jobId: 'job-pending-1', state: 'awaiting_handoff', createdAt: '2026-10-16T09:00:00.000Z', updatedAt: '2026-10-16T09:00:01.000Z', deadlineAt: '2026-10-16T09:02:01.000Z' };
+const UNCERTAIN_JOB = { jobId: 'job-uncertain-2', state: 'uncertain', createdAt: '2026-10-16T09:00:00.000Z', updatedAt: '2026-10-16T09:00:02.000Z', deadlineAt: '2026-10-16T09:02:02.000Z' };
+export const CLOSE_JOBS = { pending: PENDING_JOB, uncertain: UNCERTAIN_JOB };
+
+/** Hand-written shapes. None is produced by a supported writer, and several are deliberately irregular. */
+export const configs = {
+  /** Two workers, one pending and one uncertain close job. */
+  full: ports => `{
+      "version": 1,
+      "multiplexer": "herdr",
+      "agents": [
+        {
+          "sessionId": "${IDS.gone}",
+          "name": "Coordinator",
+          "coordinator": true,
+          "description": "Coordinate workers.",
+          "port": ${ports.coordinator},
+          "projectDirectory": "."
+        },
+        {
+          "sessionId": "${IDS.workerOne}",
+          "name": "Builder",
+          "coordinator": false,
+          "description": "Build assigned work.",
+          "port": ${ports.workerOne},
+          "projectDirectory": "app"
+        },
+        {
+          "sessionId": "${IDS.workerTwo}",
+          "name": "Reviewer",
+          "coordinator": false,
+          "description": "Review assigned work.",
+          "port": ${ports.workerTwo},
+          "projectDirectory": "app/web",
+          "role": "verifier",
+          "closeJob": ${JSON.stringify(PENDING_JOB, null, 6).replace(/\n/g, '\n        ')}
+        }
+      ]
+    }
+    `.replace(/^ {4}/gm, ''),
+  single: ports => `{
+      "version": 1,
+      "multiplexer": "herdr",
+      "agents": [
+        {
+          "sessionId": "${IDS.gone}",
+          "name": "Coordinator",
+          "coordinator": true,
+          "description": "Coordinate workers.",
+          "port": ${ports.coordinator},
+          "projectDirectory": "."
+        }
+      ]
+    }
+    `.replace(/^ {4}/gm, ''),
+  minified: ports => `{"version":1,"multiplexer":"herdr","agents":[{"sessionId":"${IDS.gone}","name":"Coordinator","coordinator":true,"description":"Coordinate workers.","port":${ports.coordinator},"projectDirectory":"."},{"sessionId":"${IDS.workerOne}","name":"Builder","coordinator":false,"description":"Build assigned work.","port":${ports.workerOne},"projectDirectory":"app"},{"sessionId":"${IDS.workerTwo}","name":"Reviewer","coordinator":false,"description":"Review assigned work.","port":${ports.workerTwo},"projectDirectory":"app/web","closeJob":${JSON.stringify(UNCERTAIN_JOB)}}]}`,
+  irregular: ports => `{"version":    1,   "multiplexer":"herdr",
+  "agents":[
+    {"coordinator":true,   "sessionId":"${IDS.gone}","name":"Coordinator",
+      "description":"Coordinate workers.",   "port":   ${ports.coordinator},"projectDirectory":".","unknownTolerance":{"kept":"exactly as written","nested":[1,2,3]}},
+    {"sessionId":"${IDS.workerOne}","name":"Builder","coordinator":false,"description":"Build assigned work.",
+      "port":${ports.workerOne},"projectDirectory":"app","unknownField":"kept too"},
+    {"sessionId":"${IDS.workerTwo}","name":"Reviewer","coordinator":false,"description":"Review assigned work.",
+      "port":${ports.workerTwo},"projectDirectory":"app/web","closeJob":{"jobId":"${PENDING_JOB.jobId}","state":"${PENDING_JOB.state}",
+        "createdAt":"${PENDING_JOB.createdAt}","updatedAt":"${PENDING_JOB.updatedAt}","deadlineAt":"${PENDING_JOB.deadlineAt}"}}
+  ]}
+  `,
+  duplicateKeys: ports => `{
+      "version": 1,
+      "version": 1,
+      "multiplexer": "herdr",
+      "agents": [
+        {"sessionId": "${IDS.gone}", "name": "Coordinator", "coordinator": true, "description": "Coordinate workers.", "port": ${ports.coordinator}, "projectDirectory": "."}
+      ]
+    }
+    `.replace(/^ {4}/gm, ''),
+  badVersion: ports => configs.full(ports).replace('"version": 1,', '"version": 2,'),
+  badSchema: ports => configs.full(ports).replace('"multiplexer": "herdr"', '"multiplexer": "screen"'),
+};
+
+export const configText = (style, ports) => (configs[style] ?? configs.full)(ports);
+
+/** Ephemeral loopback ports only. Never an existing or live port. */
+export async function bindEndpoint(sessionId, transport) {
+  const endpoint = await transport.listen(0, async () => { throw new Error('fixture endpoint accepts no messages'); }, () => ({ version: 1, sessionId }));
+  return endpoint;
+}
+
+export async function createFixture(options = {}) {
+  const { ConfigStore, scanConfig, sha256, validateConfig } = await dist('config.js');
+  const { renderClaim } = await dist('adoption.js');
+  const { listen } = await dist('transport.js');
+  const { probeWorker } = await dist('connections.js');
+  const home = options.home ?? await mkdtemp(path.join(tmpdir(), 'intercom-adopt-'));
+  const sessions = path.join(home, '.pi/default-sessions');
+  const endpoints = [];
+  const removed = [];
+
+  const git = async (args, cwd = home) => {
+    try { const { stdout } = await execute('git', args, { cwd }); return { code: 0, stdout, stderr: '' }; }
+    catch (error) { return { code: typeof error.code === 'number' ? error.code : 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }; }
+  };
+  const gitOk = async (args, cwd) => {
+    const result = await git(args, cwd);
+    if (result.code !== 0) throw new Error(`fixture git ${args.join(' ')} failed: ${(result.stderr || '').trim()}`);
+    return result.stdout;
+  };
+
+  await mkdir(path.join(home, 'app', 'web'), { recursive: true });
+  await gitOk(['init', '-q', '--initial-branch=main']);
+  await gitOk(['config', 'user.email', 'fixture@example.invalid']);
+  await gitOk(['config', 'user.name', 'Intercom Fixture']);
+  await writeFile(path.join(home, 'AGENTS.md'), '# Fixture projects home\n');
+  await writeFile(path.join(home, 'handoff.md'), '# Handoff\n\nNo assignments recorded.\n');
+  // The real projects home ignores tooling-owned state; a fixture that ignored nothing would refuse
+  // every commit for files no commit could ever contain.
+  await writeFile(path.join(home, '.gitignore'), '/.pi-intercom/\n/.pi/\n');
+  await gitOk(['add', 'AGENTS.md', 'handoff.md', '.gitignore']);
+  await gitOk(['commit', '-q', '-m', 'fixture: projects home base']);
+  await mkdir(sessions, { recursive: true });
+
+  const configPath = () => path.join(home, '.pi-intercom/config.json');
+  const claimPath = () => path.join(home, 'coordinator-claim.md');
+  const board = {
+    write: async text => {
+      await mkdir(path.join(home, '.pi-intercom'), { recursive: true });
+      await writeFile(configPath(), text);
+    },
+    read: async () => readFile(configPath(), 'utf8'),
+    scan: async () => scanConfig(await board.read()),
+    /** Structural checks only; the workflow reads raw bytes. */
+    parsed: async () => JSON.parse(await board.read()),
+    issues: async () => validateConfig(JSON.parse(await board.read())),
+  };
+  const claim = {
+    write: async text => writeFile(claimPath(), text),
+    read: async () => readFile(claimPath(), 'utf8'),
+    readOrUndefined: async () => { try { return await claim.read(); } catch { return undefined; } },
+    /** The same argv sequence the workflow uses, so a fixture record is committed the real way. */
+    commit: async () => {
+      await gitOk(['add', '--', 'coordinator-claim.md']);
+      await gitOk(['commit', '-q', '--only', 'coordinator-claim.md', '-m', 'fixture: coordinator evidence']);
+      return (await gitOk(['rev-parse', 'HEAD'])).trim();
+    },
+    /** Write then commit, exactly as committed evidence must be. */
+    writeAndCommit: async record => { await claim.write(renderClaim(record)); return claim.commit(); },
+    head: async () => (await gitOk(['rev-parse', 'HEAD'])).trim(),
+    log: async () => (await gitOk(['log', '--format=%H', '--', 'coordinator-claim.md'])).trim().split('\n').filter(Boolean),
+    at: async revision => (await gitOk(['show', `${revision}:coordinator-claim.md`])),
+    status: async () => (await gitOk(['status', '--porcelain=v1', '--untracked-files=all'])),
+  };
+  const session = {
+    /** One persisted Pi session header, the shape Pi writes as the first line of a session file. */
+    persist: async (id, directory = sessions) => {
+      const file = path.join(directory, `2026-10-16T09-00-00-000Z_${id}.jsonl`);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, `${JSON.stringify({ type: 'session', version: 3, id, timestamp: '2026-10-16T09:00:00.000Z', cwd: home })}\n`);
+      return file;
+    },
+    header: async file => JSON.parse((await readFile(file, 'utf8')).split('\n', 1)[0]),
+    rewriteHeader: async (file, id) => writeFile(file, `${JSON.stringify({ type: 'session', version: 3, id, timestamp: '2026-10-16T09:00:00.000Z', cwd: home })}\n`),
+  };
+  const extra = {
+    /** Another `.pi-intercom` directory: the AC1 count assertion, not a cleanup item. */
+    boardAt: async relative => {
+      const directory = path.join(home, relative);
+      await mkdir(path.join(directory, '.pi-intercom'), { recursive: true });
+      return directory;
+    },
+    boardOutside: async () => {
+      const directory = await mkdtemp(path.join(tmpdir(), 'intercom-adopt-outside-'));
+      removed.push(directory);
+      await mkdir(path.join(directory, '.pi-intercom'), { recursive: true });
+      await writeFile(path.join(directory, '.pi-intercom/config.json'), configText('single', { coordinator: 41001, workerOne: 41002, workerTwo: 41003 }));
+      return directory;
+    },
+    link: async (target, linkName) => symlink(target, linkName, 'dir'),
+  };
+  const hooks = {
+    reject: async () => {
+      const file = path.join(home, '.git/hooks/pre-commit');
+      await writeFile(file, '#!/bin/sh\necho "fixture: refusing" >&2\nexit 1\n');
+      await chmod(file, 0o755);
+    },
+    allow: async () => { await rm(path.join(home, '.git/hooks/pre-commit'), { force: true }); },
+  };
+  const seeded = async () => {
+    const logDirectory = path.join(home, '.pi-intercom/logs'), reportDirectory = path.join(home, '.pi-intercom/reports');
+    await mkdir(logDirectory, { recursive: true });
+    await mkdir(reportDirectory, { recursive: true });
+    await writeFile(path.join(logDirectory, 'writer-11111111-1111-4111-8111-111111111111.jsonl'), '{"version":1,"event":"runtime.ready"}\n');
+    await writeFile(path.join(reportDirectory, 'a'.repeat(64) + '.json'), '{"version":1,"status":"blocked","summary":"seed"}\n');
+    await writeFile(path.join(home, '.pi-intercom/keep.txt'), 'do not touch\n');
+    await session.persist(IDS.gone, path.join(home, '.pi/old-sessions'));
+    const read = async directory => (await readdir(directory)).sort();
+    return {
+      logDirectory, reportDirectory,
+      snapshot: async () => ({
+        logs: await read(logDirectory),
+        reports: await read(reportDirectory),
+        keep: await readFile(path.join(home, '.pi-intercom/keep.txt'), 'utf8'),
+        oldSessions: await read(path.join(home, '.pi/old-sessions')),
+      }),
+    };
+  };
+  return {
+    home, sessions, ConfigStore, ConfigStoreFor: (root, storeOptions) => new ConfigStore(root, storeOptions),
+    configPath, claimPath, scanConfig, sha256, renderClaim, board, claim, session, extra, hooks, seeded,
+    git, gitOk, probeWorker, listen, removed,
+    ports: () => ({ coordinator: 41001, workerOne: 41002, workerTwo: 41003 }),
+    keep: () => { removed.length = 0; },
+    dispose: async () => {
+      for (const endpoint of endpoints) await endpoint.close().catch(() => {});
+      for (const directory of removed) await rm(directory, { recursive: true, force: true }).catch(() => {});
+    },
+    track: endpoint => { endpoints.push(endpoint); return endpoint; },
+  };
+}
+
+/** A mock of the supported Pi dialog surface. Answers are keyed by prompt kind, never by call order. */
+/**
+ * A controllable UI that records every prompt's visible text. A decision carries a stable `kind`, so
+ * answers are routed by identity rather than by prompt text, and one declined decision can be isolated.
+ * There are no free-form arguments: identity, ports, paths, confirmation, and outcomes cannot be supplied
+ * or overridden — the only inputs are which decision is answered and how.
+ */
+export function mockUi(answers = {}) {
+  const prompts = [];
+  // An unlabelled decision is a production regression, never a silent decline: fail loudly instead.
+  const requireKind = kind => {
+    if (typeof kind !== 'string' || kind === '') throw new Error('a decision prompt must carry a stable kind');
+    return kind;
+  };
+  const answer = (kind, fallback) => {
+    const value = answers[kind] ?? fallback;
+    if (typeof value === 'string') return value;
+    if (value && value.kind === 'prompt') return value.value;
+    return value;
+  };
+  const ui = {
+    input: async options => {
+      const kind = requireKind(options.kind);
+      prompts.push({ kind, prompt: options.prompt, placeholder: options.placeholder });
+      return answer(kind, undefined);
+    },
+    confirm: async options => {
+      const kind = requireKind(options.kind);
+      prompts.push({ kind, prompt: options.prompt });
+      const value = answer(kind, 'decline');
+      return value === 'confirm' ? true : value === 'decline' ? false : value;
+    },
+  };
+  return { ui, prompts, ended: sessionId => ENDED_WORDING(sessionId) };
+}
+
+export function readinessProbe() {
+  const state = { epoch: 0, open: true };
+  return {
+    state,
+    close: () => { state.open = false; return ++state.epoch; },
+    current: () => state.epoch,
+    openNow: () => { state.open = true; return ++state.epoch; },
+    closeAction: () => { state.open = false; return ++state.epoch; },
+  };
+}
+
+/** A command context in the shape the fork accepts. Authority data still comes from the backend. */
+export function commandContext(fixture, input) {
+  return {
+    cwd: input.cwd ?? fixture.home,
+    mode: input.mode ?? 'tui',
+    hasUI: input.hasUI ?? true,
+    isProjectTrusted: () => input.trusted ?? true,
+    isIdle: () => input.idle ?? true,
+    sessionManager: {
+      getSessionId: () => input.sessionId,
+      getSessionFile: () => input.sessionFile,
+      getSessionDir: () => input.sessionDir ?? fixture.sessions,
+    },
+    ui: input.ui,
+    ...(input.waitForIdle === false ? {} : { waitForIdle: async () => { input.waitedIdle?.(); } }),
+  };
+}
+
+/** Records what the workflow touched, so a proof can assert "zero worker requests, zero lifecycle calls". */
+export function recorder() {
+  const calls = { sends: [], lifecycle: [], probes: [] };
+  return {
+    calls,
+    send: async (port, payload) => { calls.sends.push({ port, payload }); throw new Error('fixture board sends no worker message'); },
+    lifecycle: name => { calls.lifecycle.push(name); },
+  };
+}

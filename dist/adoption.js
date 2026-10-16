@@ -21,12 +21,17 @@ export const CLAIM_FILE = 'coordinator-claim.md';
 export const CONFIG_DIRECTORY = '.pi-intercom';
 export const REBRIEF_SOURCE = 'handoff.md (open assignments)';
 export const ENDED_WORDING = (sessionId) => `I confirm coordinator ${sessionId} ended`;
-/** Success codes are explicit; every other code is a safety stop (1) or an unavailable surface (2). */
+/**
+ * Exit codes follow the approved plan: 0 when a terminal outcome is reached, 1 when the session stopped
+ * and repair is required, 2 when the surface is unavailable. An outcome that merely reports that adoption
+ * does not apply here has reached its terminal result, so it is not an error exit.
+ */
 const SUCCESS = ['OK', 'DECLARED', 'CLAIM_OK', 'RECOVERED'];
+const ORDINARY = ['NO_BOARD'];
 const UNAVAILABLE = ['BACKEND', 'HOST', 'USAGE'];
 export function succeed(code, lines) { return { ok: true, code, exitCode: 0, lines }; }
 export function stop(code, lines) {
-    return { ok: false, code, exitCode: UNAVAILABLE.includes(code) ? 2 : SUCCESS.includes(code) ? 0 : 1, lines };
+    return { ok: false, code, exitCode: UNAVAILABLE.includes(code) ? 2 : SUCCESS.includes(code) || ORDINARY.includes(code) ? 0 : 1, lines };
 }
 /** Exactly one terminal summary line per result. Status lines are prefixed by the caller. */
 function halt(code, evidence) { return stop(code, [`ADOPTION STOP ${code}: ${evidence}`]); }
@@ -318,9 +323,14 @@ export class AdoptionWorkflow {
             return surveyed;
         }
         if (boards.length > 1)
-            return { stop: halt('BOARD_COUNT', `a second board at ${boards[1]} is a creation-time failure, not a cleanup item; nothing was read or written`) };
-        if (boards[0] !== canonicalHome)
-            return { stop: halt('BOARD_COUNT', `the only board is at ${boards[0]}, not the projects home ${canonicalHome}; stop`) };
+            return { stop: halt('BOARD_COUNT_TWO', `a second board at ${boards[1]} is a creation-time failure, not a cleanup item; nothing was read or written`) };
+        // Exactly one board that is not the projects home is the existing multi-project case: discovery
+        // continues, and adoption declines because it only replaces the projects-home board's entry.
+        if (boards[0] !== canonicalHome) {
+            surveyed.ordinary = boards[0];
+            surveyed.lines.unshift(`BOARD COUNT: the only board is at ${boards[0]}, a child project; existing discovery applies and adoption declines`);
+            return surveyed;
+        }
         let scanned;
         try {
             scanned = await this.options.storeFor(boards[0]).readStrict();
@@ -492,6 +502,7 @@ export class AdoptionWorkflow {
     async bootstrap(context, surveyed) {
         const home = surveyed.home, identity = surveyed.identity;
         const confirmed = await context.ui.confirm({
+            kind: 'boardInitialize',
             prompt: `Initialize the first Intercom board at projects home ${home}? Nothing is written until this is confirmed, and a child directory never receives a private board.`,
         });
         if (!confirmed)
@@ -568,6 +579,7 @@ export class AdoptionWorkflow {
         const unchanged = leftUnchanged(surveyed.scanned);
         const fenced = unchanged.filter(entry => entry.closeJob !== null && FENCED_STATES.includes(entry.closeJob.state));
         const confirmed = await context.ui.confirm({
+            kind: 'adoptTransition',
             prompt: `Adopt the board at ${surveyed.home}: coordinator ${board.sessionId} port ${board.port} -> ${identity.sessionId} port ${identity.port}. `
                 + `Old endpoint probe: ${probe.state} (${probe.reason}) — disconnected and unknown are not evidence of termination. `
                 + `Left unchanged: ${roster(unchanged)}${fenced.length ? `; close jobs reported and left fenced: ${fenced.map(entry => `${entry.name}/${entry.closeJob.state}`).join(', ')}` : ''}. `
@@ -582,6 +594,7 @@ export class AdoptionWorkflow {
     /** AC4: the authority reference and the exact ended wording, or a named refusal. */
     async askAuthority(context, kind, home, oldSessionId = '') {
         const record = await context.ui.input({
+            kind: 'authorityRecord',
             prompt: kind === 'adoption'
                 ? `Authorising record for adopting the board at ${home}: a required reference to the human decision that authorised it.`
                 : `Authorising record for declaring the first coordinator of ${home}: a required reference to the human decision that authorised it.`,
@@ -593,7 +606,7 @@ export class AdoptionWorkflow {
         const captured = (this.options.now?.() ?? new Date()).toISOString();
         if (kind === 'first-coordinator declaration')
             return { record: record.trim(), wording: record.trim(), confirmedEndedAt: captured };
-        const wording = await context.ui.input({ prompt: `Type exactly: ${ENDED_WORDING(oldSessionId)}` });
+        const wording = await context.ui.input({ kind: 'endedWording', placeholder: ENDED_WORDING(oldSessionId), prompt: `Type exactly: ${ENDED_WORDING(oldSessionId)}` });
         if (wording === undefined)
             return { stop: halt('CANCELLED', 'the ended-confirmation prompt was cancelled; nothing was written') };
         if (wording !== ENDED_WORDING(oldSessionId)) {
@@ -767,6 +780,7 @@ export class AdoptionWorkflow {
             return this.transaction(context, surveyed, board, decided.authority, intent);
         }
         const confirmed = await context.ui.confirm({
+            kind: 'finalizeTransition',
             prompt: `Finalize recorded transition ${intent.transitionId} without replacement: ${intent.previous.sessionId} port ${intent.previous.port} -> ${intent.coordinator.sessionId} port ${intent.coordinator.port}, which is already the board entry. `
                 + `Evidence is ${clean ? 'clean committed prepared intent' : 'exactly derived active bytes already in the worktree'}. Commit that active evidence and promote this running session?`,
         });
@@ -839,20 +853,26 @@ export class AdoptionWorkflow {
             return halt('GIT', `projects home ${home} is not a git repository root; ${CLAIM_FILE} cannot be committed evidence`);
         }
         const staged = await this.trackedPaths(['diff', '--cached', '--name-only'], home);
-        if (staged.length)
-            return halt('GIT', `the git index is not empty (${staged.join(', ')}); this workflow never stages or commits another path`);
+        const foreign = staged.filter(file => file !== CLAIM_FILE);
+        if (foreign.length)
+            return halt('GIT', `the git index already holds other paths (${foreign.join(', ')}); this workflow never commits them`);
         const unresolved = await this.unresolvedOperation(home);
         if (unresolved !== undefined)
             return halt('GIT', `an unresolved git operation is in progress (${unresolved}); nothing is written`);
-        const foreign = (await this.dirtyPaths(home)).filter(file => file !== CLAIM_FILE);
-        if (foreign.length)
-            return halt('GIT', `unrelated worktree changes exist (${foreign.join(', ')}); this workflow never sweeps another path`);
+        // Only tracked modifications are refused. An untracked path cannot be committed by
+        // `commit --only <claim>`, and a real projects home always has some (tooling-owned `.pi-intercom/`,
+        // session data, a note being written). The commit's own changed-path verification below is the
+        // guarantee that nothing else is ever swept in.
+        const unrelated = (await this.dirtyPaths(home)).filter(entry => !entry.untracked && entry.file !== CLAIM_FILE);
+        if (unrelated.length)
+            return halt('GIT', `tracked files outside the claim record are modified (${unrelated.map(entry => entry.file).join(', ')}); this workflow never commits them`);
         return undefined;
     }
     async trackedPaths(args, home) {
         const output = await this.gitText(args, home, { tolerate: true });
         return output === undefined ? [] : output.split('\n').filter(Boolean);
     }
+    /** Paths git reports as changed, with untracked ones marked so they can be told apart. */
     async dirtyPaths(home) {
         const output = await this.gitText(['status', '--porcelain=v1', '--untracked-files=all'], home, { tolerate: true });
         return output === undefined ? [] : statusPaths(output);
@@ -877,6 +897,15 @@ export class AdoptionWorkflow {
     /** `git commit --only <claim>` with argv, then verify HEAD, its changed-path set, and the bytes. */
     async commitClaim(home, claimedPath, content, context, epoch) {
         this.assertCurrent(context, epoch);
+        // Re-check immediately before committing: the window between the caller's decision and the commit
+        // is exactly where another writer or a human edit could otherwise be swept in.
+        const refused = await this.assertGitSafe(home, context, epoch);
+        if (refused !== undefined)
+            fail(reasonOf(refused));
+        // `commit --only` refuses a pathspec git does not know yet, and a first declaration creates this file.
+        // Staging only this one path, after the empty-index gate above, is therefore required, and
+        // `--only` still commits nothing else: the verification below refuses any sweep.
+        await this.git(['add', '--', claimedPath], home);
         const configured = await this.git(['config', 'user.email'], home);
         const identity = configured.code === 0 && configured.stdout.trim() !== '' ? [] : ['-c', 'user.name=Pi Intercom', '-c', 'user.email=pi-intercom@localhost'];
         const committed = await this.git([...identity, 'commit', '--only', claimedPath, '-m', 'chore(coordinator-claim): coordinator evidence'], home);
@@ -1039,8 +1068,14 @@ function reason(error) {
 function reasonOf(result) {
     return result.lines[result.lines.length - 1] ?? 'refused';
 }
-/** `git status --porcelain=v1` lines are `<XY><space><path>`; name-only diffs are bare paths. */
+/**
+ * `git status --porcelain=v1` lines are `<XY><space><path>`. `??` is untracked: it is reported but never
+ * blocks, because it cannot be part of a path-scoped commit.
+ */
 function statusPaths(output) {
-    return output.split('\n').filter(Boolean).map(line => (/^[ MARCUD?!]{2} /.test(line) ? line.slice(3) : line)).filter(Boolean);
+    return output.split('\n').filter(Boolean).map(line => ({
+        untracked: line.startsWith('??'),
+        file: /^[ MARCUD?!]{2} /.test(line) ? line.slice(3) : line,
+    })).filter(entry => entry.file !== '');
 }
 //# sourceMappingURL=adoption.js.map

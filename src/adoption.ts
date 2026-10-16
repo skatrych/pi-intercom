@@ -32,7 +32,7 @@ export type ExitCode = 0 | 1 | 2;
 export type ResultCode =
   | 'OK' | 'DECLARED' | 'CLAIM_OK' | 'RECOVERED'
   | 'AUTH' | 'MODE' | 'TRUST' | 'SESSION_CHANGED' | 'BUSY'
-  | 'BOARD_COUNT' | 'BOARD_PATH' | 'NO_BOARD'
+  | 'BOARD_COUNT' | 'BOARD_COUNT_TWO' | 'BOARD_PATH' | 'NO_BOARD'
   | 'CONFIG' | 'RECORD' | 'CLAIM_OTHER' | 'CLAIM_MISMATCH' | 'ADOPTION_REQUIRED'
   | 'SESSION_UNPERSISTED' | 'IDENTITY' | 'SESSION_COLLISION' | 'PORT_COLLISION'
   | 'OLD_CONNECTED' | 'CONFIRMATION' | 'CANCELLED' | 'STALE_PREVIEW' | 'LOCKED'
@@ -40,12 +40,17 @@ export type ResultCode =
   | 'BACKEND' | 'HOST' | 'USAGE';
 export interface Result { ok: boolean; code: ResultCode; exitCode: ExitCode; lines: string[] }
 
-/** Success codes are explicit; every other code is a safety stop (1) or an unavailable surface (2). */
+/**
+ * Exit codes follow the approved plan: 0 when a terminal outcome is reached, 1 when the session stopped
+ * and repair is required, 2 when the surface is unavailable. An outcome that merely reports that adoption
+ * does not apply here has reached its terminal result, so it is not an error exit.
+ */
 const SUCCESS: ResultCode[] = ['OK', 'DECLARED', 'CLAIM_OK', 'RECOVERED'];
+const ORDINARY: ResultCode[] = ['NO_BOARD'];
 const UNAVAILABLE: ResultCode[] = ['BACKEND', 'HOST', 'USAGE'];
 export function succeed(code: ResultCode, lines: string[]): Result { return { ok: true, code, exitCode: 0, lines }; }
 export function stop(code: ResultCode, lines: string[]): Result {
-  return { ok: false, code, exitCode: UNAVAILABLE.includes(code) ? 2 : SUCCESS.includes(code) ? 0 : 1, lines };
+  return { ok: false, code, exitCode: UNAVAILABLE.includes(code) ? 2 : SUCCESS.includes(code) || ORDINARY.includes(code) ? 0 : 1, lines };
 }
 /** Exactly one terminal summary line per result. Status lines are prefixed by the caller. */
 function halt(code: ResultCode, evidence: string): Result { return stop(code, [`ADOPTION STOP ${code}: ${evidence}`]); }
@@ -173,7 +178,14 @@ export interface CommandContext {
   isProjectTrusted(): boolean;
   isIdle(): boolean;
   sessionManager: { getSessionId(): string; getSessionFile(): string | undefined; getSessionDir(): string | undefined };
-  ui: { input(options: { prompt: string }): Promise<string | undefined>; confirm(options: { prompt: string }): Promise<boolean> };
+    /**
+   * Every decision carries a stable `kind`, so an operator, a test, and the audit trail can tell which
+   * question was answered, declined, left blank, or cancelled. Prompt text is for humans and changes.
+   */
+  ui: {
+    input(options: { kind: string; prompt: string; placeholder?: string }): Promise<string | undefined>;
+    confirm(options: { kind: string; prompt: string }): Promise<boolean>;
+  };
   waitForIdle?(): Promise<void>;
 }
 export type AdoptionPhase = 'prepared-committed' | 'published' | 'before-active-write' | 'active-committed' | 'promoted';
@@ -208,6 +220,8 @@ interface Survey {
   scanned?: ScannedConfig;
   identity: ResolvedIdentity;
   claimPath: string;
+  /** Set when the layout is an existing multi-project one, so adoption is not applicable. */
+  ordinary?: string;
   claimRaw?: string;
   claim?: ClaimRecord;
   claimCommit?: string;
@@ -360,8 +374,14 @@ export class AdoptionWorkflow {
       }
       return surveyed;
     }
-    if (boards.length > 1) return { stop: halt('BOARD_COUNT', `a second board at ${boards[1]} is a creation-time failure, not a cleanup item; nothing was read or written`) };
-    if (boards[0] !== canonicalHome) return { stop: halt('BOARD_COUNT', `the only board is at ${boards[0]}, not the projects home ${canonicalHome}; stop`) };
+    if (boards.length > 1) return { stop: halt('BOARD_COUNT_TWO', `a second board at ${boards[1]} is a creation-time failure, not a cleanup item; nothing was read or written`) };
+    // Exactly one board that is not the projects home is the existing multi-project case: discovery
+    // continues, and adoption declines because it only replaces the projects-home board's entry.
+    if (boards[0] !== canonicalHome) {
+      surveyed.ordinary = boards[0];
+      surveyed.lines.unshift(`BOARD COUNT: the only board is at ${boards[0]}, a child project; existing discovery applies and adoption declines`);
+      return surveyed;
+    }
     let scanned: ScannedConfig;
     try { scanned = await this.options.storeFor(boards[0]).readStrict(); }
     catch (error) { return { stop: halt('CONFIG', `the board config is unreadable or invalid: ${reason(error)}; a malformed board is never repaired implicitly`) }; }
@@ -493,6 +513,7 @@ export class AdoptionWorkflow {
   private async bootstrap(context: CommandContext, surveyed: Survey): Promise<Result> {
     const home = surveyed.home, identity = surveyed.identity;
     const confirmed = await context.ui.confirm({
+      kind: 'boardInitialize',
       prompt: `Initialize the first Intercom board at projects home ${home}? Nothing is written until this is confirmed, and a child directory never receives a private board.`,
     });
     if (!confirmed) return halt('CANCELLED', `first-board initialization at ${home} was declined; nothing was written`);
@@ -560,6 +581,7 @@ export class AdoptionWorkflow {
     const unchanged = leftUnchanged(surveyed.scanned!);
     const fenced = unchanged.filter(entry => entry.closeJob !== null && FENCED_STATES.includes(entry.closeJob.state));
     const confirmed = await context.ui.confirm({
+      kind: 'adoptTransition',
       prompt: `Adopt the board at ${surveyed.home}: coordinator ${board.sessionId} port ${board.port} -> ${identity.sessionId} port ${identity.port}. `
         + `Old endpoint probe: ${probe.state} (${probe.reason}) — disconnected and unknown are not evidence of termination. `
         + `Left unchanged: ${roster(unchanged)}${fenced.length ? `; close jobs reported and left fenced: ${fenced.map(entry => `${entry.name}/${entry.closeJob!.state}`).join(', ')}` : ''}. `
@@ -573,6 +595,7 @@ export class AdoptionWorkflow {
   /** AC4: the authority reference and the exact ended wording, or a named refusal. */
   private async askAuthority(context: CommandContext, kind: 'first-coordinator declaration' | 'adoption', home: string, oldSessionId = ''): Promise<Authority | { stop: Result }> {
     const record = await context.ui.input({
+      kind: 'authorityRecord',
       prompt: kind === 'adoption'
         ? `Authorising record for adopting the board at ${home}: a required reference to the human decision that authorised it.`
         : `Authorising record for declaring the first coordinator of ${home}: a required reference to the human decision that authorised it.`,
@@ -581,7 +604,7 @@ export class AdoptionWorkflow {
     if (!bounded(record.trim(), 2000)) return { stop: halt('CONFIRMATION', 'an authorising record is required; an empty answer cannot produce a claim') };
     const captured = (this.options.now?.() ?? new Date()).toISOString();
     if (kind === 'first-coordinator declaration') return { record: record.trim(), wording: record.trim(), confirmedEndedAt: captured };
-    const wording = await context.ui.input({ prompt: `Type exactly: ${ENDED_WORDING(oldSessionId)}` });
+    const wording = await context.ui.input({ kind: 'endedWording', placeholder: ENDED_WORDING(oldSessionId), prompt: `Type exactly: ${ENDED_WORDING(oldSessionId)}` });
     if (wording === undefined) return { stop: halt('CANCELLED', 'the ended-confirmation prompt was cancelled; nothing was written') };
     if (wording !== ENDED_WORDING(oldSessionId)) {
       return { stop: halt('CONFIRMATION', 'the required wording was not typed exactly; disconnected and unknown are not evidence of termination, and an approximation cannot confirm it') };
@@ -731,6 +754,7 @@ export class AdoptionWorkflow {
       return this.transaction(context, surveyed, board, decided.authority, intent);
     }
     const confirmed = await context.ui.confirm({
+      kind: 'finalizeTransition',
       prompt: `Finalize recorded transition ${intent.transitionId} without replacement: ${intent.previous.sessionId} port ${intent.previous.port} -> ${intent.coordinator.sessionId} port ${intent.coordinator.port}, which is already the board entry. `
         + `Evidence is ${clean ? 'clean committed prepared intent' : 'exactly derived active bytes already in the worktree'}. Commit that active evidence and promote this running session?`,
     });
@@ -791,18 +815,24 @@ export class AdoptionWorkflow {
       return halt('GIT', `projects home ${home} is not a git repository root; ${CLAIM_FILE} cannot be committed evidence`);
     }
     const staged = await this.trackedPaths(['diff', '--cached', '--name-only'], home);
-    if (staged.length) return halt('GIT', `the git index is not empty (${staged.join(', ')}); this workflow never stages or commits another path`);
+    const foreign = staged.filter(file => file !== CLAIM_FILE);
+    if (foreign.length) return halt('GIT', `the git index already holds other paths (${foreign.join(', ')}); this workflow never commits them`);
     const unresolved = await this.unresolvedOperation(home);
     if (unresolved !== undefined) return halt('GIT', `an unresolved git operation is in progress (${unresolved}); nothing is written`);
-    const foreign = (await this.dirtyPaths(home)).filter(file => file !== CLAIM_FILE);
-    if (foreign.length) return halt('GIT', `unrelated worktree changes exist (${foreign.join(', ')}); this workflow never sweeps another path`);
+    // Only tracked modifications are refused. An untracked path cannot be committed by
+    // `commit --only <claim>`, and a real projects home always has some (tooling-owned `.pi-intercom/`,
+    // session data, a note being written). The commit's own changed-path verification below is the
+    // guarantee that nothing else is ever swept in.
+    const unrelated = (await this.dirtyPaths(home)).filter(entry => !entry.untracked && entry.file !== CLAIM_FILE);
+    if (unrelated.length) return halt('GIT', `tracked files outside the claim record are modified (${unrelated.map(entry => entry.file).join(', ')}); this workflow never commits them`);
     return undefined;
   }
   private async trackedPaths(args: string[], home: string): Promise<string[]> {
     const output = await this.gitText(args, home, { tolerate: true });
     return output === undefined ? [] : output.split('\n').filter(Boolean);
   }
-  private async dirtyPaths(home: string): Promise<string[]> {
+  /** Paths git reports as changed, with untracked ones marked so they can be told apart. */
+  private async dirtyPaths(home: string): Promise<{ file: string; untracked: boolean }[]> {
     const output = await this.gitText(['status', '--porcelain=v1', '--untracked-files=all'], home, { tolerate: true });
     return output === undefined ? [] : statusPaths(output);
   }
@@ -820,6 +850,14 @@ export class AdoptionWorkflow {
   /** `git commit --only <claim>` with argv, then verify HEAD, its changed-path set, and the bytes. */
   private async commitClaim(home: string, claimedPath: string, content: string, context: CommandContext, epoch: number): Promise<string | undefined> {
     this.assertCurrent(context, epoch);
+    // Re-check immediately before committing: the window between the caller's decision and the commit
+    // is exactly where another writer or a human edit could otherwise be swept in.
+    const refused = await this.assertGitSafe(home, context, epoch);
+    if (refused !== undefined) fail(reasonOf(refused));
+    // `commit --only` refuses a pathspec git does not know yet, and a first declaration creates this file.
+    // Staging only this one path, after the empty-index gate above, is therefore required, and
+    // `--only` still commits nothing else: the verification below refuses any sweep.
+    await this.git(['add', '--', claimedPath], home);
     const configured = await this.git(['config', 'user.email'], home);
     const identity = configured.code === 0 && configured.stdout.trim() !== '' ? [] : ['-c', 'user.name=Pi Intercom', '-c', 'user.email=pi-intercom@localhost'];
     const committed = await this.git([...identity, 'commit', '--only', claimedPath, '-m', 'chore(coordinator-claim): coordinator evidence'], home);
@@ -946,7 +984,13 @@ function reason(error: unknown): string {
 function reasonOf(result: Result): string {
   return result.lines[result.lines.length - 1] ?? 'refused';
 }
-/** `git status --porcelain=v1` lines are `<XY><space><path>`; name-only diffs are bare paths. */
-function statusPaths(output: string): string[] {
-  return output.split('\n').filter(Boolean).map(line => (/^[ MARCUD?!]{2} /.test(line) ? line.slice(3) : line)).filter(Boolean);
+/**
+ * `git status --porcelain=v1` lines are `<XY><space><path>`. `??` is untracked: it is reported but never
+ * blocks, because it cannot be part of a path-scoped commit.
+ */
+function statusPaths(output: string): { file: string; untracked: boolean }[] {
+  return output.split('\n').filter(Boolean).map(line => ({
+    untracked: line.startsWith('??'),
+    file: /^[ MARCUD?!]{2} /.test(line) ? line.slice(3) : line,
+  })).filter(entry => entry.file !== '');
 }

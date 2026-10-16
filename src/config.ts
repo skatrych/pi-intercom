@@ -111,6 +111,10 @@ export class JsonDocument {
     else if (character === '"') node = { span: { start, end: this.at }, value: this.string() };
     else if (character === 't' || character === 'f' || character === 'n') node = this.literal();
     else node = { span: { start, end: this.at }, value: this.number() };
+    // Every node reports the span of its own value token, from the opening character to the position the
+    // branch stopped at. Containers and literals consume their own opening character, so the caller is
+    // the only place that still knows where the value began.
+    node.span.start = start;
     node.span.end = this.at;
     return node;
   }
@@ -118,10 +122,11 @@ export class JsonDocument {
     this.expect('{');
     const members = new Map<string, Node>();
     this.skip();
-    if (this.text[this.at] === '}') { this.at++; return { span: { start: 0, end: 0 }, value: {}, members }; }
+    if (this.text[this.at] === '}') { this.at++; return { span: { start: -1, end: 0 }, value: {}, members }; }
     for (;;) {
       this.skip();
-      const keyNode: Node = { span: { start: this.at, end: 0 }, value: this.string() };
+      const keyStart = this.at;
+      const keyNode: Node = { span: { start: keyStart, end: this.at }, value: this.string() };
       const name = keyNode.value as string;
       if (members.has(name)) fail(`${this.source} has duplicate key ${boundedKey(name)}`);
       this.skip(); this.expect(':');
@@ -133,13 +138,13 @@ export class JsonDocument {
       if (next === '}') break;
       fail(`${this.source} is malformed JSON`);
     }
-    return { span: { start: 0, end: 0 }, value: {}, members };
+    return { span: { start: -1, end: 0 }, value: {}, members };
   }
   private array(depth: number): Node {
     this.expect('[');
     const items: Node[] = [];
     this.skip();
-    if (this.text[this.at] === ']') { this.at++; return { span: { start: 0, end: 0 }, value: items, items }; }
+    if (this.text[this.at] === ']') { this.at++; return { span: { start: -1, end: 0 }, value: items, items }; }
     for (;;) {
       items.push(this.value(depth + 1));
       this.skip();
@@ -149,11 +154,11 @@ export class JsonDocument {
       if (next === ']') break;
       fail(`${this.source} is malformed JSON`);
     }
-    return { span: { start: 0, end: 0 }, value: items, items };
+    return { span: { start: -1, end: 0 }, value: items, items };
   }
   private literal(): Node {
     for (const [token, value] of [['true', true], ['false', false], ['null', null]] as const) {
-      if (this.text.startsWith(token, this.at)) { this.at += token.length; return { span: { start: 0, end: 0 }, value }; }
+      if (this.text.startsWith(token, this.at)) { this.at += token.length; return { span: { start: -1, end: 0 }, value }; }
     }
     fail(`${this.source} is malformed JSON`);
   }
@@ -264,11 +269,15 @@ export function patchCoordinatorEntry(raw: string, sessionId: string, newPort: n
   const [first, second] = idSpan.start <= portSpan.start ? [idSpan, portSpan] : [portSpan, idSpan];
   const firstText = first === idSpan ? JSON.stringify(sessionId) : String(newPort);
   const secondText = second === idSpan ? JSON.stringify(sessionId) : String(newPort);
-  const after = raw.slice(0, first.start) + firstText + raw.slice(first.end, second.start) + secondText + raw.slice(second.end);
+  // The three untouched regions are captured before concatenation and re-verified against the result.
+  // Comparing raw offsets afterwards would be wrong as soon as a replacement changes the document length.
+  const head = raw.slice(0, first.start), middle = raw.slice(first.end, second.start), tail = raw.slice(second.end);
+  const after = head + firstText + middle + secondText + tail;
   const next = scanConfig(after).config;
   const target = coordinator(next);
   if (target.sessionId !== sessionId || target.port !== newPort) fail('coordinator patch did not apply exactly');
-  if (after.slice(0, first.start) !== raw.slice(0, first.start) || after.slice(first.end, second.start) !== raw.slice(first.end, second.start) || after.slice(second.end) !== raw.slice(second.end)) fail('coordinator patch changed bytes outside the identity tokens');
+  if (!after.startsWith(head) || !after.endsWith(tail)
+    || after.slice(head.length + firstText.length, after.length - tail.length - secondText.length) !== middle) fail('coordinator patch changed bytes outside the identity tokens');
   if (next.agents.length !== scanned.config.agents.length) fail('coordinator patch changed the roster');
   return { before: raw, after, spans: [idSpan, portSpan] };
 }
@@ -302,9 +311,15 @@ export interface ConfigStoreOptions {
   now?: () => number;
   /** Diagnostic identity written into the transaction lock. Never an authorization value. */
   lockOwner?: () => { sessionId: string };
+  /** Liveness probe override, so a proof can name a dead owner deterministically. */
+  pidAlive?: (pid: number) => boolean;
+  /** Tolerance before an abandoned lock may be reclaimed. */
+  staleLockMs?: number;
 }
 const LOCK_DIRECTORY = 'config.lock';
 const LOCK_OWNER_FILE = 'owner.json';
+/** A crashed writer's lock is reclaimed only after this much time has passed. */
+const STALE_LOCK_TOLERANCE_MS = 60_000;
 /** Process-local per-file serialization shared by every store instance for the same path. */
 const processQueues = new Map<string, Promise<void>>();
 /** Marks the async chain that already holds this store's transaction, so nested publications reuse it. */
@@ -388,6 +403,20 @@ export class ConfigStore {
       return value;
     } catch { return 'unreadable'; }
   }
+  /** Default liveness probe; injectable so a proof can name a dead owner deterministically. */
+  private pidAlive(pid: number): boolean {
+    const probe = this.options.pidAlive ?? ((candidate: number) => {
+      try { process.kill(candidate, 0); return true; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+    });
+    return probe(pid);
+  }
+  /** Only an old enough leftover is reclaimed, so a slow writer is never run over. */
+  private expired(acquiredAt: string): boolean {
+    const acquired = Date.parse(acquiredAt);
+    if (!Number.isFinite(acquired)) return false;
+    return (this.options.now?.() ?? Date.now()) - acquired >= (this.options.staleLockMs ?? STALE_LOCK_TOLERANCE_MS);
+  }
   private async acquireLock(): Promise<() => Promise<void>> {
     // Validate the session root before creating anything under it: a dangling or escaping metadata link
     // is a path-safety refusal, not a missing directory that justifies a write.
@@ -397,8 +426,16 @@ export class ConfigStore {
     try { await mkdir(directory, { mode: 0o700 }); }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'EEXIST') throw new StaleConfigLock(await this.lockOwner());
-      throw error;
+      if (code !== 'EEXIST') throw error;
+      const owner = await this.lockOwner();
+      // A lock we cannot interpret is not provably abandoned, and a live owner is contention. Only a
+      // record whose process is demonstrably gone and whose age passed the tolerance may be reclaimed,
+      // once, by a single retry: an unbounded loop could outlive a slow legitimate writer instead.
+      if (owner === 'unreadable' || this.pidAlive(owner.pid) || !this.expired(owner.acquiredAt)) throw new StaleConfigLock(owner);
+      await unlink(path.join(directory, LOCK_OWNER_FILE)).catch(() => {});
+      await rmdir(directory).catch(() => {});
+      try { await mkdir(directory, { mode: 0o700 }); }
+      catch { throw new StaleConfigLock(owner); }
     }
     const ownerFile = path.join(directory, LOCK_OWNER_FILE);
     const owned = async (): Promise<boolean> => {

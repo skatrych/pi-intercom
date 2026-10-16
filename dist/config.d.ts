@@ -118,6 +118,10 @@ export interface ConfigStoreOptions {
     lockOwner?: () => {
         sessionId: string;
     };
+    /** Liveness probe override, so a proof can name a dead owner deterministically. */
+    pidAlive?: (pid: number) => boolean;
+    /** Tolerance before an abandoned lock may be reclaimed. */
+    staleLockMs?: number;
 }
 export declare class ConfigStore {
     readonly root: string;
@@ -147,6 +151,10 @@ export declare class ConfigStore {
     protected outerQueue<T>(run: () => Promise<T>): Promise<T>;
     protected exclusive<T>(run: () => Promise<T>): Promise<T>;
     private lockOwner;
+    /** Default liveness probe; injectable so a proof can name a dead owner deterministically. */
+    private pidAlive;
+    /** Only an old enough leftover is reclaimed, so a slow writer is never run over. */
+    private expired;
     private acquireLock;
     static discover(cwd: string): Promise<ConfigStore | undefined>;
     static workspace(cwd: string, workspaceRoot: string): Promise<ConfigStore>;

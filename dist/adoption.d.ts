@@ -18,7 +18,7 @@ export declare const CONFIG_DIRECTORY = ".pi-intercom";
 export declare const REBRIEF_SOURCE = "handoff.md (open assignments)";
 export declare const ENDED_WORDING: (sessionId: string) => string;
 export type ExitCode = 0 | 1 | 2;
-export type ResultCode = 'OK' | 'DECLARED' | 'CLAIM_OK' | 'RECOVERED' | 'AUTH' | 'MODE' | 'TRUST' | 'SESSION_CHANGED' | 'BUSY' | 'BOARD_COUNT' | 'BOARD_PATH' | 'NO_BOARD' | 'CONFIG' | 'RECORD' | 'CLAIM_OTHER' | 'CLAIM_MISMATCH' | 'ADOPTION_REQUIRED' | 'SESSION_UNPERSISTED' | 'IDENTITY' | 'SESSION_COLLISION' | 'PORT_COLLISION' | 'OLD_CONNECTED' | 'CONFIRMATION' | 'CANCELLED' | 'STALE_PREVIEW' | 'LOCKED' | 'GIT' | 'PUBLISH' | 'RECOVERY_REQUIRED' | 'ADOPTION_NOT_READY' | 'PROMOTION_PENDING' | 'BACKEND' | 'HOST' | 'USAGE';
+export type ResultCode = 'OK' | 'DECLARED' | 'CLAIM_OK' | 'RECOVERED' | 'AUTH' | 'MODE' | 'TRUST' | 'SESSION_CHANGED' | 'BUSY' | 'BOARD_COUNT' | 'BOARD_COUNT_TWO' | 'BOARD_PATH' | 'NO_BOARD' | 'CONFIG' | 'RECORD' | 'CLAIM_OTHER' | 'CLAIM_MISMATCH' | 'ADOPTION_REQUIRED' | 'SESSION_UNPERSISTED' | 'IDENTITY' | 'SESSION_COLLISION' | 'PORT_COLLISION' | 'OLD_CONNECTED' | 'CONFIRMATION' | 'CANCELLED' | 'STALE_PREVIEW' | 'LOCKED' | 'GIT' | 'PUBLISH' | 'RECOVERY_REQUIRED' | 'ADOPTION_NOT_READY' | 'PROMOTION_PENDING' | 'BACKEND' | 'HOST' | 'USAGE';
 export interface Result {
     ok: boolean;
     code: ResultCode;
@@ -91,11 +91,18 @@ export interface CommandContext {
         getSessionFile(): string | undefined;
         getSessionDir(): string | undefined;
     };
+    /**
+   * Every decision carries a stable `kind`, so an operator, a test, and the audit trail can tell which
+   * question was answered, declined, left blank, or cancelled. Prompt text is for humans and changes.
+   */
     ui: {
         input(options: {
+            kind: string;
             prompt: string;
+            placeholder?: string;
         }): Promise<string | undefined>;
         confirm(options: {
+            kind: string;
             prompt: string;
         }): Promise<boolean>;
     };
@@ -228,6 +235,7 @@ export declare class AdoptionWorkflow {
     /** Refuse unsafe layout, a non-repository home, a non-empty index, or unrelated worktree changes. */
     private assertGitSafe;
     private trackedPaths;
+    /** Paths git reports as changed, with untracked ones marked so they can be told apart. */
     private dirtyPaths;
     private unresolvedOperation;
     /** `git commit --only <claim>` with argv, then verify HEAD, its changed-path set, and the bytes. */
