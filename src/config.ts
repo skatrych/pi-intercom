@@ -563,12 +563,11 @@ export class ConfigStore {
       // Existing committed tenure evidence is also an ordinary-writer fence. In particular, an old
       // coordinator cannot publish while another cooperating process holds unresolved prepared intent.
       // The Orchestrator runtime additionally gates ABSENT evidence before any coordinator action.
-      try {
-        await readFile(path.join(this.root, 'coordinator-claim.md'));
-        const { bootClaimEvidence } = await import('./adoption.js');
+      const { bootClaimEvidence, claimEvidenceEstablished } = await import('./adoption.js');
+      if (await claimEvidenceEstablished(this.root)) {
         const evidence = await bootClaimEvidence({ home: this.root, identity: coordinator(c) });
         if (!evidence.ready) fail(`ADOPTION_NOT_READY: ${evidence.detail}`);
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
       assertValid();
       await mutate(c); assertValid(); validateConfig(c);
       const temp = await this.temporary(c);

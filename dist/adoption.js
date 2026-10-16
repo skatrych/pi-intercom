@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { lstat, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -233,7 +233,12 @@ export class AdoptionWorkflow {
         const surveyed = await this.survey(context);
         if ('stop' in surveyed)
             return surveyed.stop;
-        return succeed('OK', this.report(surveyed));
+        const lines = this.report(surveyed);
+        if (this.matchingActive(surveyed) && (!this.options.responsibilityLoaded() || !this.options.readiness.ready())) {
+            return stop('PROMOTION_PENDING', [...lines.filter(line => !line.startsWith('STATUS OK:')),
+                'ADOPTION STOP PROMOTION_PENDING: committed active evidence matches, but local promotion/action readiness is incomplete; explicitly invoke /intercom-adopt for write-free promotion retry; no replacement or record commit']);
+        }
+        return succeed('OK', lines);
     }
     /** Deterministic status plus the interactive declaration, adoption, or reconciliation decision. */
     async adopt(context) {
@@ -263,6 +268,11 @@ export class AdoptionWorkflow {
         lines.push(`STATUS OK: ${surveyed.state} — ${this.disposition(surveyed)}`);
         return lines;
     }
+    matchingActive(surveyed) {
+        const claim = surveyed.claim, board = surveyed.scanned && coordinator(surveyed.scanned.config);
+        return claim?.phase === 'active' && claim.coordinator.sessionId === surveyed.identity.sessionId && claim.coordinator.port === surveyed.identity.port
+            && board?.sessionId === claim.coordinator.sessionId && board.port === claim.coordinator.port;
+    }
     disposition(surveyed) {
         if (surveyed.state === 'a')
             return 'bootstrap decision required';
@@ -272,7 +282,11 @@ export class AdoptionWorkflow {
             return 'adoption required';
         if (!surveyed.claim)
             return 'declaration required';
-        return surveyed.claim.phase === 'active' ? 'proceed' : 'reconciliation required';
+        if (surveyed.claim.phase !== 'active')
+            return 'reconciliation required';
+        if (!this.matchingActive(surveyed))
+            return 'stop: claim/board pair mismatch';
+        return this.options.responsibilityLoaded() && this.options.readiness.ready() ? 'proceed' : 'promotion pending; action not ready';
     }
     /** Role, mode, trust, session identity, idle host. Each is a separate named refusal. */
     async authorize(context, requirements) {
@@ -1239,6 +1253,69 @@ export class AdoptionWorkflow {
             failAt('GIT', `git ${args[0]} failed (exit ${result.code}); no assumption replaces verified repository state`);
         }
         return result.stdout;
+    }
+}
+/** Ordinary legacy writers may bypass the claim gate only when neither current bytes nor reachable
+ * claim history exists. A missing worktree file cannot erase prepared/active (or deletion) history. */
+export async function claimEvidenceEstablished(home) {
+    try {
+        await lstat(path.join(home, CLAIM_FILE));
+        return true;
+    }
+    catch (error) {
+        if (error.code !== 'ENOENT')
+            throw error;
+    }
+    const log = await runGit(['log', '--format=%H', '-n', '1', '--', CLAIM_FILE], home);
+    if (log.code === 0)
+        return log.stdout.trim() !== '';
+    // Preserve never-established, non-repository legacy boards. Do not turn inaccessible/broken git
+    // metadata (including worktree .git files) into absence just because git log failed.
+    for (let at = home;; at = path.dirname(at)) {
+        try {
+            await lstat(path.join(at, '.git'));
+            fail('ADOPTION_NOT_READY: claim history cannot be verified');
+        }
+        catch (error) {
+            if (error.code !== 'ENOENT')
+                throw error;
+        }
+        if (path.dirname(at) === at)
+            break;
+    }
+    if (process.env.GIT_DIR || process.env.GIT_WORK_TREE)
+        fail('ADOPTION_NOT_READY: configured claim history cannot be verified');
+    return false;
+}
+/** Final side-effect guards are synchronous. Re-read the newest reachable claim-changing commit,
+ * exact bytes and prepared ancestry on EVERY check, even if cached approved bytes reappear on disk.
+ * No shell, background refresh, cached approval, buffering or mutation is involved. */
+export function committedActiveClaimMatches(home, raw) {
+    const git = (args) => {
+        const result = spawnSync('git', args, { cwd: home, encoding: 'utf8', timeout: 2000, maxBuffer: 262144, windowsHide: true });
+        if (result.error || result.status !== 0)
+            throw Error('claim anchor unavailable');
+        return result.stdout;
+    };
+    try {
+        const record = parseClaim(raw);
+        if (record.phase !== 'active' || record.boardRoot !== home)
+            return false;
+        const commit = git(['log', '--format=%H', '-n', '1', '--', CLAIM_FILE]).trim();
+        if (!COMMIT.test(commit) || git(['show', `${commit}:${CLAIM_FILE}`]) !== raw)
+            return false;
+        if (record.authority.kind === 'adoption') {
+            if (!record.intentCommit)
+                return false;
+            const intent = parseClaim(git(['show', `${record.intentCommit}:${CLAIM_FILE}`]));
+            git(['merge-base', '--is-ancestor', record.intentCommit, commit]);
+            if (intent.phase !== 'prepared' || renderClaim({ ...intent, phase: 'active', intentCommit: record.intentCommit }) !== raw)
+                return false;
+        }
+        return true;
+    }
+    catch {
+        return false;
     }
 }
 const FENCED_STATES = ['requested', 'awaiting_handoff', 'awaiting_settlement', 'ready', 'closing', 'uncertain'];

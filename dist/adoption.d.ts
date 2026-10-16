@@ -133,6 +133,7 @@ export interface AdoptionOptions {
         close(detail?: string): number;
         current(): number;
         open(): void;
+        ready(): boolean;
     };
     listSessions(cwd: string, sessionDir?: string): Promise<{
         id: string;
@@ -179,6 +180,7 @@ export declare class AdoptionWorkflow {
     /** Deterministic status plus the interactive declaration, adoption, or reconciliation decision. */
     adopt(context: CommandContext): Promise<Result>;
     private report;
+    private matchingActive;
     private disposition;
     /** Role, mode, trust, session identity, idle host. Each is a separate named refusal. */
     private authorize;
@@ -255,6 +257,13 @@ export declare class AdoptionWorkflow {
     private readOptional;
     private gitText;
 }
+/** Ordinary legacy writers may bypass the claim gate only when neither current bytes nor reachable
+ * claim history exists. A missing worktree file cannot erase prepared/active (or deletion) history. */
+export declare function claimEvidenceEstablished(home: string): Promise<boolean>;
+/** Final side-effect guards are synchronous. Re-read the newest reachable claim-changing commit,
+ * exact bytes and prepared ancestry on EVERY check, even if cached approved bytes reappear on disk.
+ * No shell, background refresh, cached approval, buffering or mutation is involved. */
+export declare function committedActiveClaimMatches(home: string, raw: string): boolean;
 /**
  * Boot-time AC2 read (no UI, no writes): the committed active record must name this exact board and this
  * exact coordinator pair. Anything else leaves coordinator action readiness closed. An absent, malformed,

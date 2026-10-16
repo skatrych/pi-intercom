@@ -36,7 +36,7 @@ process.on('message', async message => {
       const workflow = new AdoptionWorkflow({ projectsHome: root, rolesDirectory: path.join(root, 'roles'), roleDirectory: path.join(root, 'roles/orchestrator'),
         storeFor: () => store, sessionId: () => id, endpointPort: () => endpoint.port, busy: () => false,
         probe: probeWorker, listSessions: async () => [{ id, path: sessionFile }], promote: async () => { promoted = true; }, responsibilityLoaded: () => promoted,
-        readiness: { close: () => ++epoch, current: () => epoch, open() {} }, phase: async phase => { if (phase === hold) await wait(phase); } });
+        readiness: { close: () => ++epoch, current: () => epoch, ready: () => promoted, open() {} }, phase: async phase => { if (phase === hold) await wait(phase); } });
       const result = await workflow.run(context, 'adopt');
       process.send({ type: 'result', result, swaps, promoted });
     } else if (action === 'initialize') {

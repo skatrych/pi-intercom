@@ -45,7 +45,10 @@ memory or a scaffold. Tooling writes and path-scoped commits it on behalf of the
 Orchestrator. Newest reachable claim commit, exact committed/worktree bytes, current board pair,
 prepared-intent ancestry and local promotion are required; malformed/deleted newer evidence never
 falls back to older approval. Unrelated pending work, staged changes, unsafe paths, commit hooks or
-unverifiable results stop. No hook bypass, rollback, retry, normalization or second record writer.
+unverifiable results stop. Every live final-effect guard revalidates the newest committed anchor,
+not only cached approved bytes; restoring old worktree bytes after a newer malformed/deleted commit
+cannot reopen authority. Missing worktree bytes do not erase committed-history ordinary-writer fences.
+No hook bypass, rollback, retry, normalization or second record writer.
 
 ## Recover by explicit reinvocation, not replay
 
@@ -61,7 +64,10 @@ host/concurrent command contention is `BUSY`. Safety stops exit1; unsupported ho
   committed prepared anchor**; authority is never derived from dirt. Foreign/partial/semantic/staged
   dirt stops without modification. Fix an external commit blocker and reinvoke the same command.
 * Committed active+matching pair: already active; an explicit same-command promotion retry writes
-  neither config nor record. Promotion failure is `PROMOTION_PENDING`, not authority to act.
+  neither config nor record. Promotion failure is `PROMOTION_PENDING`, not authority to act. Read-only
+  status also reports that pending/not-ready state and explicit retry, never `proceed` before readiness.
+* Foreign adopting session, including clean committed prepared evidence: `RECOVERY_REQUIRED`; preserve
+  and report. No supersession wizard, new verb or manual repair writer is supplied.
 
 Requests admitted while closed fail `ADOPTION_NOT_READY` through HTTP400, before accepting/saving/
 clearing reports or changing registration/config/lifecycle data. A saved report whose later
@@ -104,7 +110,10 @@ node tests/fixtures/adoption-runner.mjs <fixed-case-name>
 
 `npm test` explicitly wires the fixture runner, independent claim/bridge/runtime tests, HTTP readiness
 phase/epoch/report-save/reminder barriers, real-default-observer no-board/above-home boot guards,
-one-use preview binding and barrier-controlled separate-process races/crashes.
+one-use preview binding and barrier-controlled separate-process races/crashes. Independent-review
+regressions exercise missing committed prepared/active evidence on ordinary/status/handoff publishers,
+already-running malformed/deleted newest anchors with restored old bytes, final save/notification
+guards, and failed-promotion status followed by explicit write-free retry.
 Missing/unimplemented cases fail, never skip/green. Fixtures are isolated temporary git boards,
 persisted session data and ephemeral loopback listeners; no live board/ports/auth/Pi workers/models.
 The process-crash tests kill only their own disposable children, verify stale locks still stop other
