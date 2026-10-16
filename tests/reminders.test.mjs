@@ -3,17 +3,20 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { CoordinatorReminders, REMINDER_INTERVAL_MS, REMINDER_TEXT } from '../dist/reminders.js';
+import { CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, REMINDER_TEXT } from '../dist/reminders.js';
 import { Intercom } from '../dist/runtime.js';
 import { ConfigStore } from '../dist/config.js';
 
-function fakeClock() {
+function fakeClock(interval = DEFAULT_REMINDER_INTERVAL_MS) {
   let now = 0, next = 0;
-  const pending = new Map(), callbacks = [];
+  const pending = new Map(), callbacks = [], delays = [];
   return {
-    pending, callbacks,
+    pending, callbacks, delays,
     schedule(callback, delay) {
-      assert.equal(delay, 300000);
+      // Every scheduled delay must equal the configured interval exactly: no
+      // early tick and no unit or rounding drift between scheduler and caller.
+      assert.equal(delay, interval, 'scheduled delay');
+      delays.push(delay);
       const id = ++next; pending.set(id, { callback, due: now + delay }); callbacks.push(callback);
       return () => pending.delete(id);
     },
@@ -31,78 +34,94 @@ async function settled(reminders) {
     await settle();
   }
 }
-function helper() {
-  const clock = fakeClock(), delivered = [];
+function helper(interval = DEFAULT_REMINDER_INTERVAL_MS) {
+  const clock = fakeClock(interval), delivered = [];
   let role = true, busy = false;
   const host = { isCoordinator: async () => role, busy: () => busy, deliver: text => delivered.push(text) };
-  const reminders = new CoordinatorReminders(host, clock);
+  const reminders = new CoordinatorReminders(host, clock, interval);
   return { clock, host, reminders, delivered, setRole: value => { role = value; }, setBusy: value => { busy = value; } };
 }
 
-test('five-minute reset, recurring delivery without an automatic cap, stop and rearm', async () => {
-  const h = helper(); assert.equal(REMINDER_INTERVAL_MS, 300000); assert.equal(h.clock.pending.size, 0);
-  h.reminders.arm(); h.clock.advance(299999); await settle(); assert.equal(h.delivered.length, 0);
-  h.reminders.arm(); h.clock.advance(1); await settle(); assert.equal(h.delivered.length, 0);
-  h.clock.advance(299999); await settled(h.reminders); assert.deepEqual(h.delivered, [REMINDER_TEXT]);
-  for (let i = 0; i < 5; i++) { h.clock.advance(300000); await settled(h.reminders); }
-  assert.equal(h.delivered.length, 6); assert.equal(h.clock.pending.size, 1);
-  h.reminders.stop(); h.clock.advance(300000); await settle(); assert.equal(h.delivered.length, 6);
-  h.reminders.arm(); h.clock.advance(300000); await settled(h.reminders); assert.equal(h.delivered.length, 7);
-  h.reminders.dispose(); assert.equal(h.clock.pending.size, 0);
-});
+// Only the delay differs between these intervals: scheduling, fencing, busy skip
+// and lifecycle behavior must hold at the default and at every override.
+const INTERVALS = [
+  ['default', DEFAULT_REMINDER_INTERVAL_MS],
+  ['1 minute override', 60000],
+  ['2 minute override', 120000],
+  ['upper boundary 35791 minutes', 35791 * 60000],
+];
 
-test('busy ticks skip without backlog; failed delivery has no immediate replay', async () => {
-  const h = helper(); h.reminders.arm(); h.setBusy(true);
-  h.clock.advance(300000); await settled(h.reminders); assert.equal(h.delivered.length, 0);
-  h.setBusy(false); await settle(); assert.equal(h.delivered.length, 0);
-  h.clock.advance(300000); await settled(h.reminders); assert.equal(h.delivered.length, 1);
-  let attempts = 0;
-  h.host.deliver = () => { attempts++; throw new Error('uncertain submission'); };
-  h.clock.advance(300000); await settled(h.reminders); await settle(); assert.equal(attempts, 1);
-  h.clock.advance(299999); assert.equal(attempts, 1);
-  h.clock.advance(1); await settled(h.reminders); assert.equal(attempts, 2);
-  h.reminders.dispose();
-});
+for (const [label, interval] of INTERVALS) {
+  test(`reset, recurring delivery without an automatic cap, stop and rearm [${label}]`, async () => {
+    const h = helper(interval); assert.equal(h.clock.pending.size, 0);
+    h.reminders.arm(); h.clock.advance(interval - 1); await settle(); assert.equal(h.delivered.length, 0);
+    assert.deepEqual(h.clock.delays, [interval]);
+    h.reminders.arm(); h.clock.advance(1); await settle(); assert.equal(h.delivered.length, 0);
+    h.clock.advance(interval - 1); await settled(h.reminders); assert.deepEqual(h.delivered, [REMINDER_TEXT]);
+    assert.deepEqual(h.clock.delays, [interval, interval, interval]);
+    for (let i = 0; i < 5; i++) { h.clock.advance(interval); await settled(h.reminders); }
+    assert.equal(h.delivered.length, 6); assert.equal(h.clock.pending.size, 1);
+    h.reminders.stop(); h.clock.advance(interval); await settle(); assert.equal(h.delivered.length, 6);
+    h.reminders.arm(); h.clock.advance(interval); await settled(h.reminders); assert.equal(h.delivered.length, 7);
+    h.reminders.dispose(); assert.equal(h.clock.pending.size, 0);
+  });
 
-test('stale callbacks and pending role reads are fenced by reset, stop, disposal and role loss', async () => {
-  for (const action of ['arm', 'stop', 'dispose']) {
-    const h = helper(); let release;
-    h.host.isCoordinator = () => new Promise(resolve => { release = resolve; });
-    h.reminders.arm(); const stale = h.clock.callbacks.at(-1);
-    h.clock.advance(300000); h.reminders[action](); release(true);
-    await settled(h.reminders); stale(); await settle(); assert.equal(h.delivered.length, 0);
+  test(`busy ticks skip without backlog; failed delivery has no immediate replay [${label}]`, async () => {
+    const h = helper(interval); h.reminders.arm(); h.setBusy(true);
+    h.clock.advance(interval); await settled(h.reminders); assert.equal(h.delivered.length, 0);
+    h.setBusy(false); await settle(); assert.equal(h.delivered.length, 0);
+    h.clock.advance(interval); await settled(h.reminders); assert.equal(h.delivered.length, 1);
+    let attempts = 0;
+    h.host.deliver = () => { attempts++; throw new Error('uncertain submission'); };
+    h.clock.advance(interval); await settled(h.reminders); await settle(); assert.equal(attempts, 1);
+    h.clock.advance(interval - 1); assert.equal(attempts, 1);
+    h.clock.advance(1); await settled(h.reminders); assert.equal(attempts, 2);
     h.reminders.dispose();
-  }
-  const h = helper(); h.reminders.arm(); h.setRole(false);
-  h.clock.advance(300000); await settled(h.reminders);
-  assert.equal(h.delivered.length, 0); assert.equal(h.clock.pending.size, 0);
-});
+  });
 
-test('owning abort signals disarm only their generation and already-aborted signals never arm', async () => {
-  const h = helper(), old = new AbortController(), current = new AbortController();
-  h.reminders.arm(AbortSignal.abort()); assert.equal(h.clock.pending.size, 0);
-  h.reminders.arm(old.signal); h.reminders.arm(current.signal);
-  old.abort(); assert.equal(h.clock.pending.size, 1);
-  current.abort(); assert.equal(h.clock.pending.size, 0);
-  h.clock.advance(300000); await settle(); assert.equal(h.delivered.length, 0);
-  h.reminders.dispose();
-});
+  test(`stale callbacks and pending role reads are fenced by reset, stop, disposal and role loss [${label}]`, async () => {
+    for (const action of ['arm', 'stop', 'dispose']) {
+      const h = helper(interval); let release;
+      h.host.isCoordinator = () => new Promise(resolve => { release = resolve; });
+      h.reminders.arm(); const stale = h.clock.callbacks.at(-1);
+      h.clock.advance(interval); h.reminders[action](); release(true);
+      await settled(h.reminders); stale(); await settle(); assert.equal(h.delivered.length, 0);
+      h.reminders.dispose();
+    }
+    const h = helper(interval); h.reminders.arm(); h.setRole(false);
+    h.clock.advance(interval); await settled(h.reminders);
+    assert.equal(h.delivered.length, 0); assert.equal(h.clock.pending.size, 0);
+  });
 
-test('slow role reads do not overlap or deliver a stale missed interval', async () => {
-  const h = helper(); let release, reads = 0;
-  h.host.isCoordinator = () => { reads++; return new Promise(resolve => { release = resolve; }); };
-  h.reminders.arm(); h.clock.advance(300000); h.clock.advance(300000);
-  assert.equal(reads, 1); release(true); await settled(h.reminders); assert.equal(h.delivered.length, 0);
-  h.reminders.dispose();
-});
+  test(`owning abort signals disarm only their generation and already-aborted signals never arm [${label}]`, async () => {
+    const h = helper(interval), old = new AbortController(), current = new AbortController();
+    h.reminders.arm(AbortSignal.abort()); assert.equal(h.clock.pending.size, 0);
+    h.reminders.arm(old.signal); h.reminders.arm(current.signal);
+    old.abort(); assert.equal(h.clock.pending.size, 1);
+    current.abort(); assert.equal(h.clock.pending.size, 0);
+    h.clock.advance(interval); await settle(); assert.equal(h.delivered.length, 0);
+    h.reminders.dispose();
+  });
 
-async function fixture(t) {
+  test(`slow role reads do not overlap or deliver a stale missed interval [${label}]`, async () => {
+    const h = helper(interval); let release, reads = 0;
+    h.host.isCoordinator = () => { reads++; return new Promise(resolve => { release = resolve; }); };
+    h.reminders.arm(); h.clock.advance(interval); h.clock.advance(interval);
+    assert.equal(reads, 1); release(true); await settled(h.reminders); assert.equal(h.delivered.length, 0);
+    h.reminders.dispose();
+  });
+}
+
+async function fixture(t, interval = DEFAULT_REMINDER_INTERVAL_MS) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-reminders-'));
   await new ConfigStore(root).initialize('c', 12345);
-  const clock = fakeClock(), messages = [], sent = [], endpoints = new Map();
+  const clock = fakeClock(interval), messages = [], sent = [], endpoints = new Map();
   let port = 30000, busy = false;
   const options = {
     reminderClock: clock,
+    // The default path leaves the operator environment unset; an override is
+    // supplied through the narrow runtime seam so no test touches process.env.
+    reminderMinutesEnv: () => (interval === DEFAULT_REMINDER_INTERVAL_MS ? undefined : String(interval / 60000)),
     listen: async (_preferred, accept) => { const p = port++; endpoints.set(p, accept); return { port: p, close: async () => { endpoints.delete(p); } }; },
     send: async (p, message) => { sent.push(message); const accept = endpoints.get(p); if (!accept) throw new Error('offline'); await accept(message); },
     launch: async () => { assert.equal(clock.pending.size, 1, 'arm before launch'); throw new Error('launch outcome uncertain'); },
@@ -115,7 +134,7 @@ async function fixture(t) {
   await c.start(); await w.start();
   await c.tool('configure_worker', { sessionId: 'w', port: w.endpoint.port, projectDirectory: '.', name: 'Worker', description: 'Assigned scope' });
   await c.tool('reload_worker', { to: 'Worker' }); await c.tool('stop_reminders', {});
-  const tick = async () => { clock.advance(300000); await settled(c.reminders); };
+  const tick = async () => { clock.advance(interval); await settled(c.reminders); };
   const reminderCount = () => messages.filter(message => message.id === 'c' && message.text === REMINDER_TEXT).length;
   return { root, c, w, clock, messages, sent, tick, reminderCount, options, setBusy: value => { busy = value; } };
 }
@@ -223,6 +242,31 @@ test('runtime call signal retained after tool return cancels its reminder but no
   old.abort(); assert.equal(f.clock.pending.size, 1);
   next.abort(); assert.equal(f.clock.pending.size, 0);
   await f.tick(); assert.equal(f.reminderCount(), 0);
+});
+
+test('configured interval governs first tick, recurrence, stop/rearm and disposal in the runtime', async t => {
+  const f = await fixture(t, 120000);
+  // The fixture configures, reloads and then stops reminders while wiring itself.
+  const setup = f.clock.delays.length;
+  const scheduled = () => f.clock.delays.slice(setup);
+  assert.deepEqual(scheduled(), [], 'the fixture stop leaves no further scheduled delay');
+  await f.c.tool('send', { to: 'Worker', message: 'first' });
+  assert.deepEqual(scheduled(), [120000], 'first tick uses the configured interval');
+  await f.c.tool('send', { to: 'Worker', message: 'second' });
+  f.setBusy(true);
+  f.clock.advance(119999); await settle(); assert.equal(f.reminderCount(), 0);
+  f.setBusy(false);
+  f.clock.advance(1); await settled(f.c.reminders); assert.equal(f.reminderCount(), 1);
+  f.clock.advance(120000); await settled(f.c.reminders); assert.equal(f.reminderCount(), 2);
+  assert.deepEqual(scheduled(), [120000, 120000, 120000, 120000]);
+  await f.c.tool('stop_reminders', {});
+  f.clock.advance(120000); await settle(); assert.equal(f.reminderCount(), 2); assert.equal(f.clock.pending.size, 0);
+  await f.c.tool('reload_worker', { to: 'Worker' });
+  assert.equal(f.clock.pending.size, 1, 'a qualifying call rearms at the same interval');
+  assert.deepEqual(scheduled().at(-1), 120000);
+  const stale = f.clock.callbacks.at(-1);
+  await f.c.close();
+  stale(); await settle(); assert.equal(f.reminderCount(), 2); assert.equal(f.clock.pending.size, 0);
 });
 
 test('runtime reset, busy skip, lifecycle close/restart and changed role suppress stale reminders', async t => {
