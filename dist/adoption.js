@@ -205,7 +205,6 @@ export class AdoptionWorkflow {
     options;
     git;
     request;
-    consumedDecisions = new WeakSet();
     constructor(options, git = runGit) {
         this.options = options;
         this.git = git;
@@ -513,16 +512,13 @@ export class AdoptionWorkflow {
         return commit && COMMIT.test(commit) ? commit : undefined;
     }
     async verifyActiveAnchor(home, record, commit) {
-        if (record.authority.kind === 'first-coordinator declaration')
+        try {
+            await verifyEvidenceAsync(activeIntentProof(record, renderClaim(record), commit), args => this.git(args, home));
             return undefined;
-        if (!record.intentCommit)
-            return 'active adoption has no committed prepared-intent anchor';
-        const ancestor = await this.git(['merge-base', '--is-ancestor', record.intentCommit, commit], home);
-        const intent = await this.readCommitRecord(home, record.intentCommit);
-        if (ancestor.code !== 0 || !intent || intent.phase !== 'prepared'
-            || renderClaim({ ...intent, phase: 'active', intentCommit: record.intentCommit }) !== renderClaim(record))
+        }
+        catch {
             return 'active bytes are not derived from reachable committed prepared intent';
-        return undefined;
+        }
     }
     /** Snapshot actual ancestor directories, not a descendant tree scan (ADR D3). */
     async pathSnapshot(surveyed) {
@@ -833,11 +829,10 @@ export class AdoptionWorkflow {
     async transaction(context, surveyed, board, authority, renewed) {
         const identity = surveyed.identity, home = surveyed.home, scanned = surveyed.scanned;
         const decision = authority.decision;
-        if (!decision || this.consumedDecisions.has(authority) || decision.boardRoot !== home || decision.configSha256 !== sha256(scanned.raw)
+        if (!decision || decision.boardRoot !== home || decision.configSha256 !== sha256(scanned.raw)
             || decision.previous.sessionId !== board.sessionId || decision.previous.port !== board.port || decision.coordinator.sessionId !== identity.sessionId || decision.coordinator.port !== identity.port
             || (renewed && decision.transitionId !== renewed.transitionId))
-            return halt('CONFIRMATION', 'the one-use human decision is absent, consumed or not bound to this exact transition preview');
-        this.consumedDecisions.add(authority);
+            return halt('CONFIRMATION', 'the human decision is absent or not bound to this exact transition preview');
         const store = this.options.storeFor(home);
         const epoch = this.options.readiness.close();
         const unchanged = leftUnchanged(scanned);
@@ -1255,6 +1250,16 @@ export class AdoptionWorkflow {
         return result.stdout;
     }
 }
+/** Repository-local context reported by Git's `rev-parse --local-env-vars`, plus discovery,
+ * namespace and configuration overrides. Trace/pager/SSH/prompt/unknown variables do not create a
+ * repository context. Keep this explicit: a broad GIT_* rule would break ordinary non-repo users. */
+const GIT_CONTEXT_ENV = new Set([
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE', 'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX', 'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+    'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM',
+]);
 /** Ordinary legacy writers may bypass the claim gate only when neither current bytes nor reachable
  * claim history exists. A missing worktree file cannot erase prepared/active (or deletion) history. */
 export async function claimEvidenceEstablished(home) {
@@ -1266,51 +1271,82 @@ export async function claimEvidenceEstablished(home) {
         if (error.code !== 'ENOENT')
             throw error;
     }
-    const log = await runGit(['log', '--format=%H', '-n', '1', '--', CLAIM_FILE], home);
-    if (log.code === 0)
-        return log.stdout.trim() !== '';
-    // Preserve never-established, non-repository legacy boards. Do not turn inaccessible/broken git
-    // metadata (including worktree .git files) into absence just because git log failed.
-    for (let at = home;; at = path.dirname(at)) {
-        try {
-            await lstat(path.join(at, '.git'));
-            fail('ADOPTION_NOT_READY: claim history cannot be verified');
-        }
-        catch (error) {
-            if (error.code !== 'ENOENT')
-                throw error;
+    // Git discovers ancestor .git directories/files AND bare repositories. Missing/damaged individual
+    // bare markers are uncertainty too. Configured Git context (including config injection, alternate
+    // object/common directories and discovery overrides) also requires the actual query. No cached
+    // 'never adopted' bit: every absence is rediscovered, and deletion history is never bypassed.
+    let repositoryPossible = Object.keys(process.env).some(key => {
+        const name = process.platform === 'win32' ? key.toUpperCase() : key;
+        return GIT_CONTEXT_ENV.has(name) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name);
+    });
+    for (let at = home; !repositoryPossible; at = path.dirname(at)) {
+        for (const marker of ['.git', 'HEAD', 'objects', 'refs', 'packed-refs', 'commondir']) {
+            try {
+                lstatSync(path.join(at, marker));
+                repositoryPossible = true;
+                break;
+            }
+            catch (error) {
+                if (error.code !== 'ENOENT') {
+                    repositoryPossible = true;
+                    break;
+                }
+            }
         }
         if (path.dirname(at) === at)
             break;
     }
-    if (process.env.GIT_DIR || process.env.GIT_WORK_TREE)
-        fail('ADOPTION_NOT_READY: configured claim history cannot be verified');
-    return false;
+    if (!repositoryPossible)
+        return false;
+    const log = await runGit(latestClaimArgs(), home);
+    if (log.code !== 0)
+        fail('ADOPTION_NOT_READY: claim history cannot be verified');
+    return log.stdout.trim() !== '';
 }
-/** Final side-effect guards are synchronous. Re-read the newest reachable claim-changing commit,
- * exact bytes and prepared ancestry on EVERY check, even if cached approved bytes reappear on disk.
- * No shell, background refresh, cached approval, buffering or mutation is involved. */
+const latestClaimArgs = () => ['log', '--format=%H', '-n', '1', '--', CLAIM_FILE];
+function evidenceText(result) {
+    if (result.code !== 0)
+        throw Error('claim evidence unavailable');
+    return result.stdout;
+}
+function* activeIntentProof(record, raw, commit) {
+    if (record.phase !== 'active')
+        throw Error('claim is not active');
+    if (record.authority.kind === 'first-coordinator declaration')
+        return;
+    if (!record.intentCommit)
+        throw Error('active adoption lacks prepared intent');
+    const intent = parseClaim(evidenceText(yield ['show', `${record.intentCommit}:${CLAIM_FILE}`]));
+    evidenceText(yield ['merge-base', '--is-ancestor', record.intentCommit, commit]);
+    if (intent.phase !== 'prepared' || renderClaim({ ...intent, phase: 'active', intentCommit: record.intentCommit }) !== raw)
+        throw Error('active bytes do not derive from prepared intent');
+}
+function* activeEvidenceProof(home, raw) {
+    const record = parseClaim(raw);
+    if (record.boardRoot !== home || record.phase !== 'active')
+        throw Error('claim board/phase mismatch');
+    const commit = evidenceText(yield latestClaimArgs()).trim();
+    if (!COMMIT.test(commit) || evidenceText(yield ['show', `${commit}:${CLAIM_FILE}`]) !== raw)
+        throw Error('claim differs from latest committed evidence');
+    yield* activeIntentProof(record, raw, commit);
+    return { record, commit };
+}
+async function verifyEvidenceAsync(proof, git) {
+    let step = proof.next();
+    while (!step.done)
+        step = proof.next(await git(step.value));
+    return step.value;
+}
+/** Synchronous final-effect adapter; the whole proof is fresh on every invocation. */
 export function committedActiveClaimMatches(home, raw) {
-    const git = (args) => {
-        const result = spawnSync('git', args, { cwd: home, encoding: 'utf8', timeout: 2000, maxBuffer: 262144, windowsHide: true });
-        if (result.error || result.status !== 0)
-            throw Error('claim anchor unavailable');
-        return result.stdout;
-    };
     try {
-        const record = parseClaim(raw);
-        if (record.phase !== 'active' || record.boardRoot !== home)
-            return false;
-        const commit = git(['log', '--format=%H', '-n', '1', '--', CLAIM_FILE]).trim();
-        if (!COMMIT.test(commit) || git(['show', `${commit}:${CLAIM_FILE}`]) !== raw)
-            return false;
-        if (record.authority.kind === 'adoption') {
-            if (!record.intentCommit)
+        const proof = activeEvidenceProof(home, raw);
+        let step = proof.next();
+        while (!step.done) {
+            const result = spawnSync('git', step.value, { cwd: home, encoding: 'utf8', timeout: 2000, maxBuffer: 262144, windowsHide: true });
+            if (result.error)
                 return false;
-            const intent = parseClaim(git(['show', `${record.intentCommit}:${CLAIM_FILE}`]));
-            git(['merge-base', '--is-ancestor', record.intentCommit, commit]);
-            if (intent.phase !== 'prepared' || renderClaim({ ...intent, phase: 'active', intentCommit: record.intentCommit }) !== raw)
-                return false;
+            step = proof.next({ code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr });
         }
         return true;
     }
@@ -1348,43 +1384,15 @@ export async function bootClaimEvidence(input) {
             return { ready: false, detail: `${CLAIM_FILE} is absent: a first-coordinator declaration must be committed before any coordinator action` };
         return { ready: false, detail: `${CLAIM_FILE} is unreadable: ${reason(error)}` };
     }
-    let record;
     try {
-        record = parseClaim(raw);
+        const { record, commit } = await verifyEvidenceAsync(activeEvidenceProof(input.home, raw), args => git(args, input.home));
+        if (record.coordinator.sessionId !== input.identity.sessionId || record.coordinator.port !== input.identity.port)
+            return { ready: false, detail: `${CLAIM_FILE} coordinator pair differs from this session` };
+        return { ready: true, detail: `${CLAIM_FILE} active evidence matches this board and session (commit ${commit})` };
     }
     catch (error) {
-        return { ready: false, detail: `${CLAIM_FILE} is malformed: ${reason(error)}` };
+        return { ready: false, detail: `${CLAIM_FILE} is not verified committed active evidence: ${reason(error)}` };
     }
-    const log = await git(['log', '--format=%H', '-n', '1', '--', CLAIM_FILE], input.home);
-    const commit = log.code === 0 ? log.stdout.trim() : undefined;
-    if (!commit || !COMMIT.test(commit))
-        return { ready: false, detail: `${CLAIM_FILE} has no committed evidence` };
-    const committed = await git(['show', `${commit}:${CLAIM_FILE}`], input.home);
-    if (committed.code !== 0 || committed.stdout !== raw)
-        return { ready: false, detail: `${CLAIM_FILE} bytes differ from latest committed evidence; dirty evidence is not approval` };
-    if (record.authority.kind === 'adoption') {
-        if (!record.intentCommit)
-            return { ready: false, detail: 'active adoption lacks its prepared-intent commit' };
-        const intentBytes = await git(['show', `${record.intentCommit}:${CLAIM_FILE}`], input.home);
-        const ancestor = await git(['merge-base', '--is-ancestor', record.intentCommit, commit], input.home);
-        try {
-            const intent = parseClaim(intentBytes.stdout);
-            if (intentBytes.code !== 0 || ancestor.code !== 0 || intent.phase !== 'prepared'
-                || renderClaim({ ...intent, phase: 'active', intentCommit: record.intentCommit }) !== raw)
-                throw new Error('bad intent');
-        }
-        catch {
-            return { ready: false, detail: 'active evidence does not derive from reachable committed prepared intent' };
-        }
-    }
-    if (record.boardRoot !== input.home)
-        return { ready: false, detail: `${CLAIM_FILE} names board root ${record.boardRoot}, not ${input.home}` };
-    if (record.phase !== 'active')
-        return { ready: false, detail: `${CLAIM_FILE} is ${record.phase}, not active: reconciliation is required before coordinator action` };
-    if (record.coordinator.sessionId !== input.identity.sessionId || record.coordinator.port !== input.identity.port) {
-        return { ready: false, detail: `${CLAIM_FILE} names session ${record.coordinator.sessionId} port ${record.coordinator.port}, not this session ${input.identity.sessionId} port ${input.identity.port}` };
-    }
-    return { ready: true, detail: `${CLAIM_FILE} active evidence matches this board and session (commit ${commit})` };
 }
 function declaration(surveyed, authority, options) {
     const hash = sha256(surveyed.scanned.raw);

@@ -9,7 +9,7 @@ export const EVENT_TYPES = ['runtime.starting', 'runtime.ready', 'runtime.closed
 const OUTCOMES = ['attempted', 'returned', 'failed', 'http_receipt', 'handler_failed', 'started', 'settled', 'snapshot', 'ended', 'written', 'removed', 'ready', 'blocked', 'suppressed'];
 const ERROR_CODES = ['operation_failed', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EADDRINUSE', 'EACCES', 'EPERM', 'ENOENT', 'ENOSPC'];
 const KINDS = ['message', 'report', 'registration', 'status', 'request_status', 'reload', 'stop', 'close', 'close_prepare', 'close_identity', 'close_request', 'handoff_report', 'close_ready', 'close_commit'];
-const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize', 'adoption', 'declaration', 'promotion', 'reconciliation'];
+const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize'];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function safeText(value, max) {
     return typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
@@ -45,8 +45,6 @@ export function sanitizeObservation(value) {
         result.role = v.role;
     if (safeText(v.piRole, 64) && logicalRole(v.piRole))
         result.piRole = v.piRole;
-    if (safeText(v.transitionId, 64) && /^[0-9a-f-]+$/.test(v.transitionId))
-        result.transitionId = v.transitionId;
     if (includes(OUTCOMES, v.outcome))
         result.outcome = v.outcome;
     if (includes(ERROR_CODES, v.errorCode))

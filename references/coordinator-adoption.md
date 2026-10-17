@@ -7,13 +7,25 @@ explains the operation. This globally loaded fork backend registers no adoption 
 CLI, shell helper or slash command. There is no manual claim/config editing or terminal fallback.
 
 The binding design is Swactory ADR0005, plan and templates at
-[593e11940e47046179be890e055a3e3387ed931d](https://github.com/skatrych/swactory/tree/593e11940e47046179be890e055a3e3387ed931d/docs/adr).
+[2b2d937089d830459ac68f10d970abb7f89a5ed4](https://github.com/skatrych/swactory/tree/2b2d937089d830459ac68f10d970abb7f89a5ed4/docs/adr),
+including the independently approved D9, ConfigStore/runtime, private handoff-guard and legacy-absence decisions.
 The frontend discovers exactly one protocol1 offer on `swactory:coordinator-adoption:v1` through
 Pi's supported synchronous event bus. The closure independently checks captured launch role,
 current runtime/SessionManager/cwd, TUI, trust, idle state, persisted identity and its bound health
 endpoint. Caller UI/identity/confirmation arguments grant no authority. A copied frontend, role
 basename, worker metadata or instruction text cannot authorize a Developer/plain-Pi runtime.
 Application role gating is not an OS sandbox against malicious same-user code.
+
+## Availability and prerequisites
+
+The command frontend and explanatory skill are provided by the
+[Swactory Orchestrator role integration](https://github.com/skatrych/swactory/tree/2b2d937089d830459ac68f10d970abb7f89a5ed4/pi-agent-config/roles/orchestrator).
+They are separate from this backend package; no global command appears from installing this package
+alone. The integration must load both the backend and exactly one compatible role-local frontend.
+Human installation/rollout is separate from adoption. Start a fresh persisted Orchestrator session in
+interactive, trusted, idle Pi, under the shared projects-home Git root. The index/worktree must be
+clean (except the narrowly recognized workflow-generated active-record recovery). Upgrade all
+config-publishing processes first; confirm the old session ended, not merely that its port is down.
 
 ## Deliberate decision and evidence
 
@@ -97,6 +109,67 @@ local-filesystem contract, not a distributed lock or a fence for legacy/maliciou
 rollout must upgrade **all config-publishing processes** and establish the old coordinator ended.
 Legacy workers do not publish config locally; no worker reload is needed for delivery. Installation
 reload is separate from adoption. Agents do not merge, release, install or perform live adoption.
+
+## Current evidence and effect boundaries
+
+The committed-evidence proof has one local implementation with synchronous final-effect and
+asynchronous boot/locked-writer adapters. Each proof reads the newest reachable claim-changing commit,
+its exact bytes, and the prepared object plus ancestry. No result survives an invocation: there is no
+cross-await/epoch cache, TTL, history monitor, persistent Git process or opening-commit equality rule.
+A newest committed exact restoration can pass a fresh complete proof; restoring only worktree bytes
+under malformed/deleted/unavailable newer evidence cannot. Failed proof closes readiness until explicit
+verified reconciliation; reopening cannot revive a previously admitted operation's old epoch.
+
+Owned boundaries (asserted beside the regression tests):
+
+* Coordinator request admission and read-only returns after snapshot/probe awaits (`worker_status`).
+  List's admission is its final proof: no await or reentrant callback intervenes.
+* Config admission inside the shared lock and final rename, including platform retries. Preparation
+  checks lifecycle/epoch cheaply; final publication independently verifies current claim/pair/evidence.
+* Report admission, final rename, and later notification are three separate full proofs. Directory/temp
+  preparation checks lifecycle/epoch; unpublished staging is not accepted evidence and is cleaned on
+  refusal. Already-saved bytes survive a later notification block, with the stored/not-notified error.
+* Registration/resume caches, host delivery (including reminders), transport dispatch and runtime
+  launch dispatch retain fresh proofs. The launch check follows observation callbacks and carries the
+  original operation's epoch through runtime-side directory/probe/state awaits.
+
+The existing synchronous config guard uses internal `authority` and `authority-refused` phases.
+At locked admission and each final publication, runtime checks its original lifecycle/epoch, exact
+ready bytes, safe paths, initialId/bound endpoint and loaded responsibility without duplicating Git;
+the store independently supplies the complete evidence proof, even without a runtime callback.
+Current-config read/parse/schema/permission and authority-path failures (including acquisition),
+history/evidence discovery and final pair/proof refusals signal synchronously before cleanup/release
+awaits. Notification cannot suppress or mask the originating refusal. Only the still-current
+authority-enabled epoch closes; direct/non-Orchestrator callers retain their originating errors and
+store fence. Lifecycle/deadline, lock contention/token/I/O, mutator/postvalidation and temporary,
+rename or cleanup failures are not classified as tenure corruption.
+
+Handoff's three store update guards and two synchronous target lookup sites check only disposed/ended,
+exact pending-map ownership, deadline and the existing target/job/port/directory predicates. The
+unchanged runtime/store update boundary owns authority there. All other handoff full guards remain
+full, including nested calls, provider returns and beforeSubmit; there is no ambient preparation mode.
+An in-memory job change already admitted before later staging failure is not retroactively undone.
+
+Launch dispatch admits the existing composite adapter operation. Its internal session lookup, role
+preflight, tab creation and pane submission may complete after later invalidation. This is not
+per-subeffect cancellation; subsequent dispatch is refused, returned pane/tab/partial/unknown evidence
+is preserved, and no cleanup/retry is added. Production launcher/transport APIs are unchanged.
+
+Ordinary config reads use baseline `JSON.parse` and full validation. Duplicate-key/span checks remain
+in strict adoption reads. Absent ordinary claims avoid Git only after an uncached ancestor/context
+scan excludes `.git` (directory or worktree file), bare/damaged repository markers and configured Git
+context; uncertainty still queries/fails closed. Windows comparisons normalize relevant environment
+names only; POSIX remains case-sensitive and values are unchanged. Committed deletion history still
+fences updates.
+
+Verified legacy absence is local to one acquired ordinary update through its continuously held lock
+and retries. Supported claim writers need that same lock. Every subsequent update rediscovers it,
+including separate updates under a reentrant outer transaction: no store/runtime 'never adopted' cache.
+External claim creation/commit/deletion or repository/context installation bypassing the mutex during
+that one legacy write is not guaranteed immediate detection; the next update must discover it. There
+is no bounded background detection if another update never occurs. A presence/config-byte check alone
+cannot detect a transient add/delete cycle; full history rediscovery could, but that stronger guarantee
+and synchronous legacy cost are not assigned. Established/adopted final proofs remain fully fresh.
 
 ## Executable proof
 

@@ -94,7 +94,13 @@ export declare class Intercom {
     private adoption?;
     /** Closed when an adoption or declaration transaction invalidated an earlier callback epoch. */
     private actionEpoch;
+    /** Cheap preparation check, never external-evidence approval. An old epoch cannot revive. */
+    private assertActionEpoch;
+    /** Fresh runtime-local portion of authority; ConfigStore supplies Git in the same locked span. */
+    private assertActionAuthority;
     private assertActionReady;
+    /** Existing synchronous store guard only: no proof delegation or asynchronous failure catch. */
+    private configGuard;
     /** Close the local action epoch. Callers hold the returned value and fail once it changes. */
     private closeActionEpoch;
     private openActionEpoch;
