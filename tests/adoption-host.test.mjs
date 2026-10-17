@@ -24,8 +24,11 @@ test('packed source loads against public Pi 1.2.0; actual SessionManager/custom-
   const packed = JSON.parse(npm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, encoding: 'utf8', env: { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false' } }));
   execFileSync('tar', ['-xzf', path.join(temp, packed[0].filename), '-C', temp]);
   const packageRoot = path.join(temp, 'package');
-  assert.ok(packed[0].files.some(file => file.path === 'src/adoption.ts'));
-  assert.ok(packed[0].files.some(file => file.path === 'dist/adoption.js'));
+  // The same public-host fixture can be copied into an immutable baseline archive. Absence of a
+  // not-yet-existing feature is then expected, not falsely attributed as a baseline host failure.
+  const adoptionExpected = process.env.PI_ADOPTION_TEST_BASELINE !== '1';
+  assert.equal(packed[0].files.some(file => file.path === 'src/adoption.ts'), adoptionExpected);
+  assert.equal(packed[0].files.some(file => file.path === 'dist/adoption.js'), adoptionExpected);
   assert.ok(!packed[0].files.some(file => file.path.startsWith('tests/')));
   const bus = host.createEventBus(), payload = { offers: [] };
   const off = bus.on('fixture:discovery', value => value.offers.push({ protocol: 1 }));

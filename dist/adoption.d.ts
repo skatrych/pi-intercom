@@ -171,7 +171,6 @@ export declare class AdoptionWorkflow {
     private readonly options;
     private readonly git;
     private request?;
-    private readonly consumedDecisions;
     constructor(options: AdoptionOptions, git?: (args: string[], cwd: string) => Promise<GitResult>);
     /** One request in flight. A second concurrent request never interleaves with a transaction. */
     run(context: CommandContext, verb: string, args?: string[]): Promise<Result>;
@@ -260,9 +259,7 @@ export declare class AdoptionWorkflow {
 /** Ordinary legacy writers may bypass the claim gate only when neither current bytes nor reachable
  * claim history exists. A missing worktree file cannot erase prepared/active (or deletion) history. */
 export declare function claimEvidenceEstablished(home: string): Promise<boolean>;
-/** Final side-effect guards are synchronous. Re-read the newest reachable claim-changing commit,
- * exact bytes and prepared ancestry on EVERY check, even if cached approved bytes reappear on disk.
- * No shell, background refresh, cached approval, buffering or mutation is involved. */
+/** Synchronous final-effect adapter; the whole proof is fresh on every invocation. */
 export declare function committedActiveClaimMatches(home: string, raw: string): boolean;
 /**
  * Boot-time AC2 read (no UI, no writes): the committed active record must name this exact board and this

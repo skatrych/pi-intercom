@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { lstat, mkdir } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { lstat, mkdir, readdir } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { Intercom } from '../dist/runtime.js';
 import { ConfigStore } from '../dist/config.js';
 import { fixture } from './fixtures/adoption-support.mjs';
@@ -56,7 +58,10 @@ for (const damage of ['absent', 'dirty-active', 'newest-malformed', 'prepared'])
   if (damage !== 'absent') {
     const record = await f.declaration({ sessionId: pair.sessionId, port: pair.port });
     await f.claim.writeAndCommit(record);
-    if (damage === 'dirty-active') await f.claim.write(renderClaim({ ...record, date: '2026-10-17' }));
+    if (damage === 'dirty-active') {
+      const changed = renderClaim({ ...record, date: record.date === '2026-10-17' ? '2027-01-01' : '2026-10-17' });
+      assert.notEqual(changed, renderClaim(record)); await f.claim.write(changed);
+    }
     if (damage === 'newest-malformed') { await f.claim.write('invalid latest claim\n'); await f.claim.commit(); await f.claim.write(renderClaim(record)); }
     if (damage === 'prepared') await f.claim.write('invalid interrupted record bytes\n');
   }
@@ -69,36 +74,50 @@ for (const damage of ['absent', 'dirty-active', 'newest-malformed', 'prepared'])
   await assert.rejects(runtime.tool('list', {}), /ADOPTION_NOT_READY/);
 });
 
-test('a claim changed after promotion closes tools and incoming callbacks, not silently approval', async t => {
+for (const instant of ['2026-10-17T00:00:00.000Z', '2026-12-31T23:59:59.999Z', '2027-01-01T00:00:00.000Z']) test(`generated date equality is not corruption; genuinely different date fences: ${instant}`, async t => {
   const f = await fixture({ runtime: true }); t.after(f.dispose);
-  const runtime = await f.startRuntime(); assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
+  const runtime = await f.startRuntime();
+  await runtime.adoptCoordinator(f.context, 'status');
+  runtime.adoption.options.now = () => new Date(instant); // fixture clock, not wall-calendar corruption
+  assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
   const record = JSON.parse((await f.claim.read()).split('```json\n')[1].split('\n```')[0]);
-  await f.claim.write(renderClaim({ ...record, date: '2026-10-17' }));
+  assert.equal(record.date, instant.slice(0, 10));
+  const equal = renderClaim({ ...record, date: instant.slice(0, 10) });
+  assert.equal(equal, await f.claim.read()); await f.claim.write(equal);
+  await runtime.tool('list', {});
+  const changed = renderClaim({ ...record, date: record.date === '2026-10-17' ? '2027-01-01' : '2026-10-17' });
+  assert.notEqual(changed, equal); await f.claim.write(changed);
   await assert.rejects(runtime.tool('list', {}), /ADOPTION_NOT_READY/);
   const before = await f.board.read();
   await assert.rejects(runtime.receive({ version: 1, kind: 'status', from: IDS.workerOne, to: IDS.fresh, payload: { port: 12345, busy: false } }), /ADOPTION_NOT_READY/);
   assert.equal(await f.board.read(), before);
 });
 
-test('report save checks actual runtime epoch immediately before report rename (HTTP 400, no save)', async t => {
+for (const interruption of ['epoch', 'external-evidence']) test(`report save final rename checks ${interruption} (HTTP 400, no save)`, async t => {
   const f = await fixture({ runtime: true }); t.after(f.dispose);
-  let ready = false, calls = 0, runtime;
-  const adoption = { ...f.workflowOptions, reportPhase: async phase => {
-    if (ready && phase === 'before-save') {
-      const original = runtime.assertActionReady.bind(runtime);
-      runtime.assertActionReady = epoch => {
-        if (++calls === 7) runtime.closeActionEpoch('fixture final report-publication barrier');
-        original(epoch);
-      };
+  let ready = false, crossed = false;
+  const runtime = await f.startRuntime();
+  const original = fs.lstat;
+  t.after(() => { fs.lstat = original; syncBuiltinESMExports(); });
+  fs.lstat = async (...args) => {
+    const info = await original(...args);
+    const file = String(args[0]);
+    if (ready && file.endsWith('.json') && path.dirname(file) === path.join(f.home, '.pi-intercom/reports')
+      && (await readdir(path.dirname(file))).some(name => name.endsWith('.tmp'))) {
+      crossed = true;
+      if (interruption === 'epoch') runtime.closeActionEpoch('fixture staged report / final target inspection before rename');
+      else await f.claim.write('malformed external evidence at final target inspection\n');
     }
-  } };
-  runtime = await f.startRuntime({ adoption });
+    return info;
+  };
+  syncBuiltinESMExports();
   assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
   const stored = { version: 1, sessionId: IDS.workerOne, status: 'blocked', summary: 'prior stored evidence', updatedAt: '2026-10-16T00:00:00.000Z' };
   await saveWorkerReport(f.home, stored); ready = true;
   const response = await fetch(`http://127.0.0.1:${runtime.endpoint.port}/intercom`, { method: 'POST', body: JSON.stringify({ version: 1, from: IDS.workerOne, to: IDS.fresh, kind: 'report', payload: { status: 'clear', summary: '' } }) });
   assert.equal(response.status, 400); assert.match(await response.text(), /ADOPTION_NOT_READY.*no report stored or cleared/);
-  assert.equal(calls, 7, 'readiness crossed exactly at final publication guard');
+  assert.equal(crossed, true, 'readiness crossed after staging at the real final-publication boundary');
+  assert.equal((await readdir(path.join(f.home, '.pi-intercom/reports'))).some(name => name.endsWith('.tmp')), false, 'unpublished staging cleaned');
   assert.deepEqual(await readWorkerReports(f.home, [IDS.workerOne]), [stored]);
   assert.equal(f.messages.length, 0);
 });

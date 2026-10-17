@@ -59,7 +59,7 @@ async function regularOrAbsent(file: string): Promise<void> {
 export class ReportPublicationRefused extends Error {}
 
 /** Persist only the explicitly authored public report; clear is an atomic tombstone. */
-export async function saveWorkerReport(root: string, report: WorkerReport, assertCurrent?: () => void): Promise<void> {
+export async function saveWorkerReport(root: string, report: WorkerReport, assertCurrent?: (phase?: 'publish') => void): Promise<void> {
   let temporary: string | undefined;
   let ownsTemporary = false;
   let dir: string | undefined;
@@ -80,7 +80,8 @@ export async function saveWorkerReport(root: string, report: WorkerReport, asser
     finally { await handle.close(); }
     if (await directory(root, false) !== dir) throw new Error('directory changed');
     await regularOrAbsent(target);
-    assertCurrent?.();
+    // Temp preparation is not accepted report evidence. Only this callback authorizes publication.
+    assertCurrent?.('publish');
     await rename(temporary, target);
     temporary = undefined;
   } catch (error) {

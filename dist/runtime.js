@@ -94,12 +94,16 @@ export class Intercom {
     adoption;
     /** Closed when an adoption or declaration transaction invalidated an earlier callback epoch. */
     actionEpoch() { return this.authorityEpoch; }
-    assertActionReady(epoch) {
-        // Checked first and unconditionally: a caller that captured an epoch is asserting that its own
-        // readiness window still stands. Readiness becoming true later does not validate an older window, so
-        // a stale epoch is refused even after the epoch has been reopened.
+    /** Cheap preparation check, never external-evidence approval. An old epoch cannot revive. */
+    assertActionEpoch(epoch) {
         if (epoch !== undefined && epoch !== this.authorityEpoch)
             fail(`${ADOPTION_NOT_READY}: the action-readiness epoch changed; this callback stops without further effects`);
+        if (this.authorityEnabled && !this.authorityReady)
+            fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}; coordinator action readiness is closed`);
+    }
+    /** Fresh runtime-local portion of authority; ConfigStore supplies Git in the same locked span. */
+    assertActionAuthority(epoch) {
+        this.assertActionEpoch(epoch);
         if (!this.authorityEnabled)
             return;
         if (this.authorityReady) {
@@ -110,13 +114,35 @@ export class Intercom {
                 const raw = readFileSync(path.join(this.store.root, 'coordinator-claim.md'), 'utf8');
                 const config = validateConfig(JSON.parse(readFileSync(this.store.file, 'utf8')));
                 const board = coordinator(config);
-                if (raw === this.readyClaimBytes && committedActiveClaimMatches(this.store.root, raw) && board.sessionId === this.initialId && board.port === this.endpoint?.port && this.responsibility?.coordinator)
-                    return;
+                if (raw === this.readyClaimBytes && board.sessionId === this.initialId && board.port === this.endpoint?.port && this.responsibility?.coordinator)
+                    return raw;
             }
             catch { /* Changed or unavailable evidence closes authority, never approves it. */ }
             this.closeActionEpoch('committed claim/board pair or local responsibility changed; explicitly reconcile before acting');
         }
         fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}; no successful receipt, report persistence, registration change, reminder, or model turn is claimed for it`);
+    }
+    assertActionReady(epoch) {
+        const raw = this.assertActionAuthority(epoch);
+        if (raw !== undefined && !committedActiveClaimMatches(this.store.root, raw)) {
+            this.closeActionEpoch('committed evidence changed or became unavailable; explicitly reconcile before acting');
+            fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}`);
+        }
+    }
+    /** Existing synchronous store guard only: no proof delegation or asynchronous failure catch. */
+    configGuard(lifecycle, epoch = this.actionEpoch(), caller) {
+        return phase => {
+            lifecycle();
+            this.assertActionEpoch(epoch);
+            if (phase === 'authority-refused') {
+                if (this.authorityEnabled)
+                    this.closeActionEpoch('ordinary config authority admission/publication refused; explicitly reconcile before acting');
+                return;
+            }
+            caller?.();
+            if (phase === 'authority')
+                this.assertActionAuthority(epoch);
+        };
     }
     /** Close the local action epoch. Callers hold the returned value and fail once it changes. */
     closeActionEpoch(detail = 'a coordinator transaction is in progress') {
@@ -164,8 +190,14 @@ export class Intercom {
         const id = this.host.sessionId();
         if (!this.active || id !== this.initialId)
             fail('session is inactive or replaced');
-        if (this.configuredRoot !== undefined && (this.store.root !== this.configuredRoot || this.store.file !== this.configuredFile))
+        if (this.configuredRoot !== undefined && (this.store.root !== this.configuredRoot || this.store.file !== this.configuredFile)) {
+            // Upstream's boundary pin refuses the operation. It is checked here, before any store guard runs,
+            // so also drop this fork's coordinator action authority: a store whose validated root changed can
+            // neither write safely now nor be trusted by a later coordinator action.
+            if (this.authorityReady)
+                this.closeActionEpoch('config store boundary changed; explicitly reconcile before acting');
             fail('config store boundary changed');
+        }
         return id;
     }
     validity() {
@@ -304,7 +336,7 @@ export class Intercom {
                         this.observer?.maintain?.();
                     }
                     catch { /* No cleanup failure affects readiness. */ }
-                    await this.store.update(this.id(), c => { requireCoordinator(c, this.id()).port = this.endpoint.port; }, assertValid);
+                    await this.store.update(this.id(), c => { requireCoordinator(c, this.id()).port = this.endpoint.port; }, this.configGuard(assertValid));
                     assertValid();
                     record('config.changed', { operation: 'port_update', outcome: 'written', port: this.endpoint.port });
                     this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
@@ -350,7 +382,8 @@ export class Intercom {
     }
     startServices(assertValid) {
         this.reminders = new CoordinatorReminders({
-            captureGuard: () => { const epoch = this.actionEpoch(); return () => { assertValid(); this.assertActionReady(epoch); }; },
+            // Timer preparation checks only its captured epoch; deliver below owns the fresh final proof.
+            captureGuard: () => { const epoch = this.actionEpoch(); return () => { assertValid(); this.assertActionEpoch(epoch); }; },
             isCoordinator: async () => { const fresh = await this.state(); assertValid(); return fresh.me?.coordinator === true; },
             busy: () => this.host.busy(),
             deliver: message => { assertValid(); this.assertActionReady(); this.host.deliver(message, false); },
@@ -361,7 +394,7 @@ export class Intercom {
             assertCurrent: () => { assertValid(); this.assertActionReady(this.callbackEpoch.getStore()); },
             update: async (mutate, guard) => {
                 const epoch = this.callbackEpoch.getStore() ?? this.actionEpoch();
-                await this.store.update(this.initialId, mutate, () => { assertValid(); this.assertActionReady(epoch); guard?.(); });
+                await this.store.update(this.initialId, mutate, this.configGuard(assertValid, epoch, guard));
             },
             send: async (sessionId, kind, payload) => {
                 const epoch = this.callbackEpoch.getStore() ?? this.actionEpoch();
@@ -557,13 +590,13 @@ export class Intercom {
     }
     /** Accept old configs, but retire the removed browser dashboard's discovery metadata. */
     async retireDashboardMetadata() {
-        const record = this.captureObserver(), assertValid = this.validity();
+        const record = this.captureObserver(), assertValid = this.validity(), epoch = this.actionEpoch();
         const { id, config } = await this.state();
         assertValid();
-        this.assertActionReady();
+        this.assertActionReady(epoch);
         if (requireCoordinator(config, id).dashboardPort === undefined)
             return;
-        await this.store.update(id, c => { delete requireCoordinator(c, id).dashboardPort; }, assertValid);
+        await this.store.update(id, c => { delete requireCoordinator(c, id).dashboardPort; }, this.configGuard(assertValid, epoch));
         record('config.changed', { outcome: 'written' });
     }
     async reload() {
@@ -588,13 +621,16 @@ export class Intercom {
         assertValid();
         guard();
         if (me?.coordinator)
-            this.assertActionReady(epoch);
+            this.assertActionEpoch(epoch);
         const target = named(config, to), correlationId = randomUUID();
         if (['message', 'reload'].includes(kind) && (this.handoff?.isClosing(target.sessionId) || fencedClose(target.closeJob)))
             fail('worker close is active or uncertain; new Intercom work is fenced');
         const metadata = { peerSessionId: target.sessionId, peerName: target.name, correlationId, kind };
         record('transport.send', { ...metadata, outcome: 'attempted' });
         try {
+            assertValid();
+            if (me?.coordinator)
+                this.assertActionReady(epoch);
             await (this.options.send ?? send)(target.port, { version: 1, from: id, to: target.sessionId, kind, payload, correlationId });
             record('transport.receipt', { ...metadata, outcome: 'http_receipt' });
         }
@@ -649,6 +685,7 @@ export class Intercom {
         // D3: an incoming callback binds the epoch it was admitted in. A callback that crosses a closed
         // readiness epoch stops at its next side effect, with no buffered or replayed delivery later.
         const epoch = this.actionEpoch();
+        const assertCurrent = () => { assertValid(); this.assertActionEpoch(epoch); };
         const assertReady = () => { assertValid(); this.assertActionReady(epoch); };
         const receivedFence = message.kind === 'status' ? this.resumeFences.get(message.from) : undefined;
         const eligibleAnnouncement = receivedFence?.submitted ? receivedFence : undefined;
@@ -661,10 +698,9 @@ export class Intercom {
         const busy = this.host.busy();
         const metadata = { peerSessionId: message.from, peerName: sender?.name, correlationId: message.correlationId, kind: message.kind, busy };
         const notify = (purpose, content) => {
-            assertValid();
-            assertReady();
             record('host.submission', { ...metadata, outcome: 'attempted' });
             try {
+                assertReady();
                 this.host.deliver(`[Intercom ${purpose} from ${sender?.name ?? 'unconfigured worker'} (${message.from})]\n${content}`, busy);
                 // A synchronous return is not Pi queue acceptance or model completion.
                 record('host.submission', { ...metadata, outcome: 'returned' });
@@ -677,7 +713,7 @@ export class Intercom {
         if (HANDOFF_KINDS.includes(message.kind)) {
             if (!this.handoff || !me || (!me.coordinator && !this.responsibility))
                 fail('handoff requires a configured, responsibility-loaded worker');
-            assertReady();
+            assertCurrent();
             await this.callbackEpoch.run(epoch, () => this.handoff.receive(message.kind, message.from, message.payload));
             return;
         }
@@ -687,7 +723,7 @@ export class Intercom {
                 fail('coordinator cannot report as worker');
             if (message.kind === 'registration') {
                 const projectDirectory = await directory(this.store.root, message.payload.projectDirectory);
-                assertReady();
+                assertCurrent();
                 // No agent entry or placeholder. A reported role is remembered only until explicit configure stores it.
                 if (message.payload.role !== undefined) {
                     if (!logicalRole(message.payload.role))
@@ -701,16 +737,17 @@ export class Intercom {
             }
             else {
                 if (sender) {
-                    assertReady();
+                    assertCurrent();
                     await this.store.update(id, c => {
                         const entry = c.agents.find(a => a.sessionId === message.from && !a.coordinator);
                         if (entry)
                             entry.port = message.payload.port;
-                    }, assertReady);
+                    }, this.configGuard(assertValid, epoch));
                 }
-                assertReady();
+                assertCurrent();
                 const fence = sender && this.resumeFences.get(sender.sessionId);
                 if (fence && fence === eligibleAnnouncement) {
+                    assertReady();
                     fence.announced = true;
                     if (!fence.inFlight)
                         this.resumeFences.delete(sender.sessionId);
@@ -741,31 +778,35 @@ export class Intercom {
                 fail('report queue full; no report stored');
             // Admission is refused before anything is stored, cleared, or acknowledged: no successful receipt
             // for unsaved evidence, and no accept-and-buffer.
-            assertReady();
-            await this.options.adoption?.reportPhase?.('admitted');
-            assertReady();
+            assertCurrent();
+            if (this.options.adoption?.reportPhase)
+                await this.options.adoption.reportPhase('admitted');
+            assertCurrent();
             this.pendingReports++;
             const pending = this.reportWrites.then(async () => {
-                assertValid();
-                assertReady();
+                assertCurrent();
                 const fresh = await this.state();
                 requireCoordinator(fresh.config, id);
-                assertReady();
+                assertCurrent();
                 if (!fresh.config.agents.some(agent => agent.sessionId === message.from && !agent.coordinator))
                     fail('reporting worker is no longer configured');
-                await this.options.adoption?.reportPhase?.('before-save');
-                assertReady();
-                await saveWorkerReport(this.store.root, { version: 1, sessionId: message.from, ...payload, updatedAt: new Date().toISOString() }, () => {
+                if (this.options.adoption?.reportPhase)
+                    await this.options.adoption.reportPhase('before-save');
+                assertCurrent();
+                await saveWorkerReport(this.store.root, { version: 1, sessionId: message.from, ...payload, updatedAt: new Date().toISOString() }, phase => {
                     try {
-                        assertReady();
+                        if (phase === 'publish')
+                            assertReady();
+                        else
+                            assertCurrent();
                     }
                     catch {
                         throw new ReportPublicationRefused(`${ADOPTION_NOT_READY}: report publication refused before persistence; no report stored or cleared`);
                     }
                 });
                 try {
-                    await this.options.adoption?.reportPhase?.('after-save');
-                    assertReady();
+                    if (this.options.adoption?.reportPhase)
+                        await this.options.adoption.reportPhase('after-save');
                     notify('worker report', `Report: ${payload.status}\n${payload.summary}\nThis is a worker-authored public report, not approval or verified completion. Evaluate it before deciding any next step. Clearing retires the report only; it does not resume or complete work.`);
                 }
                 catch (error) {
@@ -841,12 +882,12 @@ export class Intercom {
         const record = this.captureObserver();
         const lifecycle = this.validity(), epoch = this.actionEpoch();
         const { id, config, me } = await this.state();
+        const assertCurrent = () => { lifecycle(); if (me?.coordinator)
+            this.assertActionEpoch(epoch); };
         const assertValid = () => { lifecycle(); if (me?.coordinator)
             this.assertActionReady(epoch); };
+        // Admission is also list's final proof: no await or callback intervenes before its result.
         assertValid();
-        // D3: the claim gate precedes coordinator-initiated tools, including list, worker_status and send.
-        if (me?.coordinator)
-            this.assertActionReady();
         if (operation === 'worker_status') {
             if (!me)
                 fail('worker_status requires a configured session');
@@ -893,7 +934,7 @@ export class Intercom {
                 fail('worker close is active or uncertain; new Intercom work is fenced');
             if (me.coordinator && !recipient.coordinator)
                 armReminder();
-            await this.transmit(args.to, 'message', { message: args.message }, assertValid);
+            await this.transmit(args.to, 'message', { message: args.message }, assertCurrent);
             return { accepted: true, completion: 'not awaited' };
         }
         requireCoordinator(config, id);
@@ -932,24 +973,26 @@ export class Intercom {
             if (choice.role)
                 values.role = choice.role;
             armReminder();
-            await this.store.configure(id, values, assertConfigurable);
+            await this.store.configure(id, values, this.configGuard(lifecycle, epoch, () => { if (this.handoff?.isClosing(args.sessionId) || this.resumeFences.has(args.sessionId))
+                fail('worker lifecycle operation is in flight; configuration is fenced'); }));
             record('config.changed', { operation: 'configure_worker', peerSessionId: args.sessionId, peerName: args.name, outcome: 'written', ...(choice.role ? { piRole: choice.role } : {}) });
             const saved = (await this.store.read()).agents.find(agent => agent.sessionId === candidate.sessionId);
+            assertValid();
             return { written: true, reloaded: false, ...(saved?.role ? { role: saved.role } : {}), ...(choice.roleNote ? { roleNote: choice.roleNote } : {}) };
         }
         if (operation === 'set_multiplexer') {
-            await this.store.update(id, c => { c.multiplexer = args.multiplexer; }, assertValid);
+            await this.store.update(id, c => { c.multiplexer = args.multiplexer; }, this.configGuard(lifecycle, epoch));
             record('config.changed', { operation: 'set_multiplexer', outcome: 'written' });
             return { written: true };
         }
         if (operation === 'create_worker') {
             const relative = await directory(this.store.root, args.projectDirectory ?? '.');
-            assertValid();
+            assertCurrent();
             if (relative !== '.')
                 fail('worker working directory must equal the config root; subdirectory launches would read a forbidden parent config');
             const role = requestedRole(args.role);
             armReminder();
-            const launched = await this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), workspaceRoot: this.store.root, ...(role ? { role } : {}) });
+            const launched = await this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), workspaceRoot: this.store.root, ...(role ? { role } : {}) }, assertValid);
             // The role is not durable until configure_worker saves it. Echo it so a restarted coordinator can pass it explicitly.
             return role && launched && typeof launched === 'object' ? { ...launched, role } : launched;
         }
@@ -970,7 +1013,7 @@ export class Intercom {
             fail('worker close is active or uncertain; operation is fenced');
         if (operation === 'reload_worker' || operation === 'request_status') {
             armReminder();
-            await this.transmit(target.name, operation === 'reload_worker' ? 'reload' : 'request_status', {}, assertValid);
+            await this.transmit(target.name, operation === 'reload_worker' ? 'reload' : 'request_status', {}, assertCurrent);
             return { accepted: true, completion: 'not awaited' };
         }
         if (operation === 'resume_worker') {
@@ -994,11 +1037,11 @@ export class Intercom {
             let completed = false;
             try {
                 const connection = await (this.options.probe ?? probeWorker)(target, { signal: this.probeController.signal });
-                assertValid();
+                assertCurrent();
                 if (connection.state === 'connected')
                     fail('Worker endpoint is still connected; refusing to resume the same session twice.');
                 const fresh = await this.state();
-                assertValid();
+                assertCurrent();
                 requireCoordinator(fresh.config, id);
                 const current = fresh.config.agents.find(agent => agent.sessionId === target.sessionId && !agent.coordinator);
                 if (!current || current.port !== target.port || current.projectDirectory !== target.projectDirectory || current.role !== target.role)
@@ -1007,8 +1050,7 @@ export class Intercom {
                     fail('worker close is active or uncertain; resume is fenced');
                 if (current.role !== undefined && !logicalRole(current.role))
                     fail('invalid role');
-                fence.submitted = true;
-                const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, workspaceRoot: this.store.root, sessionId: current.sessionId, ...(current.role ? { role: current.role } : {}) });
+                const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, workspaceRoot: this.store.root, sessionId: current.sessionId, ...(current.role ? { role: current.role } : {}) }, () => { assertValid(); fence.submitted = true; });
                 completed = true;
                 return result;
             }
@@ -1025,13 +1067,13 @@ export class Intercom {
                 if (this.handoff?.isClosing(target.sessionId) || this.resumeFences.has(target.sessionId) || fencedClose(current?.closeJob))
                     fail('worker lifecycle operation is active or uncertain; removal is fenced');
                 c.agents = c.agents.filter(a => a.sessionId !== target.sessionId);
-            }, assertValid);
+            }, this.configGuard(lifecycle, epoch));
             record('config.changed', { operation: 'remove_worker', peerSessionId: target.sessionId, peerName: target.name, outcome: 'removed' });
             return { removed: true, processStopped: false, sessionDeleted: false };
         }
         fail(`unknown operation ${operation}`);
     }
-    async launchObserved(request) {
+    async launchObserved(request, assertDispatch) {
         const record = this.captureObserver();
         const metadata = {
             operation: request.sessionId ? 'resume_worker' : 'create_worker', peerSessionId: request.sessionId,
@@ -1039,6 +1081,9 @@ export class Intercom {
         };
         record('launch.result', { ...metadata, outcome: 'attempted' });
         try {
+            // The original operation's epoch, not a newly captured one. Observation may be reentrant.
+            // This dispatch admits one existing composite adapter operation, not cancellable subcommands.
+            assertDispatch();
             const result = await this.options.launch(request);
             record('launch.result', { ...metadata, outcome: 'returned' });
             return result;

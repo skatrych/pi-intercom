@@ -355,7 +355,6 @@ const LOCK_DIRECTORY = 'config.lock';
 const LOCK_OWNER_FILE = 'owner.json';
 /** Process-local per-file serialization shared by every store instance for the same path. */
 const processQueues = new Map();
-/** Marks the async chain that already holds this store's transaction, so nested publications reuse it. */
 const insideTransaction = new AsyncLocalStorage();
 const RENAME_DELAYS = [10, 20, 40, 80];
 const RENAME_BUDGET_MS = 250;
@@ -406,11 +405,11 @@ export class ConfigStore {
         if (this.canonicalRoot !== expectedCanonicalRoot)
             fail('config root canonical location changed');
     }
-    /** Strict read: duplicate keys, trailing content and malformed JSON all propagate. */
+    /** Ordinary reads retain baseline parsing; lossless/duplicate-key checks are adoption-only. */
     async read() {
         // Missing, malformed and unreadable local files propagate; no fallback.
         await this.assertLocalPaths();
-        return (await this.readStrict()).config;
+        return validateConfig(JSON.parse(await readFile(this.file, 'utf8')));
     }
     /**
      * The raw bytes and entry spans needed by the lossless replacement and by claim evidence. Strict means
@@ -419,9 +418,7 @@ export class ConfigStore {
      * an error rather than a warning.
      */
     async readStrict() {
-        const scanned = scanConfig(await readFile(this.file, 'utf8'));
-        validateConfig(scanned.config);
-        return scanned;
+        return scanConfig(await readFile(this.file, 'utf8'));
     }
     get lockDirectory() { return path.join(path.dirname(this.file), LOCK_DIRECTORY); }
     /**
@@ -437,19 +434,19 @@ export class ConfigStore {
     async transaction(run) { return this.exclusive(run); }
     /** Override point for an outer per-file queue. Do not override `transaction` or `exclusive` instead. */
     outerQueue(run) { return run(); }
-    async exclusive(run) {
+    async exclusive(run, authorityGuard) {
         // Async-local, not instance, nesting: an adoption transaction may call other publication methods,
         // while two concurrent independent writes on the same instance must still serialize.
         const held = insideTransaction.getStore();
         if (held?.has(this.file)) {
-            held.get(this.file)();
+            held.get(this.file)(authorityGuard);
             return run();
         }
         return this.outerQueue(async () => {
             const key = this.file;
             const previous = processQueues.get(key) ?? Promise.resolve();
             const operation = previous.then(async () => {
-                const lock = await this.acquireLock();
+                const lock = await this.acquireLock(authorityGuard);
                 const locks = new Map(held);
                 locks.set(this.file, lock.assertOwned);
                 try {
@@ -502,21 +499,40 @@ export class ConfigStore {
                 throw error;
         }
     }
-    publicationGuard(assertValid) {
-        this.assertSafePaths();
+    /** Notification cannot hide the originating refusal, or approve an operation. */
+    authorityRefused(guard) { try {
+        guard?.('authority-refused');
+    }
+    catch { /* preserve originating error */ } }
+    authorityGate(check, guard) {
+        try {
+            return check();
+        }
+        catch (error) {
+            this.authorityRefused(guard);
+            throw error;
+        }
+    }
+    publicationGuard(assertValid, authorityGuard) {
         const guard = insideTransaction.getStore()?.get(this.file);
         if (!guard)
             fail('config publication requires its exclusive transaction');
-        guard();
+        guard(authorityGuard);
         assertValid();
     }
-    async acquireLock() {
-        // Upstream's session-root isolation first (its refusal text is the published contract), then this
-        // fork's stricter lock-path check. Both run before anything is created under the root.
-        await this.assertLocalPaths();
-        this.assertSafePaths();
+    async acquireLock(authorityGuard) {
+        // Upstream's session-root isolation runs first and keeps its own refusal text (that message is the
+        // published contract), but an acquisition-path refusal still closes this fork's action epoch.
+        try {
+            await this.assertLocalPaths();
+        }
+        catch (error) {
+            this.authorityRefused(authorityGuard);
+            throw error;
+        }
+        this.authorityGate(() => this.assertSafePaths(), authorityGuard);
         await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-        this.assertSafePaths();
+        this.authorityGate(() => this.assertSafePaths(), authorityGuard);
         const directory = this.lockDirectory, token = randomUUID();
         try {
             await mkdir(directory, { mode: 0o700 });
@@ -559,8 +575,8 @@ export class ConfigStore {
         if (!await owned())
             fail('config transaction lock ownership is uncertain; nothing was removed and no publication');
         let released = false;
-        const assertOwned = () => {
-            this.assertSafePaths();
+        const assertOwned = (guard) => {
+            this.authorityGate(() => this.assertSafePaths(), guard);
             if (released || lstatSync(directory).isSymbolicLink() || JSON.parse(readFileSync(ownerFile, 'utf8')).token !== token)
                 fail('config transaction ownership is uncertain; no publication or foreign release');
         };
@@ -660,7 +676,7 @@ export class ConfigStore {
             }
         });
     }
-    async publish(temp, assertValid) {
+    async publish(temp, assertValid, authorityGuard) {
         const replace = this.options.rename ?? rename;
         const now = this.options.now ?? (() => performance.now());
         const delay = this.options.delay ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
@@ -671,9 +687,10 @@ export class ConfigStore {
             // of this already synced/closed temp, never the mutation or any OS action
             // outside config persistence. The elapsed budget bounds retry initiation,
             // not the duration of an already-submitted OS rename.
+            const expired = attempt > 0 && now() - started >= RENAME_BUDGET_MS;
             await this.assertLocalPaths();
-            this.publicationGuard(assertValid);
-            if (attempt > 0 && now() - started >= RENAME_BUDGET_MS)
+            this.publicationGuard(assertValid, authorityGuard);
+            if (expired)
                 throw originalError;
             try {
                 await replace(temp, this.file);
@@ -693,21 +710,42 @@ export class ConfigStore {
     async update(id, mutate, assertValid = () => { }) {
         return this.exclusive(async () => {
             assertValid();
-            const c = await this.read();
+            let c;
+            // Read/parse/schema refusal is authority admission, not a mutator or staging error.
+            try {
+                c = await this.read();
+            }
+            catch (error) {
+                this.authorityRefused(assertValid);
+                throw error;
+            }
             assertValid();
             // Authority is re-checked after the lock is held, so a former coordinator's queued update is
             // refused once a completed adoption replaced the entry.
-            requireCoordinator(c, id);
+            this.authorityGate(() => requireCoordinator(c, id), assertValid);
             // Existing committed tenure evidence is also an ordinary-writer fence. In particular, an old
             // coordinator cannot publish while another cooperating process holds unresolved prepared intent.
             // The Orchestrator runtime additionally gates ABSENT evidence before any coordinator action.
-            const { bootClaimEvidence, claimEvidenceEstablished } = await import('./adoption.js');
-            if (await claimEvidenceEstablished(this.root)) {
-                const evidence = await bootClaimEvidence({ home: this.root, identity: coordinator(c) });
-                if (!evidence.ready)
-                    fail(`ADOPTION_NOT_READY: ${evidence.detail}`);
+            const { bootClaimEvidence, claimEvidenceEstablished, committedActiveClaimMatches, parseClaim } = await import('./adoption.js');
+            const pair = { ...coordinator(c) };
+            // Legacy absence belongs only to this one continuously held update; every invocation
+            // rediscovers it, including nested updates under a shared outer transaction.
+            let established;
+            // This catch is deliberately only the store's evidence admission gate. Lifecycle, lock,
+            // caller mutation/validation and temporary/rename/cleanup errors are NOT tenure corruption.
+            try {
+                established = await claimEvidenceEstablished(this.root);
+                if (established) {
+                    const evidence = await bootClaimEvidence({ home: this.root, identity: pair });
+                    if (!evidence.ready)
+                        fail(`ADOPTION_NOT_READY: ${evidence.detail}`);
+                }
             }
-            assertValid();
+            catch (error) {
+                this.authorityRefused(assertValid);
+                throw error;
+            }
+            assertValid('authority');
             await mutate(c);
             assertValid();
             validateConfig(c);
@@ -715,14 +753,35 @@ export class ConfigStore {
             try {
                 // Every publication attempt checks the lifecycle/deadline guard; an
                 // already submitted OS rename still cannot be undone.
-                await this.publish(temp, assertValid);
+                await this.publish(temp, () => {
+                    assertValid('authority');
+                    // Inside-lock admission and final rename are separate boundaries. Re-prove current evidence
+                    // after staging awaits (and every platform retry), not at each unpublished temp operation.
+                    if (established) {
+                        try {
+                            const claimFile = path.join(this.root, 'coordinator-claim.md');
+                            if (!lstatSync(claimFile).isFile())
+                                throw Error('unsafe claim path');
+                            const raw = readFileSync(claimFile, 'utf8'), claim = parseClaim(raw);
+                            const board = coordinator(validateConfig(JSON.parse(readFileSync(this.file, 'utf8'))));
+                            if (board.sessionId !== pair.sessionId || board.port !== pair.port
+                                || claim.coordinator.sessionId !== pair.sessionId || claim.coordinator.port !== pair.port
+                                || !committedActiveClaimMatches(this.root, raw))
+                                throw Error('claim changed');
+                        }
+                        catch {
+                            this.authorityRefused(assertValid);
+                            fail('ADOPTION_NOT_READY: committed claim changed or became unavailable before config publication');
+                        }
+                    }
+                }, assertValid);
             }
             catch (error) {
                 await this.cleanupTemporary(temp).catch(() => { });
                 throw error;
             }
             return c;
-        });
+        }, assertValid);
     }
     /**
      * The single coordinator-entry replacement. It re-reads the raw document under the lock, verifies it

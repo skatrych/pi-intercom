@@ -120,6 +120,8 @@ export interface ConfigStoreOptions {
         sessionId: string;
     };
 }
+/** Marks the async chain that already holds this store's transaction, so nested publications reuse it. */
+type ConfigGuard = (phase?: 'authority' | 'authority-refused') => void;
 export declare class ConfigStore {
     readonly root: string;
     private readonly options;
@@ -128,7 +130,7 @@ export declare class ConfigStore {
     constructor(root: string, options?: ConfigStoreOptions);
     private assertLocalPaths;
     validateRoot(expectedCanonicalRoot: string): Promise<void>;
-    /** Strict read: duplicate keys, trailing content and malformed JSON all propagate. */
+    /** Ordinary reads retain baseline parsing; lossless/duplicate-key checks are adoption-only. */
     read(): Promise<Config>;
     /**
      * The raw bytes and entry spans needed by the lossless replacement and by claim evidence. Strict means
@@ -151,9 +153,12 @@ export declare class ConfigStore {
     transaction<T>(run: () => Promise<T>): Promise<T>;
     /** Override point for an outer per-file queue. Do not override `transaction` or `exclusive` instead. */
     protected outerQueue<T>(run: () => Promise<T>): Promise<T>;
-    protected exclusive<T>(run: () => Promise<T>): Promise<T>;
+    protected exclusive<T>(run: () => Promise<T>, authorityGuard?: ConfigGuard): Promise<T>;
     private lockOwner;
     private assertSafePaths;
+    /** Notification cannot hide the originating refusal, or approve an operation. */
+    private authorityRefused;
+    private authorityGate;
     private publicationGuard;
     private acquireLock;
     static discover(cwd: string): Promise<ConfigStore | undefined>;
@@ -163,7 +168,7 @@ export declare class ConfigStore {
     private temporary;
     initialize(id: string, boundPort: number, assertValid?: () => void): Promise<boolean>;
     private publish;
-    update(id: string, mutate: (config: Config) => void | Promise<void>, assertValid?: () => void): Promise<Config>;
+    update(id: string, mutate: (config: Config) => void | Promise<void>, assertValid?: ConfigGuard): Promise<Config>;
     /**
      * The single coordinator-entry replacement. It re-reads the raw document under the lock, verifies it
      * against the caller's frozen preview, applies the lossless two-token patch and publishes it. There
@@ -182,6 +187,6 @@ export declare class ConfigStore {
     }>;
     /** Same synced, closed, exclusive temporary discipline as ordinary writes, from raw bytes. */
     private writeTemporaryText;
-    configure(id: string, values: Omit<Agent, 'coordinator'>, assertValid?: () => void): Promise<Config>;
+    configure(id: string, values: Omit<Agent, 'coordinator'>, assertValid?: ConfigGuard): Promise<Config>;
 }
 export {};

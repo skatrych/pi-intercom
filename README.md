@@ -114,25 +114,39 @@ Ordinary non-Orchestrator startup uses only that local config; with no config it
 
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
 
-## Fresh Orchestrator coordinator context
+## Start a fresh coordinator without losing the team
 
-The sole replacement path is fork `Intercom.adoptCoordinator`, invoked by the human through
-`/intercom-adopt` in the separately installed Swactory **Orchestrator-only** role frontend.
-`/intercom-adopt status` is read-only; the skill explains the same route. No model-callable adoption
-tool, writable HTTP endpoint, terminal helper, JSON edit or worker rebinding is supplied. The backend
-independently checks captured launch role, current persisted session/endpoint, trust, idle state,
-collisions, immutable preview and direct human UI answers. Connected old endpoint stops;
-disconnected/unknown never proves termination.
+A board can outlive its coordinator's conversation. Adoption lets a fresh session take over that
+board while keeping the worker roster, pending close jobs, reports and history. Workers send to the
+new coordinator on their next message—no worker restart or extension reload is needed.
 
-Prepared intent is committed before the coordinator-only lossless token patch; active evidence and
-write-free in-place promotion precede authority. Config tools, incoming callbacks, queued report
-saves and reminders are fenced through failures. Reinvoke the **same command** for anchored evidence
-finalization or write-free promotion retry; never replay a swap. Workers, pending jobs and history
-remain untouched. Existing workers route to the new coordinator from disk on their next send;
-**adoption itself requires no worker reload/restart**. Installation/code reload is a different step.
-All config-publishing processes must first be upgraded to the common filesystem-lock contract;
-stale locks require human maintenance, never automatic reclamation. This change does not authorize
-agents to merge/release/install/adopt live. See [backend, recovery and proof contract](references/coordinator-adoption.md).
+**Availability:** `/intercom-adopt` requires the separately installed
+[Orchestrator role integration](references/coordinator-adoption.md#availability-and-prerequisites);
+installing this package alone does not add the command. Use a fresh, persisted Orchestrator session
+in a trusted project under the shared projects home, with an idle interactive Pi UI. The projects
+home must be a Git repository with a clean index/worktree. Upgrade every process that writes board
+config to this version before taking over; older writers do not honor its lock.
+
+After ending the old coordinator, enter these commands in the **new Pi session**:
+
+```text
+/intercom-adopt status
+/intercom-adopt
+```
+
+Status shows the board and both identities without changing anything. The second command asks for
+an authorization reference, the exact confirmation that the old session ended, and approval of the
+displayed change. Success records the transition in `coordinator-claim.md` and makes this running
+session the coordinator, without sending workers any work. A registered worker cannot be promoted.
+
+A reachable old coordinator always blocks adoption. An unreachable endpoint **does not prove the
+session ended**; the human must confirm that separately. Failed or timed-out requests can have an
+unknown outcome: inspect status before retrying. The same command can finalize an interrupted
+transition or retry loading responsibility, but cannot recover prepared evidence belonging to a
+different session; that case needs human escalation. Stale locks also need human maintenance, not
+automatic removal. Do not edit board JSON to bypass a stop.
+
+See [safety, recovery and verification details](references/coordinator-adoption.md).
 
 ## Explicit workflow
 

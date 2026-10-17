@@ -96,7 +96,8 @@ export async function saveWorkerReport(root, report, assertCurrent) {
         if (await directory(root, false) !== dir)
             throw new Error('directory changed');
         await regularOrAbsent(target);
-        assertCurrent?.();
+        // Temp preparation is not accepted report evidence. Only this callback authorizes publication.
+        assertCurrent?.('publish');
         await rename(temporary, target);
         temporary = undefined;
     }
