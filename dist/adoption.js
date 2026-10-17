@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { ConfigStore, ConfigPreviewChanged, StaleConfigLock, coordinator, fail, patchCoordinatorEntry, rawSpan, sha256, } from './config.js';
 /**
- * ADR 0005 / issue #31 — the only coordinator-entry replacement path.
+ * Coordinator adoption: the only coordinator-entry replacement path.
  *
  * A deterministic workflow, not a tool, command, CLI, or endpoint. Reachable only through
  * `Intercom.adoptCoordinator`, which the role-local `/intercom-adopt` command invokes with a supported
@@ -15,7 +15,7 @@ import { ConfigStore, ConfigPreviewChanged, StaleConfigLock, coordinator, fail, 
  * runtime's bound endpoint, the config read made inside the transaction, or an answer typed by the
  * human into this session's own Pi UI.
  */
-export const PROJECTS_HOME_ENV = 'SWFACTORY_PROJECTS_HOME';
+export const PROJECTS_HOME_ENV = 'PI_INTERCOM_PROJECTS_HOME';
 export const DEFAULT_PROJECTS_HOME = 'workspaces/projects';
 export const ORCHESTRATOR_ROLE = 'orchestrator';
 export const CLAIM_FILE = 'coordinator-claim.md';
@@ -520,7 +520,7 @@ export class AdoptionWorkflow {
             return 'active bytes are not derived from reachable committed prepared intent';
         }
     }
-    /** Snapshot actual ancestor directories, not a descendant tree scan (ADR D3). */
+    /** Snapshot actual ancestor directories, not a descendant tree scan. */
     async pathSnapshot(surveyed) {
         const paths = new Map();
         let at = surveyed.cwd;

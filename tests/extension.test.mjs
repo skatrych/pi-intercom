@@ -192,6 +192,7 @@ test('single extension registers all agreed tools without starting resources in 
   assert.equal(flags.get('intercom-root').default, undefined);
   assert.equal(tools.size, 16);
   assert.deepEqual([...channels.keys()], [ADOPTION_CHANNEL]);
+  assert.equal(ADOPTION_CHANNEL, 'intercom:coordinator-adoption:v1');
   assert.equal(ADOPTION_PROTOCOL, 1);
   assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');

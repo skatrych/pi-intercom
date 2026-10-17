@@ -45,7 +45,7 @@ export interface RuntimeOptions {
     workspaceRoot?: string;
     /** Test seam for the operator environment. Production reads process.env once per runtime start. */
     reminderMinutesEnv?: () => string | undefined;
-    /** Test seam for the ADR 0005 adoption boundary. Production reads this process's configuration. */
+    /** Test seam for the adoption boundary. Production reads this process's configuration. */
     adoption?: Partial<AdoptionDeps>;
 }
 export interface AdoptionDeps {
@@ -89,7 +89,7 @@ export declare class Intercom {
     /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
     private reminderIntervalMsCache;
     /**
-     * ADR 0005 D3: coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
+     * Coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
      * projects-home board. It starts closed on unresolved evidence and opens only after committed active
      * evidence and a successful write-free promotion. It gates coordinator tools, boot coordinator side
      * effects, and this session's incoming registration/status/report/message/handoff effects, queued
@@ -129,7 +129,7 @@ export declare class Intercom {
     private bootEvidenceReady;
     close(): Promise<void>;
     /**
-     * ADR 0005 D3 preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
+     * Orchestrator preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
      * this process's captured configuration, never from a request. Counts `.pi-intercom` directories along
      * cwd -> projects home before any write, then classifies and applies the claim gate. Returns a held
      * reason when no board may be written, and throws when the board layout itself is unsafe.
@@ -141,7 +141,7 @@ export declare class Intercom {
     coordinatorActionReady(): boolean;
     responsibilityLoaded(): boolean;
     /**
-     * ADR 0005 D7: in-place promotion. No `start`, `close`, `HandoffWorkflow.recover`, extension reload,
+     * In-place promotion. No `start`, `close`, `HandoffWorkflow.recover`, extension reload,
      * worker action, monitor or pane operation, log maintenance, report clearing, session replacement, or
      * job-state rewrite. It reads config and loads this session's responsibility from the new entry only.
      */

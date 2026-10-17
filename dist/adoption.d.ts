@@ -1,7 +1,7 @@
 import { ConfigStore, type ScannedConfig } from './config.js';
 import type { WorkerConnection } from './connections.js';
 /**
- * ADR 0005 / issue #31 — the only coordinator-entry replacement path.
+ * Coordinator adoption: the only coordinator-entry replacement path.
  *
  * A deterministic workflow, not a tool, command, CLI, or endpoint. Reachable only through
  * `Intercom.adoptCoordinator`, which the role-local `/intercom-adopt` command invokes with a supported
@@ -10,7 +10,7 @@ import type { WorkerConnection } from './connections.js';
  * runtime's bound endpoint, the config read made inside the transaction, or an answer typed by the
  * human into this session's own Pi UI.
  */
-export declare const PROJECTS_HOME_ENV = "SWFACTORY_PROJECTS_HOME";
+export declare const PROJECTS_HOME_ENV = "PI_INTERCOM_PROJECTS_HOME";
 export declare const DEFAULT_PROJECTS_HOME = "workspaces/projects";
 export declare const ORCHESTRATOR_ROLE = "orchestrator";
 export declare const CLAIM_FILE = "coordinator-claim.md";
@@ -196,7 +196,7 @@ export declare class AdoptionWorkflow {
      */
     private latestClaimCommit;
     private verifyActiveAnchor;
-    /** Snapshot actual ancestor directories, not a descendant tree scan (ADR D3). */
+    /** Snapshot actual ancestor directories, not a descendant tree scan. */
     private pathSnapshot;
     /** Synchronous final guard also runs on every platform rename retry. */
     private assertPaths;

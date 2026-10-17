@@ -79,7 +79,7 @@ export interface RuntimeOptions {
   workspaceRoot?: string;
   /** Test seam for the operator environment. Production reads process.env once per runtime start. */
   reminderMinutesEnv?: () => string | undefined;
-  /** Test seam for the ADR 0005 adoption boundary. Production reads this process's configuration. */
+  /** Test seam for the adoption boundary. Production reads this process's configuration. */
   adoption?: Partial<AdoptionDeps>;
 }
 export interface AdoptionDeps {
@@ -118,7 +118,7 @@ export class Intercom {
   /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
   private reminderIntervalMsCache = DEFAULT_REMINDER_INTERVAL_MS;
   /**
-   * ADR 0005 D3: coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
+   * Coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
    * projects-home board. It starts closed on unresolved evidence and opens only after committed active
    * evidence and a successful write-free promotion. It gates coordinator tools, boot coordinator side
    * effects, and this session's incoming registration/status/report/message/handoff effects, queued
@@ -291,7 +291,7 @@ export class Intercom {
       });
       try { assertValid(); } catch (error) { await endpoint.close(); throw error; }
       this.endpoint = endpoint;
-      // ADR 0005 D3: an Orchestrator launch counts the board and can hold here, before any board write or
+      // An Orchestrator launch counts the board and can hold here, before any board write or
       // coordinator side effect. Binding a health endpoint is not an authority grant, and a held session
       // still answers read-only `/intercom-adopt status`.
       const held = await this.preflight(previous, assertValid);
@@ -311,7 +311,7 @@ export class Intercom {
       if (me?.coordinator) {
         // Responsibility load is write-free and always runs, so an unresolved-claim coordinator still has
         // its identity. Recovery, observer maintenance and the port refresh are config writes and stay
-        // behind D3's action readiness.
+        // behind coordinator action readiness.
         try { await this.reload(); } catch (e) { assertValid(); this.host.notify(`Name/responsibility synchronization failed: ${String(e)}`); }
         assertValid();
         if (this.authorityEnabled && this.bootEvidenceReady && this.responsibilityLoaded()) this.openActionEpoch();
@@ -408,7 +408,7 @@ export class Intercom {
     try { await closing; } finally { if (this.closing === closing) this.closing = undefined; }
   }
   /**
-   * ADR 0005 D3 preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
+   * Orchestrator preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
    * this process's captured configuration, never from a request. Counts `.pi-intercom` directories along
    * cwd -> projects home before any write, then classifies and applies the claim gate. Returns a held
    * reason when no board may be written, and throws when the board layout itself is unsafe.
@@ -460,7 +460,7 @@ export class Intercom {
   coordinatorActionReady(): boolean { return !this.authorityEnabled || this.authorityReady; }
   responsibilityLoaded(): boolean { return this.responsibility !== undefined; }
   /**
-   * ADR 0005 D7: in-place promotion. No `start`, `close`, `HandoffWorkflow.recover`, extension reload,
+   * In-place promotion. No `start`, `close`, `HandoffWorkflow.recover`, extension reload,
    * worker action, monitor or pane operation, log maintenance, report clearing, session replacement, or
    * job-state rewrite. It reads config and loads this session's responsibility from the new entry only.
    */
@@ -599,7 +599,7 @@ export class Intercom {
   private async handleReceive(message: Envelope): Promise<void> {
     const record = this.captureObserver();
     const assertValid = this.validity();
-    // D3: an incoming callback binds the epoch it was admitted in. A callback that crosses a closed
+    // An incoming callback binds the epoch it was admitted in. A callback that crosses a closed
     // readiness epoch stops at its next side effect, with no buffered or replayed delivery later.
     const epoch = this.actionEpoch();
     const assertCurrent = () => { assertValid(); this.assertActionEpoch(epoch); };

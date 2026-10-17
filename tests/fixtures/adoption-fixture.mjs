@@ -1,4 +1,4 @@
-// Test-only fixture kit for ADR 0005 / issue #31. NOT a supported operation and NOT shipped: nothing in
+// Test-only fixture kit for coordinator adoption. NOT a supported operation and NOT shipped: nothing in
 // src/ imports it. It builds a temporary projects-home git repository with a hand-written
 // `.pi-intercom/config.json`, a persisted Pi session header, an ephemeral loopback endpoint standing in
 // for "this runtime's ready notification", and a mock Pi UI. No live board, installed role, real port,
