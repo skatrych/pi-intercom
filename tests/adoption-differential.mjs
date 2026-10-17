@@ -1,4 +1,4 @@
-// Offline D9 comparison of real exported runtimes. No installed board/auth/model/panes.
+// Offline comparison of real exported runtimes. No installed board/auth/model/panes.
 // Full: node tests/adoption-differential.mjs --baseline <archive> --original <archive> --output <jsonl>
 // Each task is an independent process; variants are seeded/interleaved pairs inside that process.
 import cp from 'node:child_process';

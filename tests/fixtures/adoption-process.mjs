@@ -29,7 +29,7 @@ process.on('message', async message => {
       const { probeWorker } = await import('../../dist/connections.js');
       const sessionFile = path.join(root, `.pi/default-sessions/2026-10-16T09-00-00-000Z_${id}.jsonl`);
       let previewHeld = false;
-      const ui = { input: async ({ kind }) => kind === 'endedWording' ? ENDED_WORDING(IDS.gone) : 'issue31 fixture authorization',
+      const ui = { input: async ({ kind }) => kind === 'endedWording' ? ENDED_WORDING(IDS.gone) : 'adoption fixture authorization',
         confirm: async () => { if (hold === 'preview' && !previewHeld) { previewHeld = true; await wait('preview'); } return true; } };
       const context = { cwd: root, mode: 'tui', hasUI: true, isProjectTrusted: () => true, isIdle: () => true, ui,
         sessionManager: { getSessionId: () => id, getSessionFile: () => sessionFile, getSessionDir: () => path.dirname(sessionFile) } };

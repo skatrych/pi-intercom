@@ -1,15 +1,12 @@
-# Coordinator adoption backend (issue31)
+# Coordinator adoption backend
 
 `Intercom.adoptCoordinator` is the single deterministic coordinator-entry replacement path. The
 human invokes `/intercom-adopt` from the **Orchestrator Pi TUI**, through the separately installed
-Swactory role-local frontend. `/intercom-adopt status` is read-only; the accompanying skill only
-explains the operation. This globally loaded fork backend registers no adoption tool, HTTP writer,
+host integration. `/intercom-adopt status` is read-only; the host integration only
+explains the operation. This globally loaded backend registers no adoption tool, HTTP writer,
 CLI, shell helper or slash command. There is no manual claim/config editing or terminal fallback.
 
-The binding design is Swactory ADR0005, plan and templates at
-[2b2d937089d830459ac68f10d970abb7f89a5ed4](https://github.com/skatrych/swactory/tree/2b2d937089d830459ac68f10d970abb7f89a5ed4/docs/adr),
-including the independently approved D9, ConfigStore/runtime, private handoff-guard and legacy-absence decisions.
-The frontend discovers exactly one protocol1 offer on `swactory:coordinator-adoption:v1` through
+The frontend discovers exactly one protocol1 offer on `intercom:coordinator-adoption:v1` through
 Pi's supported synchronous event bus. The closure independently checks captured launch role,
 current runtime/SessionManager/cwd, TUI, trust, idle state, persisted identity and its bound health
 endpoint. Caller UI/identity/confirmation arguments grant no authority. A copied frontend, role
@@ -18,8 +15,7 @@ Application role gating is not an OS sandbox against malicious same-user code.
 
 ## Availability and prerequisites
 
-The command frontend and explanatory skill are provided by the
-[Swactory Orchestrator role integration](https://github.com/skatrych/swactory/tree/2b2d937089d830459ac68f10d970abb7f89a5ed4/pi-agent-config/roles/orchestrator).
+The command frontend and its explanation are provided by the host integration.
 They are separate from this backend package; no global command appears from installing this package
 alone. The integration must load both the backend and exactly one compatible role-local frontend.
 Human installation/rollout is separate from adoption. Start a fresh persisted Orchestrator session in
@@ -29,11 +25,11 @@ config-publishing processes first; confirm the old session ended, not merely tha
 
 ## Deliberate decision and evidence
 
-The expected projects home is `SWFACTORY_PROJECTS_HOME`, default `~/workspaces/projects`. Count
+The expected projects home is `PI_INTERCOM_PROJECTS_HOME`, default `~/workspaces/projects`. Count
 `.pi-intercom` directories on **cwd→home ancestors**, before config discovery or initialization.
 Second/wrong/unsafe boards stop; no automatic cleanup. Orchestrator discovery is bounded to the
 counted projects home (never above it), and a prospective no-board observer cannot create a board
-via its log directory before deliberate bootstrap. The skill's separate creation-time depth4
+via its log directory before deliberate bootstrap. The host integration's separate creation-time depth4
 scan is not this ancestor check. No-board child cwd never creates a private board. Root bootstrap
 requires its own UI decision and a committed first-coordinator declaration.
 
@@ -92,7 +88,7 @@ ordinary orchestration arms reminders. Newly sent traffic after readiness can be
 Worker transmit reads config per send: the next send routes to the new pair, with no worker action.
 After adoption, the first separate coordinator action verifies board/lease/tracker state over APIs;
 then inspect stored evidence, report untouched jobs and re-brief assignments explicitly. A receipt or
-self-reported summary is not approval. The complete human first-use checklist is in the role skill.
+self-reported summary is not approval. The complete human first-use checklist is in the host integration.
 
 ## Serialization / rollout limits
 

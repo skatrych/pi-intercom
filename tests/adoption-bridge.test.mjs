@@ -20,9 +20,9 @@ for (const launch of ['developer', 'metadata-only', 'contradictory']) test(`back
 
 test('real adapter stays read-only while no-board host persists an ordinary non-coordinating turn', async t => {
   const f = await fixture({ runtime: true, noBoard: true });
-  const keys = ['PI_ROLE_DIR', 'PI_ROLES_DIR', 'SWFACTORY_PROJECTS_HOME', 'PI_INTERCOM_WORKER_ROLE'];
+  const keys = ['PI_ROLE_DIR', 'PI_ROLES_DIR', 'PI_INTERCOM_PROJECTS_HOME', 'PI_INTERCOM_WORKER_ROLE'];
   const prior = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-  process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator'); process.env.PI_ROLES_DIR = path.join(f.home, 'roles'); process.env.SWFACTORY_PROJECTS_HOME = f.home; delete process.env.PI_INTERCOM_WORKER_ROLE;
+  process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator'); process.env.PI_ROLES_DIR = path.join(f.home, 'roles'); process.env.PI_INTERCOM_PROJECTS_HOME = f.home; delete process.env.PI_INTERCOM_WORKER_ROLE;
   const handlers = new Map(), bus = new Map();
   t.after(async () => { await handlers.get('session_shutdown')?.(); await f.dispose(); for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
   extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
@@ -39,9 +39,9 @@ test('real adapter stays read-only while no-board host persists an ordinary non-
 
 test('bridge rejects copied session manager and uses captured UI, never caller dialogs', async t => {
   const f = await fixture({ runtime: true });
-  const prior = { role: process.env.PI_ROLE_DIR, roles: process.env.PI_ROLES_DIR, home: process.env.SWFACTORY_PROJECTS_HOME, worker: process.env.PI_INTERCOM_WORKER_ROLE };
-  process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator'); process.env.PI_ROLES_DIR = path.join(f.home, 'roles'); process.env.SWFACTORY_PROJECTS_HOME = f.home; delete process.env.PI_INTERCOM_WORKER_ROLE;
-  t.after(() => { for (const [key, value] of Object.entries({ PI_ROLE_DIR: prior.role, PI_ROLES_DIR: prior.roles, SWFACTORY_PROJECTS_HOME: prior.home, PI_INTERCOM_WORKER_ROLE: prior.worker })) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  const prior = { role: process.env.PI_ROLE_DIR, roles: process.env.PI_ROLES_DIR, home: process.env.PI_INTERCOM_PROJECTS_HOME, worker: process.env.PI_INTERCOM_WORKER_ROLE };
+  process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator'); process.env.PI_ROLES_DIR = path.join(f.home, 'roles'); process.env.PI_INTERCOM_PROJECTS_HOME = f.home; delete process.env.PI_INTERCOM_WORKER_ROLE;
+  t.after(() => { for (const [key, value] of Object.entries({ PI_ROLE_DIR: prior.role, PI_ROLES_DIR: prior.roles, PI_INTERCOM_PROJECTS_HOME: prior.home, PI_INTERCOM_WORKER_ROLE: prior.worker })) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
   const handlers = new Map(), bus = new Map();
   const pi = { on: (event, fn) => handlers.set(event, fn), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
     events: { on: (channel, fn) => { bus.set(channel, fn); return () => bus.delete(channel); } } };

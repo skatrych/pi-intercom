@@ -55,7 +55,7 @@ class PiConfigStore extends ConfigStore {
  * The payload carries no identity, port, role, path, or confirmation: the offered closure is process-local
  * and is never serialized, so this bridge is neither an authorization token nor a security boundary.
  */
-export const ADOPTION_CHANNEL = 'swactory:coordinator-adoption:v1';
+export const ADOPTION_CHANNEL = 'intercom:coordinator-adoption:v1';
 export const ADOPTION_PROTOCOL = 1;
 export interface AdoptionOffer { protocol: number; run(context: CommandContext, verb: string, args?: string[]): Promise<Result> }
 export interface AdoptionDiscovery { offers: AdoptionOffer[] }

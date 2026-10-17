@@ -394,7 +394,7 @@ class Scenario {
     if (record?.phase === 'prepared') {
       record.leftUnchanged = this.parts.adoption.leftUnchanged(await fixture.board.scan());
       record.previous = { sessionId: IDS.gone, port: this.ports.coordinator, claimDate: null };
-      record.authority = { kind: 'adoption', record: 'issue31 fixture', confirmedEndedAt: '2026-10-16T09:00:00.000Z', wording: ENDED_WORDING(IDS.gone) };
+      record.authority = { kind: 'adoption', record: 'adoption fixture', confirmedEndedAt: '2026-10-16T09:00:00.000Z', wording: ENDED_WORDING(IDS.gone) };
     }
     if (record === null) {
       await fixture.claim.write('# Coordinator claim\n\n```json\n{ "schemaVersion": 1,\n```\n');
@@ -421,7 +421,7 @@ class Scenario {
       boardRoot: fixture.home,
       coordinator: { sessionId: this.ownIdValue, port: this.ownPort },
       date: '2026-10-16',
-      authority: { kind: 'adoption', record: 'issue skatrych/swactory#31', confirmedEndedAt: '2026-10-16T09:00:00.000Z', wording: ENDED_WORDING(IDS.gone) },
+      authority: { kind: 'adoption', record: 'adoption fixture', confirmedEndedAt: '2026-10-16T09:00:00.000Z', wording: ENDED_WORDING(IDS.gone) },
       previous: { sessionId: IDS.gone, port: this.ports.coordinator, claimDate: null },
       previousRecordCommit: null,
       configBeforeSha256: sha256(raw),
