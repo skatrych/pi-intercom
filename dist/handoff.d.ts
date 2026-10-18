@@ -68,8 +68,10 @@ export declare class HandoffWorkflow {
     private background;
     dispose(): void;
     recover(): Promise<void>;
+    /** Only synchronous ConfigStore update callbacks: runtime/store retain authority ownership. */
+    private assertUpdateJob;
     private assertJob;
-    private target;
+    private targetForUpdate;
     private transition;
     private finish;
     request(target: Agent): Promise<CloseJob>;

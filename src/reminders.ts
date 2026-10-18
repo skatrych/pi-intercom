@@ -12,6 +12,7 @@ const clock: ReminderClock = {
   },
 };
 interface ReminderHost {
+  captureGuard?(): () => void;
   isCoordinator(): Promise<boolean>;
   busy(): boolean;
   deliver(text: string): void;
@@ -46,6 +47,7 @@ export class CoordinatorReminders {
     return !this.disposed && this.generation === generation && this.tick === tick;
   }
   private schedule(generation: number): void {
+    const assertReady = this.host.captureGuard?.();
     this.cancel = this.timer.schedule(() => {
       if (this.disposed || generation !== this.generation) return;
       this.cancel = undefined;
@@ -57,8 +59,12 @@ export class CoordinatorReminders {
       this.checking = true;
       void (async () => {
         try {
+          try { assertReady?.(); }
+          catch { if (this.current(generation, tick)) this.stop(); return; }
           const coordinator = await this.host.isCoordinator();
           if (!this.current(generation, tick)) return;
+          try { assertReady?.(); }
+          catch { if (this.current(generation, tick)) this.stop(); return; }
           if (!coordinator) { this.stop(); return; }
           if (!this.host.busy()) this.host.deliver(REMINDER_TEXT);
         } catch { /* Unknown role/read/delivery outcome: no blind immediate replay. */ }

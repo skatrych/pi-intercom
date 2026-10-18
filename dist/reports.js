@@ -63,6 +63,9 @@ async function regularOrAbsent(file) {
             throw error;
     }
 }
+/** Safe named refusal supplied by the runtime, never raw guard or filesystem diagnostics. */
+export class ReportPublicationRefused extends Error {
+}
 /** Persist only the explicitly authored public report; clear is an atomic tombstone. */
 export async function saveWorkerReport(root, report, assertCurrent) {
     let temporary;
@@ -93,11 +96,14 @@ export async function saveWorkerReport(root, report, assertCurrent) {
         if (await directory(root, false) !== dir)
             throw new Error('directory changed');
         await regularOrAbsent(target);
-        assertCurrent?.();
+        // Temp preparation is not accepted report evidence. Only this callback authorizes publication.
+        assertCurrent?.('publish');
         await rename(temporary, target);
         temporary = undefined;
     }
-    catch {
+    catch (error) {
+        if (error instanceof ReportPublicationRefused)
+            throw error;
         throw new Error('Worker report could not be saved.');
     }
     finally {
