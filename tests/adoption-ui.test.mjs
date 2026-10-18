@@ -207,6 +207,41 @@ test('the selected answer is shown as selected', async t => {
   assert.match(joined(d.rendered()), /No/);
 });
 
+test('a long ended-wording sentence stays complete on a narrow terminal', async t => {
+  const sessionId = 'c'.repeat(120);
+  const prompt = `Type exactly:\nENDED ${'I confirm coordinator ' + sessionId + ' ended'}`;
+  const d = await dialog({ prompt, width: 24, columns: 24, rows: 12 });
+  // A long id cannot fit a narrow line: wrapping must carry every character to a following line, and the
+  // scroll indicator must admit there is more. Scrolling to the end has to show the tail, not an ellipsis.
+  const first = joined(d.feed(''));
+  assert.match(first, /instructions \d+-\d+ of \d+/, 'the operator is told the question continues');
+  for (let index = 0; index < 20; index++) d.feed('\x1b[6~');
+  const tail = joined(d.rendered());
+  // Rejoin the wrapped lines: the characters were never dropped, only moved to the next line.
+  const body = tail.split('\n').filter(line => /^\S/.test(line) && !line.startsWith('>')).join('');
+  assert.ok(body.includes(sessionId), `every character of the long id is reachable by scrolling: ${body}`);
+  assert.ok(body.includes('ended'), 'and so is the end of the sentence');
+});
+
+test('a pasted exact sentence reaches the domain byte-identically, which is the whole gate', async t => {
+  const expected = `I confirm coordinator ${'a'.repeat(64)} ended`;
+  const d = await dialog();
+  d.feed(`${PASTE_START}${expected}${PASTE_END}`);
+  d.feed('\r');
+  const { ENDED_WORDING } = await import('../dist/adoption.js');
+  assert.equal(d.settled().value, expected, 'no normalization happened in the dialog');
+  assert.equal(d.settled().value, ENDED_WORDING('a'.repeat(64)), 'and the value is exactly what the domain compares against');
+});
+
+test('the same paste with one added space is refused by the domain comparison, unchanged', async t => {
+  const { ENDED_WORDING } = await import('../dist/adoption.js');
+  const d = await dialog();
+  d.feed(`${PASTE_START}${ENDED_WORDING('session-1')} ${PASTE_END}`);
+  d.feed('\r');
+  assert.equal(d.settled().value.endsWith(' '), true, 'the trailing space survived, as it must');
+  assert.notEqual(d.settled().value, ENDED_WORDING('session-1'), 'so the exact comparison still fails');
+});
+
 // ---- routing contract ------------------------------------------------------------------------------
 
 test('a host with no custom surface is a named refusal, never a placeholder question', async t => {
