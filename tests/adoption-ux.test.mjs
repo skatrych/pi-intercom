@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { ENDED_WORDING, declarationEvidence, leftUnchanged, parseClaim } from '../dist/adoption.js';
+import { AdoptionInputCaptureFailure, ENDED_WORDING, declarationEvidence, leftUnchanged, parseClaim } from '../dist/adoption.js';
 import { patchCoordinatorEntry } from '../dist/config.js';
 import { IDS } from './fixtures/adoption-fixture.mjs';
 import { fixture } from './fixtures/adoption-support.mjs';
@@ -311,6 +311,66 @@ test('AC5 a fresh invocation asks every gate again from a blank field', async t 
   } finally { await f.dispose(); }
 });
 
+// ---- confirmations whose answer cannot be read name their step (MINOR 1) ---------------------------
+
+/** A host surface whose yes/no cannot be read: the transport framing itself is broken. */
+function brokenConfirm(kindToBreak, answer = 'confirm') {
+  const scripted = answers({ [kindToBreak]: answer });
+  const ui = {
+    input: options => scripted.ui.input(options),
+    confirm: async options => {
+      scripted.prompts.push({ kind: options.kind, prompt: options.prompt });
+      if (options.kind !== kindToBreak) return answer === 'confirm';
+      throw new AdoptionInputCaptureFailure('a bracketed paste never completed');
+    },
+  };
+  return { ui, prompts: scripted.prompts };
+}
+
+for (const [kind, step] of [['boardInitialize', 'first-board initialization'], ['firstCoordinatorDeclaration', 'first-coordinator declaration']]) {
+  test(`a capture failure during the ${kind} decision names that step instead of a generic host error`, async t => {
+    const f = await fixture(kind === 'boardInitialize' ? { noBoard: true } : { self: true });
+    try {
+      const broken = brokenConfirm(kind);
+      f.context.ui = broken.ui;
+      const before = await surface(f);
+      const result = await f.workflow().run(f.context, 'adopt');
+      assert.equal(result.code, 'CONFIRMATION', text(result));
+      assert.ok(text(result).includes(step), `the refusal must name the step: ${text(result)}`);
+      assert.ok(/could not be read/i.test(text(result)), 'and say the answer was unreadable');
+      assert.notEqual(result.code, 'HOST', 'never an unattributed host failure');
+      if (kind === 'boardInitialize') {
+        assert.equal(await stat(f.configPath()).then(() => true, () => false), false, 'a declined board creates no board');
+      } else {
+        assert.equal(await stat(f.claimPath()).then(() => true, () => false), false, 'an unreadable declaration decision creates no claim');
+        assert.equal((await surface(f)).commits, before.commits, 'and commits nothing');
+      }
+      assert.equal(f.state.ready, false, 'action readiness stays closed');
+    } finally { await f.dispose(); }
+  });
+}
+
+test('a capture failure during the exact-transition decision names that step', async t => {
+  const f = await fixture();
+  try {
+    const scripted = answers();
+    const ui = {
+      input: options => scripted.ui.input(options),
+      confirm: async options => {
+        scripted.prompts.push({ kind: options.kind, prompt: options.prompt });
+        if (options.kind === 'adoptTransition') throw new AdoptionInputCaptureFailure('a bracketed paste never completed');
+        return true;
+      },
+    };
+    f.context.ui = ui;
+    const before = await surface(f);
+    const result = await f.workflow().run(f.context, 'adopt');
+    assert.equal(result.code, 'CONFIRMATION', text(result));
+    assert.ok(text(result).includes('exact transition'), text(result));
+    assert.equal((await surface(f)).commits, before.commits, 'no commit is attempted on an unreadable decision');
+  } finally { await f.dispose(); }
+});
+
 test('AC6 exact wording and valid evidence still complete the adoption', async t => {
   const f = await fixture();
   try {
@@ -497,6 +557,70 @@ test('AC9 a rename names source and destination, and a staged-and-modified path 
     assert.match(reported, /staged index content: [^\n]*notes\.md/, 'a newly added path is index content');
     assert.match(reported, /tracked worktree changes: [^\n]*notes\.md/, 'and the same path is also reported as worktree work');
     assert.ok(!reported.includes('untracked content:'), 'nothing here is untracked, so nothing may be called untracked');
+  } finally { await f.dispose(); }
+});
+
+test('AC9 exotic path names are classified and reported exactly, never reclassified', async t => {
+  const f = await fixture();
+  try {
+    const TAB = String.fromCharCode(9), NL = String.fromCharCode(10), QUOTE = String.fromCharCode(34);
+    const exotic = [
+      'a directory with spaces/two  spaces.md',
+      'ünïcøde-目录.md',
+      `tab${TAB}name.md`,
+      `quote${QUOTE}name.md`,
+      `newline${NL}name.md`,
+    ];
+    await mkdir(path.join(f.home, 'a directory with spaces'), { recursive: true });
+    for (const name of exotic) await writeFile(path.join(f.home, name), 'untracked\n');
+    const reported = text(await f.workflow().run(f.context, 'adopt'));
+    const list = reported.match(/untracked content: ([^\u2014\n]+)/)[1].trim();
+    // The display form escapes control characters, quotes and backslashes; decoding it must return exactly
+    // the paths that exist. Decoding the documented rendering is the oracle here, never a re-encoding.
+    const backslash = String.fromCharCode(92);
+    const decode = value => value.replace(new RegExp(`${backslash}${backslash}x([0-9a-f]{2})`, 'g'), (_all, hex) => String.fromCharCode(parseInt(hex, 16)));
+    const listed = list.split(', ').map(decode);
+    for (const name of exotic) assert.ok(listed.includes(name), `round-trip lost ${JSON.stringify(name)}: ${JSON.stringify(list)}`);
+    assert.equal(listed.length, exotic.length, 'one reported entry per real path: nothing was split into invented filenames');
+    assert.ok(!/[\x00-\x1f]/.test(list), 'a control character is never emitted raw, which would break one-line-per-fact');
+    assert.ok(!reported.includes('tracked worktree changes:'), 'none of this is tracked, so none of it may be called a tracked change');
+    assert.ok(!reported.includes('staged index content:'), 'and none of it is index content');
+  } finally { await f.dispose(); }
+});
+
+test('AC9 an exotic path in each real category keeps its own category', async t => {
+  const f = await fixture();
+  try {
+    const TAB = String.fromCharCode(9);
+    await writeFile(path.join(f.home, 'staged ünïcøde.md'), 'index content\n');
+    await f.gitOk(['add', 'staged ünïcøde.md']);
+    const tracked = `tracked${TAB}tab.md`;
+    await writeFile(path.join(f.home, tracked), 'committed\n');
+    await f.gitOk(['add', '--', tracked]);
+    await f.gitOk(['-c', 'user.email=fixture@example', '-c', 'user.name=fixture', 'commit', '-q', '--only', tracked, '-m', 'fixture: tracked exotic path']);
+    await writeFile(path.join(f.home, tracked), 'committed, then modified\n');
+    const reported = text(await f.workflow().run(f.context, 'adopt'));
+    assert.match(reported, /staged index content:/);
+    assert.ok(reported.includes('staged ünïcøde.md'), 'the index entry is named in its own category');
+    assert.match(reported, /tracked worktree changes:/);
+    assert.ok(!reported.includes('untracked content:'), 'neither of these is untracked, so neither may be reported as untracked');
+  } finally { await f.dispose(); }
+});
+
+test('AC6 a self board naming this session at a different port refuses instead of declaring', async t => {
+  const f = await fixture({ self: true });
+  try {
+    const before = await surface(f);
+    const entry = (await f.board.parsed()).agents.find(agent => agent.coordinator);
+    const other = f.track(await f.listen(0, async () => { throw new Error('no worker traffic in this fixture'); }, () => ({ version: 1, sessionId: f.id })));
+    await f.board.write((await f.board.read()).replace(String(entry.port), String(other.port)));
+    const result = await f.workflow().run(f.context, 'adopt');
+    assert.equal(result.code, 'IDENTITY', text(result));
+    assert.match(text(result), /the pair is not verified/);
+    assert.deepEqual(f.ui.prompts.map(prompt => prompt.kind), [], 'no declaration is offered for an unverified pair');
+    assert.equal(await stat(f.claimPath()).then(() => true, () => false), false, 'no claim is written');
+    assert.equal((await surface(f)).commits, before.commits, 'nothing is committed');
+    assert.equal(f.state.ready, false, 'action readiness stays closed');
   } finally { await f.dispose(); }
 });
 

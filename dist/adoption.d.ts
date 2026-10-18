@@ -243,6 +243,13 @@ export declare class AdoptionWorkflow {
     /** One captured text answer, or a refusal that names the step. A malformed paste is never a candidate answer. */
     private capture;
     /**
+     * One yes/no decision, with the same named failure mapping as `capture`. Without it a malformed paste
+     * during a confirmation escapes as an unattributed `HOST` failure, and the operator loses the one thing
+     * ADR 0009-B requires: which step could not be read. A capture failure is never read as "No" either —
+     * declining is a decision, an unreadable answer is not.
+     */
+    private confirmGate;
+    /**
      * AC1–AC6. Inside one all-writer transaction, in this order: re-probe, prepare and commit the intent
      * record, replace exactly the two coordinator tokens, publish atomically, then write and commit the
      * active record and promote this running session. Any failure is phase-specific, keeps action
