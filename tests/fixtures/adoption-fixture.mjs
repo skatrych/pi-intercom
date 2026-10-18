@@ -277,10 +277,14 @@ export async function createFixture(options = {}) {
 
 /** A mock of the supported Pi dialog surface. Answers are keyed by prompt kind, never by call order. */
 /**
- * A controllable UI that records every prompt's visible text. A decision carries a stable `kind`, so
- * answers are routed by identity rather than by prompt text, and one declined decision can be isolated.
- * There are no free-form arguments: identity, ports, paths, confirmation, and outcomes cannot be supplied
- * or overridden — the only inputs are which decision is answered and how.
+ * A controllable UI that records the prompt *string* the workflow passed, keyed by a stable decision
+ * `kind`. That proves the workflow constructed a question with the expected content and routed answers
+ * by identity rather than call order — it proves nothing about a terminal. Whether text actually
+ * reaches the screen, and whether a paste keeps its bytes, belong to `adoption-ui.test.mjs`, which
+ * drives the real dialog and reads its real rendered lines.
+ *
+ * There are no free-form arguments: identity, ports, paths, confirmation, and outcomes cannot be
+ * supplied or overridden — the only inputs are which decision is answered and how.
  */
 export function mockUi(answers = {}) {
   const prompts = [];
