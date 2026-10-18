@@ -167,8 +167,11 @@ async function boundaryFixture(t, options = {}) {
 }
 const statusMessage = { version: 1, from: IDS.workerOne, to: IDS.fresh, kind: 'status', payload: { port: 12345, busy: false } };
 
-test('ordinary admission prefix closes BEFORE held release when the current pair is foreign', { timeout: 15000 }, async t => {
-  const fault = 'foreign';
+// Ordinary admission error origins are distinct: a missing config file (ENOENT), an unreadable one
+// (EACCES from the store read), an unusable schema, and a foreign current pair. Each must notify
+// `authority-refused` synchronously while the same update's release is still held. Malformed JSON is
+// not repeated here; it has real publisher coverage below and at the startup writer.
+for (const fault of ['missing', 'unreadable', 'schema', 'foreign']) test(`ordinary admission prefix closes BEFORE held release: ${fault}`, { timeout: 15000 }, async t => {
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   await saveWorkerReport(f.home, prior); c.pauseReport = true;
   const oldReport = b.track(r.receive({ ...statusMessage, kind: 'report', payload: payloads.report[1] })); await b.reportGate.reached;
@@ -177,7 +180,6 @@ test('ordinary admission prefix closes BEFORE held release when the current pair
   const pending = b.track(r.receive(statusMessage)); await b.readGate.reached;
   if (fault === 'missing') await unlink(r.store.file);
   if (fault === 'unreadable') c.readError = Object.assign(Error('fixture read EACCES'), { code: 'EACCES' });
-  if (fault === 'JSON') await f.board.write('{malformed');
   if (fault === 'schema') await f.board.write('{"version":2}');
   if (fault === 'foreign') { const config = JSON.parse(before); config.agents[0].sessionId = 'different-coordinator'; await f.board.write(JSON.stringify(config)); }
   b.readGate.release(); await b.releaseGate.reached;
@@ -185,7 +187,7 @@ test('ordinary admission prefix closes BEFORE held release when the current pair
   assert.equal(c.mutations, 0); assert.equal(c.renames, swaps); assert.deepEqual(await readWorkerReports(f.home, [IDS.workerOne]), [prior]);
   assert.ok(c.phases.some(p => p.phase === 'authority-refused' && p.ready === false));
   c.readError = undefined; await f.board.write(before); c.holdRelease = false; b.releaseGate.release();
-  await assert.rejects(pending, error => fault === 'missing' ? error.code === 'ENOENT' : fault === 'unreadable' ? error.code === 'EACCES' : fault === 'JSON' ? error instanceof SyntaxError : /config|coordinator permission/.test(String(error)));
+  await assert.rejects(pending, error => fault === 'missing' ? error.code === 'ENOENT' : fault === 'unreadable' ? error.code === 'EACCES' : /config|coordinator permission|schema|version/.test(String(error)));
   assert.equal((await r.adoptCoordinator(f.context, 'adopt')).ok, true);
   b.reportGate.release(); await assert.rejects(oldReport, /ADOPTION_NOT_READY/);
   assert.equal(f.messages.length, 0); assert.equal(await f.board.read(), before); assert.deepEqual(await readWorkerReports(f.home, [IDS.workerOne]), [prior]);
@@ -215,8 +217,9 @@ test('final store authority closes BEFORE temp cleanup when the newest claim is 
   assert.equal((await r.adoptCoordinator(f.context, 'adopt')).ok, true);
 });
 
-test('inside-lock claim admission refuses BEFORE mutator/release when the claim is malformed', async t => {
-  const fault = 'claim-malformed';
+// Claim-history admission inside the held lock: absent bytes, malformed bytes, a directory where the
+// claim file belongs, and an unverifiable history query are four distinct refusals.
+for (const fault of ['claim-missing', 'claim-malformed', 'claim-directory', 'query']) test(`inside-lock claim admission refuses BEFORE mutator/release: ${fault}`, async t => {
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   const raw = await f.claim.read(), before = await f.board.read(), swaps = c.renames, oldGit = process.env.GIT_DIR;
   t.after(() => { if (oldGit === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = oldGit; });
@@ -233,8 +236,9 @@ test('inside-lock claim admission refuses BEFORE mutator/release when the claim 
   await f.claim.write(raw); c.holdRelease = false; b.releaseGate.release(); await assert.rejects(pending, /ADOPTION_NOT_READY/);
 });
 
-test('ordinary acquisition authority-path refusal signals synchronously for a config symlink', async t => {
-  const fault = 'config-symlink';
+// Acquisition-path authority refusal: an aliased authority root, a config symlink, a board path of the
+// wrong type, and a failing authority inspection are distinct branches of the same synchronous signal.
+for (const fault of ['alias', 'config-symlink', 'board-type', 'inspection']) test(`ordinary acquisition authority-path refusal signals synchronously: ${fault}`, async t => {
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   const root = r.store.root, file = r.store.file, before = await f.board.read(), original = syncFs.lstatSync;
   let inspect = false;
@@ -278,11 +282,14 @@ test('direct store preserves the originating foreign-pair refusal when the guard
 
 // Negative classification only: an authority-enabled epoch stays open for each distinct non-authority
 // error site (caller guard, mutator, post-mutator validation, temporary file, rename, lock contention,
-// lock I/O, lost ownership token, release). Each cell pins the error it actually produces, so a cell
-// cannot pass by hitting an unrelated fault.
+// lock I/O, lost ownership token, release). Each cell pins the exact error object it must produce, so
+// a cell cannot pass on another fault's error: release injects its own distinct error into the owner
+// file unlink, and only that error satisfies its assertion.
 for (const fault of ['lifecycle', 'mutator', 'post-schema', 'temp', 'rename', 'contention', 'lock-io', 'token', 'release']) test(`non-authority ${fault} failure does NOT close an authority-enabled epoch`, async t => {
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   const before = await f.board.read(), epoch = r.actionEpoch(), marker = Object.assign(Error('invalid config schema/version (fixture non-authority EACCES)'), { code: 'EACCES' });
+  const releaseError = Object.assign(Error('fixture release failure (non-authority EACCES)'), { code: 'EACCES' });
+  let released = false;
   const open = fs.open, unlinkFile = fs.unlink;
   t.after(() => { fs.open = open; fs.unlink = unlinkFile; syncBuiltinESMExports(); });
   if (fault === 'temp') c.tempError = marker;
@@ -290,14 +297,15 @@ for (const fault of ['lifecycle', 'mutator', 'post-schema', 'temp', 'rename', 'c
   if (fault === 'contention') await mkdir(r.store.lockDirectory);
   if (fault === 'lock-io') fs.open = async (...args) => { if (String(args[0]).endsWith('/config.lock/owner.json')) throw marker; return open(...args); };
   if (fault === 'token') c.stage = async () => { const file = path.join(r.store.lockDirectory, 'owner.json'); const owner = JSON.parse(await readFile(file, 'utf8')); await writeFile(file, JSON.stringify({ ...owner, token: 'foreign-fixture-token' })); };
-  if (fault === 'release') fs.unlink = async (...args) => { if (String(args[0]).endsWith('/config.lock/owner.json')) throw marker; return unlinkFile(...args); };
+  if (fault === 'release') fs.unlink = async (...args) => { if (String(args[0]).endsWith('/config.lock/owner.json')) { released = true; throw releaseError; } return unlinkFile(...args); };
   syncBuiltinESMExports();
   const guard = r.configGuard(r.validity(), epoch, fault === 'lifecycle' ? () => { throw marker; } : undefined);
-  const injected = ['lifecycle', 'mutator', 'temp', 'rename', 'lock-io', 'release'].includes(fault);
-  await assert.rejects(r.store.update(IDS.fresh, config => { if (fault === 'mutator' || fault === 'release') throw marker; if (fault === 'post-schema') config.version = 2; else config.multiplexer = 'none'; }, guard), error => injected ? error === marker
+  const expected = { lifecycle: marker, mutator: marker, temp: marker, rename: marker, 'lock-io': marker, release: releaseError }[fault];
+  await assert.rejects(r.store.update(IDS.fresh, config => { if (fault === 'mutator' || fault === 'release') throw marker; if (fault === 'post-schema') config.version = 2; else config.multiplexer = 'none'; }, guard), error => expected !== undefined ? error === expected
     : fault === 'post-schema' ? /invalid config schema\/version/.test(String(error))
       : fault === 'contention' ? /lock is held by another process/.test(String(error))
         : /ownership is uncertain/.test(String(error)));
+  if (fault === 'release') assert.equal(released, true, 'the release injection must actually be reached');
   assert.equal(r.coordinatorActionReady(), true); assert.equal(r.actionEpoch(), epoch); assert.equal(await f.board.read(), before);
   assert.ok(!c.phases.some(p => p.phase === 'authority-refused'));
 });
@@ -449,6 +457,23 @@ for (const fault of ['missing', 'coordinator', 'job', 'port', 'directory']) test
   await assert.rejects(b.run(), /invalid handoff protocol\/state/);
   const worker = (await f.board.parsed()).agents.find(a => a.sessionId === IDS.workerOne); assert.equal(worker.handoff, undefined);
   assert.equal(r.coordinatorActionReady(), true); assert.equal(r.actionEpoch(), epoch);
+});
+
+// Second target site: the report update calls targetForUpdate immediately before the summary is
+// persisted (src/handoff.ts:250-255), a separate call from transition's. One registered case, one fresh
+// boundary per predicate (a refused report fails its job, so state cannot be reused), and the staged
+// summary must not be present in the config that was being mutated.
+test('handoff report target retains every targetForUpdate predicate before the summary is saved', { timeout: 40000 }, async t => {
+  for (const fault of ['missing', 'coordinator', 'job', 'port', 'directory']) {
+    const b = await handoffBoundary(t, 'report'), { runtime: r, c, f } = b, epoch = r.actionEpoch();
+    c.mutateHook = config => { const a = config.agents.find(a => a.sessionId === IDS.workerOne); if (fault === 'missing') config.agents = config.agents.filter(x => x !== a); if (fault === 'coordinator') a.coordinator = true; if (fault === 'job') a.closeJob.jobId = 'different-job'; if (fault === 'port') a.port++; if (fault === 'directory') a.projectDirectory = '.'; };
+    await assert.rejects(b.run(), /invalid handoff protocol\/state/, fault);
+    const staged = c.mutatedConfigs[0].agents.find(a => a.sessionId === IDS.workerOne);
+    assert.ok(staged === undefined || staged.handoff === undefined, `${fault}: a refused summary must not enter the mutating config`);
+    assert.equal((await f.board.parsed()).agents.find(a => a.sessionId === IDS.workerOne).handoff, undefined, fault);
+    assert.notEqual((await f.board.parsed()).agents.find(a => a.sessionId === IDS.workerOne).closeJob?.state, 'awaiting_settlement', fault);
+    assert.equal(r.coordinatorActionReady(), true, fault); assert.equal(r.actionEpoch(), epoch, fault);
+  }
 });
 
 test('nested unrelated handoff full guard stays full inside synchronous store mutation; throw leaks no mode', async t => {
