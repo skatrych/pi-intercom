@@ -17,6 +17,26 @@ export declare const CLAIM_FILE = "coordinator-claim.md";
 export declare const CONFIG_DIRECTORY = ".pi-intercom";
 export declare const REBRIEF_SOURCE = "handoff.md (open assignments)";
 export declare const ENDED_WORDING: (sessionId: string) => string;
+/**
+ * A malformed or incomplete bracketed paste is a capture failure, never an answer. The adapter reports
+ * it instead of fabricating, normalizing, or auto-submitting a candidate; the domain names the step.
+ */
+export declare class AdoptionInputCaptureFailure extends Error {
+    constructor(message?: string);
+}
+/** The captured Pi UI cannot render a durable visible question. Fail closed; never open an invisible input. */
+export declare class AdoptionHostUiUnavailable extends Error {
+    constructor(message: string);
+}
+/** Named human-gate steps. Every refusal names one of these, so an invisible question cannot be guessed at. */
+export declare const RECORD_STEP = "authorising record";
+export declare const ENDED_STEP = "ended-wording confirmation";
+export declare const DISCONNECTED_WARNING = "A disconnected or unknown endpoint probe is not evidence that a coordinator terminated.";
+/** Generated first-declaration evidence (issue #9): never a typed reference, never an adoption wording. */
+export interface DeclarationEvidence {
+    record: string;
+    wording: string;
+}
 export type ExitCode = 0 | 1 | 2;
 export type ResultCode = 'OK' | 'DECLARED' | 'CLAIM_OK' | 'RECOVERED' | 'AUTH' | 'MODE' | 'TRUST' | 'SESSION_CHANGED' | 'BUSY' | 'BOARD_COUNT' | 'BOARD_PATH' | 'NO_BOARD' | 'CONFIG' | 'RECORD' | 'CLAIM_OTHER' | 'CLAIM_MISMATCH' | 'ADOPTION_REQUIRED' | 'SESSION_UNPERSISTED' | 'IDENTITY' | 'SESSION_COLLISION' | 'PORT_COLLISION' | 'OLD_CONNECTED' | 'CONFIRMATION' | 'CANCELLED' | 'STALE_PREVIEW' | 'LOCKED' | 'GIT' | 'PUBLISH' | 'RECOVERY_REQUIRED' | 'ADOPTION_NOT_READY' | 'PROMOTION_PENDING' | 'BACKEND' | 'HOST' | 'USAGE';
 export interface Result {
@@ -214,8 +234,14 @@ export declare class AdoptionWorkflow {
      * or model text can supply them, and no decline produces a write.
      */
     private humanAdoptionDecision;
-    /** AC4: the authority reference and the exact ended wording, or a named refusal. */
-    private askAuthority;
+    /**
+     * AC4: the typed authority reference and the exact ended wording, or a named refusal. Issue #9: every
+     * refusal names its step, a failed ended wording repeats the complete expected sentence, and nothing
+     * here can be reached by a first-declaration path. The exact comparison is never normalized.
+     */
+    private askAdoptionAuthority;
+    /** One captured text answer, or a refusal that names the step. A malformed paste is never a candidate answer. */
+    private capture;
     /**
      * AC1–AC6. Inside one all-writer transaction, in this order: re-probe, prepare and commit the intent
      * record, replace exactly the two coordinator tokens, publish atomically, then write and commit the
@@ -241,11 +267,31 @@ export declare class AdoptionWorkflow {
      * bytes is preserved unless it is recognized committed evidence, and never overwritten silently.
      */
     private writeCommit;
-    /** Refuse unsafe layout, a non-repository home, a non-empty index, or unrelated worktree changes. */
+    /**
+     * Refuse unsafe layout, a non-repository home, a non-empty index, or unrelated worktree changes.
+     * A first declaration may proceed with unrelated untracked content outside the protected board
+     * surface (issue #9); every other gate, and every staged, tracked, or unresolved condition, is
+     * refused by both policies.
+     */
     private assertGitSafe;
-    private trackedPaths;
-    /** Paths git reports as changed; no failed git query counts as an empty result. */
-    private dirtyPaths;
+    /** Verified repository state or a failure: no incomplete query ever becomes an empty/clean result. */
+    private complete;
+    /** Paths git reports as changed, NUL-separated and category-accurate. */
+    private blockers;
+    /**
+     * `git status --porcelain=v1 -z` entries are `<XY><space><path>`, NUL terminated, with a rename or
+     * copy entry followed by its source path as the next token. With `-z` git never quotes, so spaces,
+     * newlines, and non-ASCII names stay single entries instead of being split into invented filenames.
+     */
+    private statusEntries;
+    /** NUL-delimited path list from a path-oriented query. */
+    private pathList;
+    /**
+     * Bounded, no-follow inspection of the protected board namespace, used only by the first-declaration
+     * policy. Git status never reports ignored content, so the filesystem is the only evidence here. An
+     * unknown, unsafe, or un-listable entry is a named refusal: a partial inspection never approves it.
+     */
+    private inspectBoardNamespace;
     private unresolvedOperation;
     /** `git commit --only <claim>` with argv, then verify HEAD, its changed-path set, and the bytes. */
     private commitClaim;
@@ -278,6 +324,27 @@ export declare function bootClaimEvidence(input: {
     ready: boolean;
     detail: string;
 }>;
+/** The one generated-evidence template (ADR 0009-A). Bounded: the full board root stays in the claim, the authority record carries its labelled SHA256. */
+export declare function declarationEvidence(boardRoot: string, identity: ResolvedIdentity): DeclarationEvidence;
+export declare function boardInitializePrompt(home: string, identity: ResolvedIdentity): string;
+export declare function firstDeclarationPrompt(home: string, identity: ResolvedIdentity): string;
+export declare function authorityRecordPrompt(home: string, context: string[]): string;
+export declare function endedWordingPrompt(target: {
+    sessionId: string;
+    port: number;
+}, context: string[]): string;
+/** The complete, unabbreviated refusal text for a failed ended-wording answer. Never routed through `reason()`. */
+export declare function endedWordingFailure(target: {
+    sessionId: string;
+    port: number;
+}, detail: string): string;
+/**
+ * The protected board surface, relative to the canonical projects-home Git root: exactly the root claim
+ * file and the board/config namespace, including a foreign directory that obstructs them. Segment-aware:
+ * `.pi-intercom-backup/` and `coordinator-claim.md.bak` are unrelated, `.pi-intercom/config.json` and
+ * `coordinator-claim.md/foreign` are protected.
+ */
+export declare function protectedSurface(relative: string): boolean;
 /**
  * A named refusal raised at the call site that knows which step failed. Codes are never inferred from
  * error prose: an unrelated internal error must not be reported to an operator as a specific safety
@@ -288,3 +355,8 @@ export declare class AdoptionFailure extends Error {
     constructor(code: ResultCode, message: string);
 }
 export {};
+/**
+ * `git status --porcelain=v1` line parsing used to live here. Issue #9 replaced it with the NUL-separated,
+ * category-accurate `statusEntries`/`blockers` readers: a line-oriented parse can split a path containing
+ * a newline into invented filenames and reports a staged-and-modified path as one category only.
+ */
