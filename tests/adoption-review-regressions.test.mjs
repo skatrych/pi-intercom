@@ -276,8 +276,11 @@ test('direct store preserves the originating foreign-pair refusal when the guard
   assert.equal(mutated, false); assert.equal(notified, guardKind === 'absent' ? 0 : 1);
 });
 
-test('non-authority mutator failure does NOT close tenure', async t => {
-  const fault = 'mutator';
+// Negative classification only: an authority-enabled epoch stays open for each distinct non-authority
+// error site (caller guard, mutator, post-mutator validation, temporary file, rename, lock contention,
+// lock I/O, lost ownership token, release). Each cell pins the error it actually produces, so a cell
+// cannot pass by hitting an unrelated fault.
+for (const fault of ['lifecycle', 'mutator', 'post-schema', 'temp', 'rename', 'contention', 'lock-io', 'token', 'release']) test(`non-authority ${fault} failure does NOT close an authority-enabled epoch`, async t => {
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   const before = await f.board.read(), epoch = r.actionEpoch(), marker = Object.assign(Error('invalid config schema/version (fixture non-authority EACCES)'), { code: 'EACCES' });
   const open = fs.open, unlinkFile = fs.unlink;
@@ -290,7 +293,11 @@ test('non-authority mutator failure does NOT close tenure', async t => {
   if (fault === 'release') fs.unlink = async (...args) => { if (String(args[0]).endsWith('/config.lock/owner.json')) throw marker; return unlinkFile(...args); };
   syncBuiltinESMExports();
   const guard = r.configGuard(r.validity(), epoch, fault === 'lifecycle' ? () => { throw marker; } : undefined);
-  await assert.rejects(r.store.update(IDS.fresh, config => { if (fault === 'mutator' || fault === 'release') throw marker; if (fault === 'post-schema') config.version = 2; else config.multiplexer = 'none'; }, guard));
+  const injected = ['lifecycle', 'mutator', 'temp', 'rename', 'lock-io', 'release'].includes(fault);
+  await assert.rejects(r.store.update(IDS.fresh, config => { if (fault === 'mutator' || fault === 'release') throw marker; if (fault === 'post-schema') config.version = 2; else config.multiplexer = 'none'; }, guard), error => injected ? error === marker
+    : fault === 'post-schema' ? /invalid config schema\/version/.test(String(error))
+      : fault === 'contention' ? /lock is held by another process/.test(String(error))
+        : /ownership is uncertain/.test(String(error)));
   assert.equal(r.coordinatorActionReady(), true); assert.equal(r.actionEpoch(), epoch); assert.equal(await f.board.read(), before);
   assert.ok(!c.phases.some(p => p.phase === 'authority-refused'));
 });
@@ -329,8 +336,9 @@ test('Windows simulated retry repeats local/store proof before another rename; c
   assert.equal(await f.board.read(), before); c.holdCleanup = false; b.cleanupGate.release(); await assert.rejects(pending, /ADOPTION_NOT_READY/);
 });
 
-test('ordinary runtime status writer carries refusal phases', { timeout: 15000 }, async t => {
-  const writer = 'status';
+// One representative per ordinary publisher: each closes authority synchronously while its own lock
+// release is still held, rather than at later runtime shutdown.
+for (const writer of ['status', 'tool', 'configure', 'remove', 'metadata']) test(`ordinary runtime ${writer} publisher carries refusal phases before held release`, { timeout: 15000 }, async t => {
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   if (writer === 'metadata') await r.store.update(IDS.fresh, config => { config.agents[0].dashboardPort = 11001; }, r.configGuard(r.validity(), r.actionEpoch()));
   const before = await f.board.read(), swaps = c.renames; c.mutations = 0; c.pauseRead = true; c.holdRelease = true;
@@ -382,6 +390,8 @@ async function handoffBoundary(t, operation) {
   b.run = () => operation === 'request' ? b.runtime.tool('close_worker', { to: 'Builder' }) : operation === 'transition' ? h.transition(h.jobs.get(IDS.workerOne), 'awaiting_handoff') : h.receive('handoff_report', IDS.workerOne, { jobId: h.jobs.get(IDS.workerOne).job.jobId, instanceId: 'fixture-instance', summary: 'public fixture summary' });
   return b;
 }
+// Surviving transition-site cell: at mutation timing the mutator body itself re-enters targetForUpdate,
+// so this is the in-mutator job-predicate fence, not the guard wiring (proved separately below).
 for (const fault of ['disposed', 'ended', 'map', 'deadline']) test(`handoff transition mutation retains local ${fault} fence`, { timeout: 15000 }, async t => {
   const operation = 'transition', timing = 'mutation';
   const b = await handoffBoundary(t, operation), { runtime: r, c, f } = b, h = r.handoff, gate = barrier();
@@ -399,6 +409,38 @@ for (const fault of ['disposed', 'ended', 'map', 'deadline']) test(`handoff tran
   assert.deepEqual(after.agents.filter(a => a.sessionId !== IDS.workerOne), before.agents.filter(a => a.sessionId !== IDS.workerOne));
   if (operation === 'report' && timing === 'mutation') assert.equal(c.mutatedConfigs[0].agents.find(a => a.sessionId === IDS.workerOne).handoff, undefined);
   if (operation === 'transition') assert.equal(p.job.state, timing === 'staging' ? 'awaiting_handoff' : 'requested'); // prior admitted in-memory mutation is not rolled back
+});
+
+// Each update site also passes its OWN guard to the store: request (src/handoff.ts:147-152), transition
+// (:118-123), report (:250-255). One guard proof per site, at the boundary that site's mutator body
+// cannot already refuse: request's mutator has no job predicate, so only its post-mutator guard check can
+// refuse; transition re-enters targetForUpdate inside its mutator, so its queued pre-mutator guard check
+// is the distinct one; report likewise, so its staging/final-rename guard check is used. The report
+// deadline predicate at that same boundary already has a surviving proof in tests/handoff.test.mjs
+// ('summary temporary-file sync crossing deadline cannot publish a late handoff or close').
+const HANDOFF_GUARD_SITES = [
+  ['request', 'mutation', ['disposed', 'ended', 'map', 'deadline']],
+  ['transition', 'queued', ['disposed', 'ended', 'map', 'deadline']],
+  ['report', 'staging', ['disposed', 'ended', 'map']],
+];
+for (const [operation, timing, faults] of HANDOFF_GUARD_SITES) for (const fault of faults) test(`handoff ${operation} ${timing} update-site guard retains local ${fault} fence`, { timeout: 15000 }, async t => {
+  const b = await handoffBoundary(t, operation), { runtime: r, c, f } = b, h = r.handoff, gate = barrier();
+  t.after(gate.release);
+  const before = await f.board.parsed(), epoch = r.actionEpoch(); let p;
+  const invalidate = () => { p = h.jobs.get(IDS.workerOne); if (fault === 'disposed') h.disposed = true; if (fault === 'ended') p.ended = true; if (fault === 'map') h.jobs.set(IDS.workerOne, { ...p }); if (fault === 'deadline') p.job.deadlineAt = '2000-01-01T00:00:00.000Z'; };
+  if (timing === 'queued') c.acquire = () => gate.wait();
+  if (timing === 'mutation') c.mutateHook = invalidate;
+  if (timing === 'staging') c.stage = invalidate;
+  const pending = b.track(b.run());
+  if (timing === 'queued') { await gate.reached; invalidate(); gate.release(); }
+  await assert.rejects(pending, /invalid handoff protocol\/state/);
+  const after = await f.board.parsed(), worker = after.agents.find(a => a.sessionId === IDS.workerOne);
+  assert.equal(worker.handoff, undefined, 'a refused update publishes no handoff summary');
+  assert.notEqual(worker.closeJob?.state, operation === 'request' ? 'requested' : operation === 'transition' ? 'awaiting_handoff' : 'awaiting_settlement');
+  assert.equal(r.coordinatorActionReady(), true); assert.equal(r.actionEpoch(), epoch); // local fence only: tenure stays open
+  assert.ok(!c.phases.some(e => e.phase === 'authority-refused'));
+  assert.deepEqual(after.agents.filter(a => a.sessionId !== IDS.workerOne), before.agents.filter(a => a.sessionId !== IDS.workerOne));
+  if (timing === 'queued') assert.equal(c.mutations, 0, 'a queued guard refusal stops before the mutator');
 });
 for (const fault of ['missing', 'coordinator', 'job', 'port', 'directory']) test(`handoff transition target retains ${fault} predicate before mutation`, async t => {
   const operation = 'transition';
@@ -501,6 +543,26 @@ test('fresh full proof detects a missing intent object without changing active b
   await assert.rejects(runtime.tool('list', {}), /ADOPTION_NOT_READY/);
 });
 
+// A readable intent object is not ancestry: shallow/graft/replace each break the merge-base check only.
+for (const damage of ['shallow', 'graft', 'replace']) test(`fresh full proof detects ${damage} intent ancestry without changing active bytes or anchor`, async t => {
+  const f = await fixture({ runtime: true }); t.after(f.dispose);
+  const runtime = await f.startRuntime(); assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
+  const raw = await f.claim.read(), record = parseClaim(raw), active = (await f.claim.log())[0];
+  assert.equal(committedActiveClaimMatches(f.home, raw), true);
+  if (damage === 'shallow') await writeFile(path.join(f.home, '.git/shallow'), `${active}\n`);
+  if (damage === 'graft') await writeFile(path.join(f.home, '.git/info/grafts'), `${active}\n`);
+  if (damage === 'replace') {
+    const tree = (await f.gitOk(['rev-parse', `${active}^{tree}`])).trim();
+    const replacement = (await f.gitOk(['commit-tree', tree, '-m', 'fixture parentless replacement'])).trim();
+    await f.gitOk(['replace', active, replacement]);
+  }
+  assert.equal(await f.claim.read(), raw);
+  await f.gitOk(['cat-file', '-e', record.intentCommit]); // the intent object itself is still readable
+  assert.equal(await f.claim.at(active), raw);            // and the newest committed bytes are unchanged
+  assert.equal(committedActiveClaimMatches(f.home, raw), false, 'ancestry, not object availability, is the broken predicate');
+  await assert.rejects(runtime.tool('list', {}), /ADOPTION_NOT_READY/);
+});
+
 test('newest committed exact restoration is current proof, not historical opening-commit equality', async t => {
   const f = await fixture({ runtime: true }); t.after(f.dispose);
   const runtime = await f.startRuntime(); assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
@@ -549,14 +611,113 @@ test('configured external Git directory with claim history is not nonrepo absenc
   assert.equal(mutated, false); assert.equal(await b.board.read(), before);
 });
 
-test('worker_status probe final return rejects a malformed newest claim with restored old bytes', async t => {
-  const f = await fixture({ runtime: true }); t.after(f.dispose); const gate = barrier();
-  const server = createServer(async (_request, response) => { await gate.wait(); response.end(JSON.stringify({ version: 1, sessionId: IDS.workerOne })); });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
-  const config = await f.board.parsed(); config.agents[1].port = server.address().port; await f.board.write(JSON.stringify(config));
-  const runtime = await f.startRuntime(); assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
-  const pending = runtime.tool('worker_status', { probe: true });
+// Absence is rediscovered on every update, across each layout Git itself discovers: ancestor `.git`
+// directory, `.git` worktree file, bare repository, damaged bare markers, and a configured external
+// context. The plain newly-initialized repository has a surviving proof in 'legacy absence is
+// rediscovered on the next reentrant update'; these five are separate discovery predicates.
+for (const layout of ['ancestor', 'worktree', 'bare', 'damaged-bare', 'context']) test(`NEXT ordinary update discovers newly appeared ${layout}`, async t => {
+  const f = await fixture(); t.after(f.dispose); await rm(path.join(f.home, '.git'), { recursive: true });
+  const home = path.join(f.home, 'nested'), board = path.join(home, '.pi-intercom'); await mkdir(board, { recursive: true }); await writeFile(path.join(board, 'config.json'), await f.board.read());
+  const store = new ConfigStore(home); await store.update(IDS.gone, config => { config.multiplexer = 'none'; }); const before = await readFile(store.file, 'utf8');
+  const oldDir = process.env.GIT_DIR; t.after(() => { if (oldDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = oldDir; });
+  if (layout === 'damaged-bare') await writeFile(path.join(home, 'HEAD'), 'ref: refs/heads/main\n');
+  else {
+    const repo = layout === 'ancestor' ? f.home : layout === 'context' ? path.join(f.home, 'external') : home; await mkdir(repo, { recursive: true });
+    const flags = layout === 'bare' ? ['--work-tree=' + home] : [];
+    await f.gitOk(['init', '-q', ...(layout === 'bare' ? ['--bare'] : layout === 'worktree' ? ['--separate-git-dir=' + path.join(f.home, 'metadata')] : [])], repo);
+    await f.gitOk(['config', 'user.name', 'Fixture'], repo); await f.gitOk(['config', 'user.email', 'fixture@example.invalid'], repo);
+    const file = path.join(layout === 'context' ? repo : home, 'coordinator-claim.md'), relative = path.relative(repo, file);
+    await writeFile(file, 'fixture claimed history\n'); await f.gitOk([...flags, 'add', '--', relative], repo); await f.gitOk([...flags, 'commit', '-qm', 'fixture established'], repo);
+    await f.gitOk([...flags, 'rm', '--', relative], repo); await f.gitOk([...flags, 'commit', '-qm', 'fixture deleted'], repo);
+    if (layout === 'context') process.env.GIT_DIR = path.join(repo, '.git');
+  }
+  await assert.rejects(store.update(IDS.gone, () => assert.fail('new context/history must be checked before mutating')), /ADOPTION_NOT_READY/);
+  assert.equal(await readFile(store.file, 'utf8'), before);
+});
+
+// No negative cache: an absence found once is re-discovered on the next call, and a repository that
+// appears afterwards is fail-closed uncertainty, never 'already known absent'.
+for (const layout of ['none', 'ancestor', 'worktree', 'bare', 'damaged-bare', 'context']) test(`uncached absence discovery: ${layout}`, async t => {
+  const f = await fixture(); t.after(f.dispose);
+  let home = f.home;
+  if (layout === 'ancestor') { home = path.join(f.home, 'app/web'); }
+  else {
+    await rm(path.join(f.home, '.git'), { recursive: true, force: true });
+    if (layout === 'worktree') await writeFile(path.join(home, '.git'), 'gitdir: /nonexistent-intercom-fixture\n');
+    if (layout === 'bare') {
+      await f.gitOk(['init', '--bare', '-q']);
+      await f.gitOk(['config', 'user.name', 'Fixture']); await f.gitOk(['config', 'user.email', 'fixture@example.invalid']);
+      await writeFile(path.join(home, 'empty-tree'), '');
+      const tree = (await f.gitOk(['hash-object', '-w', '-t', 'tree', path.join(home, 'empty-tree')])).trim();
+      const commit = (await f.gitOk(['commit-tree', tree, '-m', 'fixture bare history'])).trim();
+      await f.gitOk(['update-ref', 'HEAD', commit]);
+    }
+    if (layout === 'damaged-bare') await mkdir(path.join(home, 'objects'));
+  }
+  const priorGitDir = process.env.GIT_DIR;
+  if (layout === 'context') process.env.GIT_DIR = path.join(home, 'unavailable-git');
+  const original = cp.spawn; let children = 0;
+  cp.spawn = function (...args) { if (args[0] === 'git') children++; return original.apply(this, args); };
+  syncBuiltinESMExports();
+  t.after(() => { cp.spawn = original; syncBuiltinESMExports(); if (priorGitDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = priorGitDir; });
+  if (['worktree', 'damaged-bare', 'context'].includes(layout)) await assert.rejects(claimEvidenceEstablished(home), /ADOPTION_NOT_READY/);
+  else assert.equal(await claimEvidenceEstablished(home), false);
+  assert.equal(children, layout === 'none' ? 0 : 1);
+  if (layout === 'none') {
+    await f.gitOk(['init', '-q']);
+    await assert.rejects(claimEvidenceEstablished(home), /ADOPTION_NOT_READY/);
+    assert.equal(children, 1, 'new unborn repository is rediscovered/fail-closed, never cached absent');
+  }
+});
+
+// Name-casing is platform behaviour, not decoration: a POSIX comparison is case-sensitive, a simulated
+// Windows one is not, and indexed GIT_CONFIG_KEY_*/VALUE_* injection is context on both.
+for (const platform of ['linux', 'win32']) for (const variable of ['git_dir', 'GiT_DiR', 'git_config_key_0', 'GiT_CoNfIg_VaLuE_12', 'GiT_TrAcE']) test(`simulated ${platform} context-name casing: ${variable}`, async t => {
+  const f = await fixture(); t.after(f.dispose); await rm(path.join(f.home, '.git'), { recursive: true });
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform'), priorValue = process.env[variable], spawn = cp.spawn; let calls = 0;
+  try {
+    process.env[variable] = 'fixture-marker'; Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
+    cp.spawn = function (...args) { if (args[0] === 'git') calls++; return spawn.apply(this, args); }; syncBuiltinESMExports();
+    const relevant = /^(git_dir|git_config_(key|value)_\d+)$/i.test(variable);
+    if (platform === 'win32' && relevant) await assert.rejects(claimEvidenceEstablished(f.home), /ADOPTION_NOT_READY/);
+    else assert.equal(await claimEvidenceEstablished(f.home), false);
+    assert.equal(calls, platform === 'win32' && relevant ? 1 : 0); assert.equal(process.env[variable], 'fixture-marker');
+  } finally { Object.defineProperty(process, 'platform', descriptor); cp.spawn = spawn; syncBuiltinESMExports(); if (priorValue === undefined) delete process.env[variable]; else process.env[variable] = priorValue; }
+});
+
+// After-save re-checks the newest committed evidence, not merely the local epoch, which stays open here:
+// the report is saved and the notification is refused, never reported as delivered or unsaved.
+test('after-save notify freshly proves committed evidence while the local epoch stays open', async t => {
+  const f = await fixture({ runtime: true }); t.after(f.dispose); let armed = false;
+  const runtime = await f.startRuntime({ adoption: { projectsHome: f.home, rolesDirectory: path.join(f.home, 'roles'), listSessions: f.workflowOptions.listSessions,
+    reportPhase: async phase => { if (armed && phase === 'after-save') { armed = false; await damageAnchor(f, 'malformed-newest-restored'); } } } });
+  assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
+  await saveWorkerReport(f.home, prior); armed = true;
+  const response = await post(runtime, 'report');
+  assert.equal(response.status, 400, response.body);
+  assert.match(response.body, /Report stored; coordinator notification blocked\/not submitted/);
+  const reports = await readWorkerReports(f.home, [IDS.workerOne]);
+  assert.equal(reports[0].summary, payloads.report[1].summary, 'saved bytes are not rolled back');
+  assert.equal(f.messages.length, 0, 'a blocked notification is never a submitted turn');
+  assert.equal(runtime.coordinatorActionReady(), false, 'external evidence change closes the epoch');
+});
+
+for (const stage of ['snapshot', 'probe']) test(`worker_status ${stage} final return rejects a malformed newest claim with restored old bytes`, async t => {
+  const f = await fixture({ runtime: true }); t.after(f.dispose); const gate = barrier(); let runtime, armed = false;
+  if (stage === 'probe') {
+    const server = createServer(async (_request, response) => { await gate.wait(); response.end(JSON.stringify({ version: 1, sessionId: IDS.workerOne })); });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const config = await f.board.parsed(); config.agents[1].port = server.address().port; await f.board.write(JSON.stringify(config));
+  } else {
+    // Snapshot-only return is its own barrier: the page is built and proven before any probe exists.
+    const original = fs.open;
+    fs.open = async (...args) => { const handle = await original(...args); if (armed && String(args[0]) === runtime.store.file) { armed = false; await gate.wait(); } return handle; };
+    syncBuiltinESMExports(); t.after(() => { fs.open = original; syncBuiltinESMExports(); });
+  }
+  runtime = await f.startRuntime(); assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
+  armed = true;
+  const pending = runtime.tool('worker_status', { probe: stage === 'probe' });
   const refused = assert.rejects(pending, /ADOPTION_NOT_READY/); await gate.reached;
   await damageAnchor(f, 'malformed-newest-restored');
   gate.release(); await refused;
@@ -575,6 +736,27 @@ test('create_worker carries the admitted epoch through the runtime await', { tim
   const pending = runtime.tool('create_worker', { projectDirectory: 'app' });
   const refused = assert.rejects(pending, /ADOPTION_NOT_READY/); await gate.reached;
   await damageAnchor(f, 'malformed-newest-restored');
+  gate.release(); await refused; assert.equal(launches, 0);
+});
+
+// resume_worker has its own await chain after adoption: the resume preflight probe, then the project
+// directory TOCTOU check, then a fresh state read. No dispatch is authorized on a stale proof.
+for (const site of ['probe', 'directory']) for (const interruption of ['malformed-newest-restored', 'closed']) test(`resume_worker carries the admitted epoch across the ${site} await: ${interruption}`, { timeout: 15000 }, async t => {
+  const f = await fixture({ runtime: true }); t.after(f.dispose); const gate = barrier(); t.after(gate.release); let launches = 0, armed = false;
+  const runtime = await f.startRuntime({ launch: async () => { launches++; return { commandSubmitted: true }; }, probe: async () => { await gate.wait(); return { state: 'disconnected' }; } });
+  runtime.options.probe = f.probeWorker; // adoption keeps real probes; only the later resume awaits are held
+  assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
+  if (site === 'probe') runtime.options.probe = async () => { await gate.wait(); return { state: 'disconnected' }; };
+  else {
+    runtime.options.probe = async () => ({ state: 'disconnected' });
+    const original = fs.realpath;
+    fs.realpath = async (...args) => { const result = await original(...args); if (armed && String(args[0]) === path.join(f.home, 'app')) { armed = false; await gate.wait(); } return result; };
+    syncBuiltinESMExports(); t.after(() => { fs.realpath = original; syncBuiltinESMExports(); });
+    armed = true;
+  }
+  const pending = runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true });
+  const refused = assert.rejects(pending, /ADOPTION_NOT_READY/); await gate.reached;
+  if (interruption === 'closed') runtime.closeActionEpoch('fixture resume await'); else await damageAnchor(f, interruption);
   gate.release(); await refused; assert.equal(launches, 0);
 });
 
