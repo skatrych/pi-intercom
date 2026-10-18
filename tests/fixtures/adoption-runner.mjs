@@ -14,6 +14,7 @@ const WORDING = '{old}';
 /** The accepted path: every decision answered affirmatively, wording typed exactly. */
 const YES = () => ({
   boardInitialize: 'confirm',
+  firstCoordinatorDeclaration: 'confirm',
   adoptionDecision: 'confirm',
   adoptTransition: 'confirm',
   authorityRecord: 'confirm',

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { lstat, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { lstat, open, readFile, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +9,7 @@ import {
   type Agent, type ScannedConfig,
 } from './config.js';
 import type { WorkerConnection } from './connections.js';
+import { LOG_FILE_PATTERN } from './observability.js';
 
 /**
  * Coordinator adoption: the only coordinator-entry replacement path.
@@ -28,6 +29,35 @@ export const CLAIM_FILE = 'coordinator-claim.md';
 export const CONFIG_DIRECTORY = '.pi-intercom';
 export const REBRIEF_SOURCE = 'handoff.md (open assignments)';
 export const ENDED_WORDING = (sessionId: string): string => `I confirm coordinator ${sessionId} ended`;
+
+/**
+ * A malformed or incomplete bracketed paste is a capture failure, never an answer. The adapter reports
+ * it instead of fabricating, normalizing, or auto-submitting a candidate; the domain names the step.
+ */
+export class AdoptionInputCaptureFailure extends Error {
+  constructor(message = 'the pasted answer was not a complete, well-framed bracketed paste') { super(message); this.name = 'AdoptionInputCaptureFailure'; }
+}
+/** The captured Pi UI cannot render a durable visible question. Fail closed; never open an invisible input. */
+export class AdoptionHostUiUnavailable extends Error {
+  constructor(message: string) { super(message); this.name = 'AdoptionHostUiUnavailable'; }
+}
+
+/** Named human-gate steps. Every refusal names one of these, so an invisible question cannot be guessed at. */
+export const RECORD_STEP = 'authorising record';
+export const ENDED_STEP = 'ended-wording confirmation';
+export const DISCONNECTED_WARNING = 'A disconnected or unknown endpoint probe is not evidence that a coordinator terminated.';
+
+/**
+ * Git isolation policy (ADR 0009-C). `strict` is the default everywhere; only a verified first-board
+ * bootstrap or a claim-history-free first declaration may select `first-declaration`, and then only
+ * for unrelated untracked content outside the protected board surface.
+ */
+type GitPolicy = 'strict' | 'first-declaration';
+const STRICT: GitPolicy = 'strict';
+const FIRST_DECLARATION: GitPolicy = 'first-declaration';
+
+/** Generated first-declaration evidence (issue #9): never a typed reference, never an adoption wording. */
+export interface DeclarationEvidence { record: string; wording: string }
 
 export type ExitCode = 0 | 1 | 2;
 export type ResultCode =
@@ -599,9 +629,11 @@ export class AdoptionWorkflow {
     }
     if (!claim) {
       if (surveyed.state !== 'b') return halt('CLAIM_OTHER', 'no claim record exists for this board state; a declaration is never inferred for it');
-      const authority = await this.askAuthority(context, 'first-coordinator declaration', surveyed.home);
-      if ('stop' in authority) return authority.stop;
-      return this.declare(context, surveyed, authority);
+      // Issue #9: an existing board naming this verified session with no claim history is a first
+      // declaration, not an adoption. One explicit yes/no replaces the former typed authority reference.
+      const confirmed = await context.ui.confirm({ kind: 'firstCoordinatorDeclaration', prompt: firstDeclarationPrompt(surveyed.home, surveyed.identity) });
+      if (!confirmed) return halt('CANCELLED', `first-coordinator declaration at ${surveyed.home} was declined; nothing was written`);
+      return this.declare(context, surveyed, declarationEvidence(surveyed.home, surveyed.identity));
     }
     const self = claim.coordinator.sessionId === surveyed.identity.sessionId && claim.coordinator.port === surveyed.identity.port;
     if (claim.phase === 'active') {
@@ -634,26 +666,23 @@ export class AdoptionWorkflow {
   /** State (a): only an explicitly confirmed first board at the projects home, never in a child cwd. */
   private async bootstrap(context: CommandContext, surveyed: Survey): Promise<Result> {
     const home = surveyed.home, identity = surveyed.identity;
-    const confirmed = await context.ui.confirm({
-      kind: 'boardInitialize',
-      prompt: `Initialize the first Intercom board at projects home ${home}? Nothing is written until this is confirmed, and a child directory never receives a private board.`,
-    });
+    // One enriched yes/no: the confirmation IS the authorization, so no text question follows it.
+    const confirmed = await context.ui.confirm({ kind: 'boardInitialize', prompt: boardInitializePrompt(home, identity) });
     if (!confirmed) return halt('CANCELLED', `first-board initialization at ${home} was declined; nothing was written`);
-    const authority = await this.askAuthority(context, 'first-coordinator declaration', home);
-    if ('stop' in authority) return authority.stop;
+    const evidence = declarationEvidence(home, identity);
     const store = this.options.storeFor(home);
     const epoch = this.options.readiness.close();
     try {
-      const initialGit = await this.assertGitSafe(home, context, epoch);
+      const initialGit = await this.assertGitSafe(home, context, epoch, FIRST_DECLARATION);
       if (initialGit) return initialGit;
       const prepared = await store.transaction<{ stop: Result } | { commit: string }>(async () => {
         await this.assertSnapshot(context, surveyed, epoch);
-        const safe = await this.assertGitSafe(home, context, epoch);
+        const safe = await this.assertGitSafe(home, context, epoch, FIRST_DECLARATION);
         if (safe) return { stop: safe };
         const initialized = await coded('PUBLISH', () => store.initialize(identity.sessionId, identity.port, () => this.assertCurrent(context, epoch)));
         if (!initialized) return { stop: halt('BOARD_PATH', `a board already exists at ${home}; invoke again for a fresh preview instead of initializing twice`) };
         surveyed.scanned = await store.readStrict();
-        const commit = await coded('GIT', () => this.writeCommit(home, renderClaim(declaration(surveyed, authority, this.options)), context, epoch));
+        const commit = await coded('GIT', () => this.writeCommit(home, renderClaim(declaration(surveyed, evidence, this.options)), context, epoch, { policy: FIRST_DECLARATION }));
         if (commit === undefined) return { stop: halt('GIT', 'the first-coordinator declaration produced no verified commit; the board exists, so invoke again rather than initializing twice') };
         return { commit };
       });
@@ -667,14 +696,14 @@ export class AdoptionWorkflow {
     }
   }
   /** State (b) with no record: write-and-continue, but only after the declaration is committed. */
-  private async declare(context: CommandContext, surveyed: Survey, authority: Authority): Promise<Result> {
+  private async declare(context: CommandContext, surveyed: Survey, evidence: DeclarationEvidence): Promise<Result> {
     const identity = surveyed.identity, home = surveyed.home;
     const store = this.options.storeFor(home);
     const epoch = this.options.readiness.close();
     try {
       const commit = await store.transaction(async () => {
         await this.assertSnapshot(context, surveyed, epoch);
-        return coded('GIT', () => this.writeCommit(home, renderClaim(declaration(surveyed, authority, this.options)), context, epoch));
+        return coded('GIT', () => this.writeCommit(home, renderClaim(declaration(surveyed, evidence, this.options)), context, epoch, { policy: FIRST_DECLARATION }));
       });
       if (commit === undefined) return halt('GIT', 'the first-coordinator declaration produced no verified commit');
       const failure = await this.promote();
@@ -693,8 +722,12 @@ export class AdoptionWorkflow {
    * ended confirmation are typed into this session's own Pi UI: no parameter, argument, saved default,
    * or model text can supply them, and no decline produces a write.
    */
-  private async humanAdoptionDecision(context: CommandContext, surveyed: Survey, previousSessionId?: string, priorTransitionId?: string): Promise<{ authority: Authority } | { stop: Result }> {
+  private async humanAdoptionDecision(context: CommandContext, surveyed: Survey, previous?: ClaimPrevious, priorTransitionId?: string): Promise<{ authority: Authority } | { stop: Result }> {
     const identity = surveyed.identity, board = coordinator(surveyed.scanned!.config);
+    const target = previous ?? board;
+    const source = previous === undefined
+      ? 'the configured board coordinator entry'
+      : 'the previous coordinator recorded in the committed prepared intent (validated during reconciliation)';
     const collision = surveyed.scanned!.config.agents.find(agent => agent.sessionId === identity.sessionId);
     if (collision !== undefined) {
       return { stop: halt('SESSION_COLLISION', `session ${identity.sessionId} is already registered as ${collision.name}; a registered worker is never promoted, removed or rebound by adoption`) };
@@ -703,21 +736,22 @@ export class AdoptionWorkflow {
     if (portCollision !== undefined) {
       return { stop: halt('PORT_COLLISION', `port ${identity.port} is already used by ${portCollision.name}; a port is never guessed and a collision is refused before any write, including against the current coordinator entry`) };
     }
-    const probe = await this.options.probe({ sessionId: board.sessionId, port: board.port });
+    const probe = await this.options.probe({ sessionId: target.sessionId, port: target.port });
     if (probe.state === 'connected') {
-      return { stop: halt('OLD_CONNECTED', `configured coordinator ${board.sessionId} port ${board.port} still verifies at its endpoint; adoption stops and no record or config was written`) };
+      return { stop: halt('OLD_CONNECTED', `configured coordinator ${target.sessionId} port ${target.port} still verifies at its endpoint; adoption stops and no record or config was written`) };
     }
     const transitionId = priorTransitionId ?? (this.options.uuid?.() ?? randomUUID()).toLowerCase();
     const previewHash = sha256(surveyed.scanned!.raw);
-    if (previousSessionId === undefined) {
+    const gateContext = targetLines(surveyed, target, source, probe);
+    if (previous === undefined) {
       const code = surveyed.claim ? 'CLAIM_OTHER' : 'ADOPTION_REQUIRED';
       const record = surveyed.claim ? `record ${surveyed.claim.coordinator.sessionId}/${surveyed.claim.coordinator.port}; ` : 'claim absent; ';
       const proceed = await context.ui.confirm({ kind: 'adoptionDecision',
-        prompt: `ADOPTION STOP ${code}: ${record}this session ${identity.sessionId}/${identity.port}; board ${board.sessionId}/${board.port} at ${surveyed.home}. No coordinator action is authorized. Continue to a NEW human adoption decision? Old endpoint ${probe.state}; disconnected and unknown are not evidence of termination.` });
+        prompt: [`ADOPTION STOP ${code}`, `${record}this session ${identity.sessionId}/${identity.port}; board ${board.sessionId}/${board.port} at ${surveyed.home}. No coordinator action is authorized.`,
+          ...gateContext, '', 'Continue to a NEW human adoption decision?'].join('\n') });
       if (!proceed) return { stop: halt(code, `${record}this session ${identity.sessionId}/${identity.port}; board ${board.sessionId}/${board.port} — report both; wait for human decision`) };
     }
-    const authority = await this.askAuthority(context, 'adoption', surveyed.home, previousSessionId ?? board.sessionId,
-      `Board ${surveyed.home}: ${board.sessionId}/${board.port} → ${identity.sessionId}/${identity.port}. Old probe ${probe.state} (${probe.reason}); disconnected and unknown are NOT evidence of termination.`);
+    const authority = await this.askAdoptionAuthority(context, surveyed, target, source, gateContext, probe);
     if ('stop' in authority) return authority;
     const unchanged = leftUnchanged(surveyed.scanned!);
     const fenced = unchanged.filter(entry => entry.closeJob !== null && FENCED_STATES.includes(entry.closeJob.state));
@@ -732,24 +766,40 @@ export class AdoptionWorkflow {
     return { authority: Object.freeze({ ...authority, decision: Object.freeze({ transitionId, boardRoot: surveyed.home,
       configSha256: previewHash, previous: Object.freeze({ sessionId: board.sessionId, port: board.port }), coordinator: Object.freeze({ sessionId: identity.sessionId, port: identity.port }) }) }) };
   }
-  /** AC4: the authority reference and the exact ended wording, or a named refusal. */
-  private async askAuthority(context: CommandContext, kind: 'first-coordinator declaration' | 'adoption', home: string, oldSessionId = '', preview = ''): Promise<Authority | { stop: Result }> {
-    const record = await context.ui.input({
-      kind: 'authorityRecord',
-      prompt: kind === 'adoption'
-        ? `${preview}\nAuthorising record for adopting the board at ${home}: a required reference to the human decision that authorised it.`
-        : `Authorising record for declaring the first coordinator of ${home}: a required reference to the human decision that authorised it.`,
-    });
-    if (record === undefined) return { stop: halt('CANCELLED', 'the authority prompt was cancelled; nothing was written') };
-    if (!bounded(record.trim(), 2000)) return { stop: halt('CONFIRMATION', 'an authorising record is required; an empty answer cannot produce a claim') };
-    const captured = (this.options.now?.() ?? new Date()).toISOString();
-    if (kind === 'first-coordinator declaration') return { record: record.trim(), wording: record.trim(), confirmedEndedAt: captured };
-    const wording = await context.ui.input({ kind: 'endedWording', placeholder: ENDED_WORDING(oldSessionId), prompt: `Type exactly: ${ENDED_WORDING(oldSessionId)}` });
-    if (wording === undefined) return { stop: halt('CANCELLED', 'the ended-confirmation prompt was cancelled; nothing was written') };
-    if (wording !== ENDED_WORDING(oldSessionId)) {
-      return { stop: halt('CONFIRMATION', 'the required wording was not typed exactly; disconnected and unknown are not evidence of termination, and an approximation cannot confirm it') };
+  /**
+   * AC4: the typed authority reference and the exact ended wording, or a named refusal. Issue #9: every
+   * refusal names its step, a failed ended wording repeats the complete expected sentence, and nothing
+   * here can be reached by a first-declaration path. The exact comparison is never normalized.
+   */
+  private async askAdoptionAuthority(context: CommandContext, surveyed: Survey, target: { sessionId: string; port: number }, source: string, gateContext: string[], probe: WorkerConnection): Promise<Authority | { stop: Result }> {
+    const record = await this.capture(context, { kind: 'authorityRecord', prompt: authorityRecordPrompt(surveyed.home, [`Board ${surveyed.home}: coordinator ${target.sessionId}/${target.port} → ${surveyed.identity.sessionId}/${surveyed.identity.port} (${source}).`, ...gateContext]) }, RECORD_STEP);
+    if ('stop' in record) return record;
+    const trimmed = record.value.trim();
+    if (trimmed === '') return { stop: halt('CONFIRMATION', `${RECORD_STEP}: a non-empty authorising record is required; an empty or whitespace-only answer cannot produce a claim. Nothing was written.`) };
+    if (trimmed.length > 2000) return { stop: halt('CONFIRMATION', `${RECORD_STEP}: the authorising record is longer than the 2000 characters the claim schema allows. Nothing was written; the answer is not echoed.`) };
+    if (/[\x00-\x1f\x7f-\x9f]/.test(trimmed)) return { stop: halt('CONFIRMATION', `${RECORD_STEP}: the authorising record contains control characters, which the claim schema cannot store. Nothing was written; the answer is not echoed.`) };
+    const expected = ENDED_WORDING(target.sessionId);
+    const wording = await this.capture(context, { kind: 'endedWording', prompt: endedWordingPrompt(target, gateContext) }, ENDED_STEP,
+      `Expected exactly, for the coordinator named above (${target.sessionId}, port ${target.port}):\n${expected}\n${DISCONNECTED_WARNING}`);
+    if ('stop' in wording) return wording;
+    if (wording.value !== expected) {
+      return { stop: halt('CONFIRMATION', endedWordingFailure(target, 'the answer is not exactly the required sentence. No trimming, case change, approximation or substitution is accepted.')) };
     }
-    return { record: record.trim(), wording, confirmedEndedAt: (this.options.now?.() ?? new Date()).toISOString() };
+    return { record: trimmed, wording: wording.value, confirmedEndedAt: (this.options.now?.() ?? new Date()).toISOString() };
+  }
+  /** One captured text answer, or a refusal that names the step. A malformed paste is never a candidate answer. */
+  private async capture(context: CommandContext, options: { kind: string; prompt: string }, step: string, captureFailure?: string): Promise<{ value: string } | { stop: Result }> {
+    try {
+      const value = await context.ui.input(options);
+      if (value === undefined) return { stop: halt('CANCELLED', `${step} was cancelled; nothing was written and no later adoption step is attempted`) };
+      return { value };
+    } catch (error) {
+      if (error instanceof AdoptionInputCaptureFailure) {
+        return { stop: halt('CONFIRMATION', [`${step}: the answer could not be read from this session's Pi UI (${reason(error)}). No partial, normalized or auto-submitted candidate is accepted.`, captureFailure, 'Nothing was written; invoke again for a fresh decision.'].filter(Boolean).join('\n')) };
+      }
+      if (error instanceof AdoptionHostUiUnavailable) return { stop: halt('HOST', `${step} cannot be displayed by this Pi UI: ${reason(error)}; no unlabelled or placeholder-only input was opened.`) };
+      throw error;
+    }
   }
 
   // ---- the transaction -----------------------------------------------------------------
@@ -881,9 +931,23 @@ export class AdoptionWorkflow {
     const board = surveyed.scanned ? coordinator(surveyed.scanned.config) : undefined;
     if (board === undefined) return halt('NO_BOARD', 'the board disappeared during reconciliation; nothing is written');
     // A staged claim file is someone else's staged content and never this finalization's bytes.
-    const staged = await this.trackedPaths(['diff', '--cached', '--name-only'], home);
-    if (staged.length) return halt('RECOVERY_REQUIRED', `the real index contains staged paths (${staged.join(', ')}); no finalization is permitted`);
-    if ((await this.dirtyPaths(home)).some(entry => entry.file !== CLAIM_FILE) || await this.unresolvedOperation(home)) return halt('RECOVERY_REQUIRED', 'unrelated dirt or unresolved git operation blocks finalization; evidence is preserved');
+    const blockers = await this.blockers(home);
+    if (blockers.staged.length) {
+      return halt('RECOVERY_REQUIRED', `staged index content: ${displayPaths(blockers.staged)} ${blockers.staged.length === 1 ? 'is' : 'are'} staged in the real index; no finalization is permitted, and this workflow will not commit, clean or reset those paths`);
+    }
+    const unresolved = await this.unresolvedOperation(home);
+    const tracked = blockers.tracked.filter(entry => entry.path !== CLAIM_FILE);
+    const untracked = blockers.untracked.filter(entry => entry.path !== CLAIM_FILE);
+    if (tracked.length || untracked.length || unresolved !== undefined) {
+      // Recovery keeps its strict policy; only the diagnosis becomes category-accurate.
+      return halt('RECOVERY_REQUIRED', [
+        'finalization is refused by external repository state; evidence is preserved and nothing is touched:',
+        tracked.length ? `tracked worktree changes: ${displayPaths(tracked.map(entry => entry.path))}` : '',
+        untracked.length ? `untracked content: ${displayPaths(untracked.map(entry => entry.path))}` : '',
+        unresolved === undefined ? '' : `unresolved git operation: ${unresolved}`,
+        'this workflow will not commit, clean or reset those paths, and never bypasses a hook',
+      ].filter(Boolean).join('\n'));
+    }
     if (surveyed.worktreeRaw === undefined) {
       return halt('RECOVERY_REQUIRED', `${CLAIM_FILE} is absent from the worktree while ${intent.transitionId} is committed; restore it from commit ${intentCommit.slice(0, 8)} deliberately, not by this workflow`);
     }
@@ -908,7 +972,7 @@ export class AdoptionWorkflow {
       if (board.sessionId !== intent.previous.sessionId || board.port !== intent.previous.port || sha256(patchCoordinatorEntry(surveyed.scanned!.raw, identity.sessionId, identity.port).after) !== intent.configAfterSha256) return halt('RECOVERY_REQUIRED', 'prepared-before identity or expected replacement hash is inconsistent');
       // Prepared + exact old config: the decision is recorded, the takeover is not. A new human
       // decision and a refreshed authority/timestamp commit precede completion, same transition id.
-      const decided = await this.humanAdoptionDecision(context, surveyed, intent.previous.sessionId, intent.transitionId);
+      const decided = await this.humanAdoptionDecision(context, surveyed, intent.previous, intent.transitionId);
       if ('stop' in decided) return decided.stop;
       return this.transaction(context, surveyed, board, decided.authority, intent);
     }
@@ -968,7 +1032,7 @@ export class AdoptionWorkflow {
    * Write outside any repository mutation, then commit this one path. An existing record with different
    * bytes is preserved unless it is recognized committed evidence, and never overwritten silently.
    */
-  private async writeCommit(home: string, content: string, context: CommandContext, epoch: number, settings: { expectedDirty?: boolean } = {}): Promise<string | undefined> {
+  private async writeCommit(home: string, content: string, context: CommandContext, epoch: number, settings: { expectedDirty?: boolean; policy?: GitPolicy } = {}): Promise<string | undefined> {
     const target = path.join(home, CLAIM_FILE);
     const existing = await this.readOptional(target);
     if (existing !== undefined && existing !== content && !settings.expectedDirty) {
@@ -976,7 +1040,7 @@ export class AdoptionWorkflow {
       const committed = commit === undefined ? undefined : await this.gitText(['show', `${commit}:${CLAIM_FILE}`], home, { tolerate: true });
       if (committed !== existing) failAt('RECORD', `${CLAIM_FILE} already exists with different bytes and is not recognized committed evidence; it is preserved untouched and nothing is written`);
     }
-    const refused = await this.assertGitSafe(home, context, epoch);
+    const refused = await this.assertGitSafe(home, context, epoch, settings.policy ?? STRICT);
     if (refused !== undefined) failAt(refused.code, reasonOf(refused));
     const temporary = `${target}.${this.options.uuid?.() ?? randomUUID()}.tmp`;
     const handle = await open(temporary, 'wx', 0o600);
@@ -986,10 +1050,15 @@ export class AdoptionWorkflow {
       await rename(temporary, target);
     } catch (error) { await handle.close().catch(() => {}); await unlink(temporary).catch(() => {}); throw error; }
     if (parseClaim(content).phase === 'active') await this.phase('active-written');
-    return this.commitClaim(home, CLAIM_FILE, content, context, epoch);
+    return this.commitClaim(home, CLAIM_FILE, content, context, epoch, settings.policy ?? STRICT);
   }
-  /** Refuse unsafe layout, a non-repository home, a non-empty index, or unrelated worktree changes. */
-  private async assertGitSafe(home: string, context: CommandContext, epoch: number): Promise<Result | undefined> {
+  /**
+   * Refuse unsafe layout, a non-repository home, a non-empty index, or unrelated worktree changes.
+   * A first declaration may proceed with unrelated untracked content outside the protected board
+   * surface (issue #9); every other gate, and every staged, tracked, or unresolved condition, is
+   * refused by both policies.
+   */
+  private async assertGitSafe(home: string, context: CommandContext, epoch: number, policy: GitPolicy = STRICT): Promise<Result | undefined> {
     this.assertCurrent(context, epoch);
     try { const info = await lstat(path.join(home, CLAIM_FILE)); if (!info.isFile()) return halt('BOARD_PATH', 'claim path is not a regular file'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return halt('BOARD_PATH', 'claim path cannot be checked safely'); }
@@ -1002,24 +1071,115 @@ export class AdoptionWorkflow {
     // Every staged path is refused, the claim file included. Staging this one path is permitted only as
     // the step immediately before its own path-scoped commit; a claim file already staged by someone else
     // is someone else's content, and this workflow never commits it.
-    const staged = await this.trackedPaths(['diff', '--cached', '--name-only'], home);
-    if (staged.length) return halt('GIT', `the git index already holds staged paths (${staged.join(', ')}); this workflow never commits another path's staged content`);
+    const blockers = await this.blockers(home);
+    if (blockers.staged.length) {
+      return halt('GIT', `staged index content: ${displayPaths(blockers.staged)} ${blockers.staged.length === 1 ? 'is' : 'are'} already staged in the real index; this workflow never commits another path's staged content and never cleans or resets it`);
+    }
     const unresolved = await this.unresolvedOperation(home);
     if (unresolved !== undefined) return halt('GIT', `an unresolved git operation is in progress (${unresolved}); nothing is written`);
-    // Refuse unrelated pending work, including untracked files. Tooling/session directories are
-    // gitignored by the projects-home contract, not an excuse to sweep or ignore unrelated changes.
-    const unrelated = (await this.dirtyPaths(home)).filter(entry => entry.file !== CLAIM_FILE);
-    if (unrelated.length) return halt('GIT', `tracked files outside the claim record are modified (${unrelated.map(entry => entry.file).join(', ')}); this workflow never commits them`);
+    // Tracked work is unrelated pending work under both policies.
+    const tracked = blockers.tracked.filter(entry => entry.path !== CLAIM_FILE);
+    if (tracked.length) {
+      return halt('GIT', `tracked worktree changes outside the claim record: ${displayPaths(tracked.map(entry => entry.path))}; this workflow never commits them and will not clean or reset them`);
+    }
+    const untracked = blockers.untracked.filter(entry => entry.path !== CLAIM_FILE);
+    // Under the first-declaration policy only content outside the protected board surface is scratch.
+    const protectedDirt = untracked.filter(entry => protectedSurface(entry.path));
+    const scratch = untracked.filter(entry => !protectedSurface(entry.path));
+    if (protectedDirt.length) {
+      return halt('GIT', `untracked content inside the protected board surface: ${displayPaths(protectedDirt.map(entry => entry.path))}; board and claim paths are never committed, cleaned or reset by this workflow`);
+    }
+    if (policy === STRICT && untracked.length) {
+      return halt('GIT', `untracked content outside the claim record: ${displayPaths(untracked.map(entry => entry.path))}; this workflow never commits them and will not clean, ignore or reset them`);
+    }
+    if (policy === FIRST_DECLARATION) {
+      // Unrelated untracked scratch is allowed here, so the protected namespace itself is inspected on
+      // disk: ignored claim/config/layout content is invisible to `git status` and still must not pass.
+      const unsafe = await this.inspectBoardNamespace(home);
+      if (unsafe !== undefined) return halt('GIT', unsafe);
+    }
     return undefined;
   }
-  private async trackedPaths(args: string[], home: string): Promise<string[]> {
-    const output = await this.gitText(args, home);
-    return output === undefined ? [] : output.split('\n').filter(Boolean);
+  /** Verified repository state or a failure: no incomplete query ever becomes an empty/clean result. */
+  private async complete(args: string[], home: string): Promise<string> {
+    const result = await this.git(args, home);
+    if (result.code !== 0) failAt('GIT', `git ${args[0]} failed (exit ${result.code}); no assumption replaces verified repository state`);
+    if (result.stdout.length >= GIT_READ_LIMIT) failAt('GIT', `git ${args[0]} reached the ${GIT_READ_LIMIT}-byte read limit; an incomplete status is uncertainty, never a clean repository`);
+    return result.stdout;
   }
-  /** Paths git reports as changed; no failed git query counts as an empty result. */
-  private async dirtyPaths(home: string): Promise<{ file: string; untracked: boolean }[]> {
-    const output = await this.gitText(['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all'], home);
-    return output === undefined ? [] : statusPaths(output);
+  /** Paths git reports as changed, NUL-separated and category-accurate. */
+  private async blockers(home: string): Promise<{ staged: string[]; tracked: StatusEntry[]; untracked: StatusEntry[] }> {
+    const staged = (await this.complete(['diff', '--cached', '--name-only', '-z'], home)).split('\0').filter(Boolean);
+    const entries = await this.statusEntries(home);
+    return {
+      staged,
+      tracked: entries.filter(entry => entry.index !== '?' && entry.worktree !== ' ' && entry.worktree !== '?'),
+      untracked: entries.filter(entry => entry.index === '?' && entry.worktree === '?'),
+    };
+  }
+  /**
+   * `git status --porcelain=v1 -z` entries are `<XY><space><path>`, NUL terminated, with a rename or
+   * copy entry followed by its source path as the next token. With `-z` git never quotes, so spaces,
+   * newlines, and non-ASCII names stay single entries instead of being split into invented filenames.
+   */
+  private async statusEntries(home: string): Promise<StatusEntry[]> {
+    const output = await this.complete(['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all', '-z'], home);
+    const tokens = output.split('\0');
+    if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+    const entries: StatusEntry[] = [];
+    for (let at = 0; at < tokens.length; at++) {
+      const token = tokens[at];
+      if (!/^[ MARCUD?!]{2} /.test(token)) failAt('GIT', 'git status reported an unrecognised entry; an unparseable status is uncertainty, never a clean repository');
+      const path = token.slice(3);
+      if (path === '') failAt('GIT', 'git status reported an empty path');
+      const entry: StatusEntry = { index: token.slice(0, 1), worktree: token.slice(1, 2), path };
+      if (entry.index === 'R' || entry.index === 'C') {
+        const origin = tokens[++at];
+        if (origin === undefined || origin === '') failAt('GIT', 'git status reported a rename or copy without its source path');
+        entry.origin = origin;
+      }
+      entries.push(entry);
+    }
+    return entries;
+  }
+  /** NUL-delimited path list from a path-oriented query. */
+  private async pathList(args: string[], home: string): Promise<string[]> {
+    return (await this.complete([...args, '-z'], home)).split('\0').filter(Boolean);
+  }
+  /**
+   * Bounded, no-follow inspection of the protected board namespace, used only by the first-declaration
+   * policy. Git status never reports ignored content, so the filesystem is the only evidence here. An
+   * unknown, unsafe, or un-listable entry is a named refusal: a partial inspection never approves it.
+   */
+  private async inspectBoardNamespace(home: string): Promise<string | undefined> {
+    const directory = path.join(home, CONFIG_DIRECTORY);
+    let board;
+    try { board = await lstat(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; return `the board namespace ${directory} cannot be inspected safely (${reason(error)}); nothing is written` ; }
+    if (board.isSymbolicLink() || !board.isDirectory()) return `the board namespace ${directory} is not a plain directory; nothing is written`;
+    const listed = await readdir(directory, { withFileTypes: true });
+    if (listed.length > BOARD_SCAN_LIMIT) return `the board namespace ${directory} holds more than ${BOARD_SCAN_LIMIT} entries; an incomplete inspection cannot approve it`;
+    for (const entry of listed) {
+      if (entry.isSymbolicLink()) return `the protected board path ${path.join(directory, entry.name)} is a symbolic link; nothing is written`;
+      const allowed = entry.isDirectory()
+        ? (Object.hasOwn(BOARD_DIRECTORIES, entry.name) && !entry.name.includes('..'))
+        : entry.isFile() && BOARD_FILE.test(entry.name);
+      if (!allowed) {
+        return entry.isDirectory() && Object.hasOwn(BOARD_DIRECTORIES, entry.name) === false
+          ? `unrecognised directory ${path.join(directory, entry.name)} is inside the protected board surface; it is not workflow-owned, so nothing is written`
+          : `unrecognised file ${path.join(directory, entry.name)} is inside the protected board surface; it is not workflow-owned, so nothing is written`;
+      }
+      if (!entry.isDirectory()) continue;
+      const inner = await readdir(path.join(directory, entry.name), { withFileTypes: true });
+      if (inner.length > BOARD_SCAN_LIMIT) return `${path.join(directory, entry.name)} holds more than ${BOARD_SCAN_LIMIT} entries; an incomplete inspection cannot approve it`;
+      const pattern = BOARD_DIRECTORIES[entry.name];
+      for (const child of inner) {
+        if (!child.isFile() || !pattern.test(child.name)) {
+          return `${path.join(directory, entry.name, child.name)} is not a recognised ${entry.name} entry (expected ${pattern}); nothing is written`;
+        }
+      }
+    }
+    return undefined;
   }
   private async unresolvedOperation(home: string): Promise<string | undefined> {
     const directory = (await this.gitText(['rev-parse', '--absolute-git-dir'], home, { tolerate: true }))?.trim();
@@ -1033,11 +1193,11 @@ export class AdoptionWorkflow {
     return undefined;
   }
   /** `git commit --only <claim>` with argv, then verify HEAD, its changed-path set, and the bytes. */
-  private async commitClaim(home: string, claimedPath: string, content: string, context: CommandContext, epoch: number): Promise<string | undefined> {
+  private async commitClaim(home: string, claimedPath: string, content: string, context: CommandContext, epoch: number, policy: GitPolicy = STRICT): Promise<string | undefined> {
     this.assertCurrent(context, epoch);
     // Re-check immediately before committing: the window between the caller's decision and the commit
     // is exactly where another writer or a human edit could otherwise be swept in.
-    const refused = await this.assertGitSafe(home, context, epoch);
+    const refused = await this.assertGitSafe(home, context, epoch, policy);
     if (refused !== undefined) failAt(refused.code, reasonOf(refused));
     // `commit --only` refuses a pathspec git does not know yet, and a first declaration creates this file.
     // Staging only this one path, after the empty-index gate above, is therefore required, and
@@ -1061,9 +1221,9 @@ export class AdoptionWorkflow {
     const head = (await this.gitText(['rev-parse', 'HEAD'], home))?.trim();
     if (head === undefined || !COMMIT.test(head)) failAt('GIT', 'the resulting commit could not be read');
     if ((await this.gitText(['rev-parse', `${head}^`], home))?.trim() !== previousHead) failAt('GIT', 'HEAD advanced outside the single claim commit');
-    const afterHook = await this.assertGitSafe(home, context, epoch);
+    const afterHook = await this.assertGitSafe(home, context, epoch, policy);
     if (afterHook) failAt(afterHook.code, reasonOf(afterHook));
-    const changed = await this.trackedPaths(['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], home);
+    const changed = await this.pathList(['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], home);
     if (changed.length !== 1 || changed[0] !== claimedPath) fail(`commit ${head} changed unexpected paths (${changed.join(', ')}); the evidence is refused`);
     if ((await this.gitText(['show', `${head}:${claimedPath}`], home)) !== content || await this.readOptional(path.join(home, claimedPath)) !== content || await this.latestClaimCommit(home) !== head) failAt('GIT', `commit/worktree ${head} does not contain the exact generated record bytes; evidence is refused`);
     const record = parseClaim(content), config = await this.options.storeFor(home).readStrict();
@@ -1213,12 +1373,20 @@ export async function bootClaimEvidence(input: { home: string; identity: { sessi
     return { ready: true, detail: `${CLAIM_FILE} active evidence matches this board and session (commit ${commit})` };
   } catch (error) { return { ready: false, detail: `${CLAIM_FILE} is not verified committed active evidence: ${reason(error)}` }; }
 }
+/** The one generated-evidence template (ADR 0009-A). Bounded: the full board root stays in the claim, the authority record carries its labelled SHA256. */
+export function declarationEvidence(boardRoot: string, identity: ResolvedIdentity): DeclarationEvidence {
+  const hash = sha256(boardRoot);
+  return Object.freeze({
+    record: `Human explicitly confirmed this first-coordinator declaration in the captured local Pi UI; boardRoot SHA256 ${hash}; session ${identity.sessionId}; port ${identity.port}. Implementation-generated evidence, not a typed external reference.`,
+    wording: `Explicit yes/no decision: this session's captured local Pi UI answered yes to the first-coordinator declaration for boardRoot SHA256 ${hash}. Implementation-generated wording, not a typed termination confirmation.`,
+  });
+}
 interface Authority {
   record: string; wording: string; confirmedEndedAt: string;
   decision?: { transitionId: string; boardRoot: string; configSha256: string;
     previous: { sessionId: string; port: number }; coordinator: { sessionId: string; port: number } };
 }
-function declaration(surveyed: Survey, authority: Authority, options: { uuid?(): string; now?(): Date }): ClaimRecord {
+function declaration(surveyed: Survey, evidence: DeclarationEvidence, options: { uuid?(): string; now?(): Date }): ClaimRecord {
   const hash = sha256(surveyed.scanned!.raw);
   return {
     schemaVersion: 1,
@@ -1227,7 +1395,7 @@ function declaration(surveyed: Survey, authority: Authority, options: { uuid?():
     boardRoot: surveyed.home,
     coordinator: { sessionId: surveyed.identity.sessionId, port: surveyed.identity.port },
     date: (options.now?.() ?? new Date()).toISOString().slice(0, 10),
-    authority: { kind: 'first-coordinator declaration', record: authority.record, confirmedEndedAt: null, wording: authority.record },
+    authority: { kind: 'first-coordinator declaration', record: evidence.record, confirmedEndedAt: null, wording: evidence.wording },
     previous: null,
     previousRecordCommit: null,
     configBeforeSha256: hash,
@@ -1240,12 +1408,151 @@ function declaration(surveyed: Survey, authority: Authority, options: { uuid?():
 function declared(identity: ResolvedIdentity, commit: string): string[] {
   return [`CLAIM DECLARED: session ${identity.sessionId} port ${identity.port} — ${CLAIM_FILE} committed ${commit}; first-coordinator evidence; write-and-continue`];
 }
+
+// ---- visible question text (issue #9) --------------------------------------------------------
+
+/** The identity/effect block every first-declaration question shows. Full values only: never ellipsised. */
+function declarationContext(home: string, identity: ResolvedIdentity): string[] {
+  return [
+    `Board root (canonical projects home): ${home}`,
+    `This session, verified from the persisted Pi session and this runtime endpoint: ${identity.sessionId}`,
+    `This runtime endpoint port: ${identity.port}`,
+  ];
+}
+const DECLARATION_EFFECT = [
+  'If you confirm, this workflow will:',
+  `- create the root ${CLAIM_FILE} as first-coordinator evidence and commit it alone (${CLAIM_FILE} is the only path in that commit);`,
+  '- load this session\'s responsibility, and open coordinator action readiness only after that committed evidence and this endpoint both verify.',
+  'No worker is contacted, and no other path is written, staged, committed, cleaned or reset.',
+].join('\n');
+const DECLARATION_AUTHORIZATION = 'No text answer is requested. This yes/no decision is the authorization; the recorded authority evidence is generated by this implementation from your answer and says so.';
+
+export function boardInitializePrompt(home: string, identity: ResolvedIdentity): string {
+  return [
+    'Initialize the first Intercom board at the projects home?',
+    '',
+    ...declarationContext(home, identity),
+    '',
+    `Nothing is written until this is confirmed, and a child directory never receives a private board.`,
+    `Creating this board means creating ${path.join(home, CONFIG_DIRECTORY, 'config.json')} with this session as the coordinator.`,
+    '',
+    DECLARATION_EFFECT,
+    '',
+    DECLARATION_AUTHORIZATION,
+  ].join('\n');
+}
+export function firstDeclarationPrompt(home: string, identity: ResolvedIdentity): string {
+  return [
+    'Declare this session the first coordinator of the existing board?',
+    '',
+    ...declarationContext(home, identity),
+    '',
+    `The board config already exists and is NOT replaced. No ${CLAIM_FILE} history exists for this board, so this is a first declaration, not an adoption of another coordinator.`,
+    '',
+    DECLARATION_EFFECT,
+    '',
+    DECLARATION_AUTHORIZATION,
+  ].join('\n');
+}
+/** Which coordinator the backend selected, and why: never an operator- or model-chosen identity. */
+function targetLines(surveyed: Survey, target: { sessionId: string; port: number }, source: string, probe: WorkerConnection): string[] {
+  const board = surveyed.scanned ? coordinator(surveyed.scanned.config) : undefined;
+  const pair = (entry: { sessionId: string; port: number }) => `${entry.sessionId} (port ${entry.port})`;
+  const lines = [
+    `Coordinator whose termination you are confirming: ${pair(target)} — ${source}.`,
+    `This session (the adopting session): ${pair(surveyed.identity)}`,
+  ];
+  if (board && (board.sessionId !== target.sessionId || board.port !== target.port)) {
+    lines.push(`Configured board coordinator entry: ${pair(board)} (not the selected target).`);
+  }
+  if (surveyed.claim && (surveyed.claim.coordinator.sessionId !== target.sessionId || surveyed.claim.coordinator.port !== target.port)) {
+    lines.push(`Committed ${CLAIM_FILE} names: ${pair(surveyed.claim.coordinator)} (record context only; it is not the target).`);
+  }
+  lines.push(`Old endpoint probe: ${probe.state}${probe.reason ? ` (${probe.reason})` : ''} — ${DISCONNECTED_WARNING}`);
+  return lines;
+}
+export function authorityRecordPrompt(home: string, context: string[]): string {
+  return [
+    `Authorising record for adopting the board at ${home}`,
+    '',
+    ...context,
+    '',
+    'A required reference to the human decision that authorised this adoption: a ticket, commit, dated note, or similar non-empty text.',
+    'It is stored verbatim (trimmed, at most 2000 characters, no control characters) in the committed claim record.',
+    'It is never echoed back in a later diagnostic.',
+  ].join('\n');
+}
+export function endedWordingPrompt(target: { sessionId: string; port: number }, context: string[]): string {
+  return [
+    'Ended-coordinator confirmation',
+    '',
+    ...context,
+    '',
+    'Type or paste exactly this sentence, and nothing else. It is compared character by character:',
+    ENDED_WORDING(target.sessionId),
+    '',
+    'Approximations, another session id, different capitalisation, and added leading/trailing whitespace are all refused.',
+    `Submitting this sentence is one of three separate gates; it does not itself adopt anything. ${DISCONNECTED_WARNING}`,
+  ].join('\n');
+}
+/** The complete, unabbreviated refusal text for a failed ended-wording answer. Never routed through `reason()`. */
+export function endedWordingFailure(target: { sessionId: string; port: number }, detail: string): string {
+  return [
+    `${ENDED_STEP}: ${detail}`,
+    `Expected exactly, for the coordinator named above (${target.sessionId}, port ${target.port}):`,
+    ENDED_WORDING(target.sessionId),
+    DISCONNECTED_WARNING,
+    'Nothing was written, no coordinator was replaced, and no approximation is accepted; invoke again for a fresh decision.',
+  ].join('\n');
+}
 function bootDescription(state: BootState, board: Agent, own: Agent | undefined): string {
   if (state === 'a') return 'no board found between cwd and the projects home (ConfigStore.discover; Runtime.start initialization branch)';
   if (state === 'b') return 'own sessionId is the coordinator entry (requireCoordinator; Runtime.start coordinator branch)';
   if (state === 'c') return `own sessionId is worker entry ${own?.name ?? 'unknown'} (validateConfig unique ids and the reserved Coordinator name; requireCoordinator rejects a worker)`;
   return `own sessionId is absent, so this session is an anonymous worker while the board names ${board.name} (${board.sessionId}) (Runtime.start anonymous registration branch)`;
 }
+/**
+ * `git status`/index reads are capped by the Git adapter, so a result at the cap is a truncation, not a
+ * complete inventory. Refuse instead of treating an unread repository as clean.
+ */
+const GIT_READ_LIMIT = 262_144;
+const BOARD_SCAN_LIMIT = 512;
+const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+/** Recognised files at the top of the protected board namespace, by producer shape only. */
+const BOARD_FILE = new RegExp([
+  '^config\\.json$',
+  `^config\\.json\\.(${UUID_SOURCE})\\.tmp$`,
+  '^monitor-[0-9a-f]{24}\\.json$',
+  '^monitor-[0-9a-f]{24}\\.json\\.lock$',
+  `^monitor-[0-9a-f]{24}\\.json\\.(${UUID_SOURCE})\\.tmp$`,
+].join('|'));
+/** Recognised board subdirectories and the only file shapes each may hold. */
+const BOARD_DIRECTORIES: Record<string, RegExp> = {
+  'config.lock': /^owner\.json$/,
+  logs: LOG_FILE_PATTERN,
+  reports: /^([0-9a-f]{64}\.json|\.[0-9a-f]{64}\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp)$/,
+};
+interface StatusEntry { index: string; worktree: string; path: string; origin?: string }
+/**
+ * The protected board surface, relative to the canonical projects-home Git root: exactly the root claim
+ * file and the board/config namespace, including a foreign directory that obstructs them. Segment-aware:
+ * `.pi-intercom-backup/` and `coordinator-claim.md.bak` are unrelated, `.pi-intercom/config.json` and
+ * `coordinator-claim.md/foreign` are protected.
+ */
+export function protectedSurface(relative: string): boolean {
+  const segments = relative.split('/');
+  if (segments.includes('..')) failAt('GIT', `git reported the path ${escapePath(relative)} outside the repository root; nothing is assumed`);
+  return segments[0] === CLAIM_FILE || segments[0] === CONFIG_DIRECTORY;
+}
+/** Escape control characters and quoting so a reported path cannot be misread as a different path. */
+function escapePath(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f-\x9f"\\]/g, character => `\\x${(character.codePointAt(0) ?? 0).toString(16).padStart(2, '0')}`);
+}
+function displayPaths(paths: string[]): string {
+  const shown = paths.slice(0, 12).map(escapePath);
+  return shown.join(', ') + (paths.length > shown.length ? `, and ${paths.length - shown.length} more` : '');
+}
+
 function codeFor(error: unknown): ResultCode {
   if (error instanceof AdoptionFailure) return error.code;
   if (error instanceof StaleConfigLock) return 'LOCKED';
@@ -1276,12 +1583,7 @@ function reasonOf(result: Result): string {
   return result.lines[result.lines.length - 1] ?? 'refused';
 }
 /**
- * `git status --porcelain=v1` lines are `<XY><space><path>`. Both tracked and untracked unrelated
- * work blocks the path-scoped transaction; tooling-owned ignored state is absent from this output.
+ * `git status --porcelain=v1` line parsing used to live here. Issue #9 replaced it with the NUL-separated,
+ * category-accurate `statusEntries`/`blockers` readers: a line-oriented parse can split a path containing
+ * a newline into invented filenames and reports a staged-and-modified path as one category only.
  */
-function statusPaths(output: string): { file: string; untracked: boolean }[] {
-  return output.split('\n').filter(Boolean).map(line => ({
-    untracked: line.startsWith('??'),
-    file: /^[ MARCUD?!]{2} /.test(line) ? line.slice(3) : line,
-  })).filter(entry => entry.file !== '');
-}

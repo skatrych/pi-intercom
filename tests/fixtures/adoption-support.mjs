@@ -13,7 +13,7 @@ export const barrier = () => {
   const resume = new Promise(resolve => { release = resolve; });
   return { reached, release, wait: async () => { arrived(); await resume; } };
 };
-export const yesUI = () => mockUi({ boardInitialize: 'confirm', adoptionDecision: 'confirm', adoptTransition: 'confirm', authorityRecord: 'adoption fixture authorization', endedWording: ENDED_WORDING(IDS.gone), finalizeTransition: 'confirm' });
+export const yesUI = () => mockUi({ boardInitialize: 'confirm', firstCoordinatorDeclaration: 'confirm', adoptionDecision: 'confirm', adoptTransition: 'confirm', authorityRecord: 'adoption fixture authorization', endedWording: ENDED_WORDING(IDS.gone), finalizeTransition: 'confirm' });
 export async function fixture(options = {}) {
   const f = await createFixture();
   await mkdir(path.join(f.home, 'roles/orchestrator'), { recursive: true });
