@@ -452,10 +452,10 @@ export class ConfigStore {
                 try {
                     return await insideTransaction.run(locks, run);
                 }
-                // Releasing is cleanup, so it never replaces the originating write/sync/close error. A lock this
-                // process no longer owns is still never removed: release() verifies its own token first.
+                // Release is reported, not swallowed: release() itself decides when nothing of ours remains and
+                // therefore has nothing to report. It never removes a lock this call does not own.
                 finally {
-                    await lock.release().catch(() => { });
+                    await lock.release();
                 }
             });
             const settled = operation.then(() => undefined, () => undefined);
@@ -580,10 +580,32 @@ export class ConfigStore {
             if (released || lstatSync(directory).isSymbolicLink() || JSON.parse(readFileSync(ownerFile, 'utf8')).token !== token)
                 fail('config transaction ownership is uncertain; no publication or foreign release');
         };
+        /**
+         * Release distinguishes three states so two explicit contracts hold at once. A lock path that is
+         * simply gone (upstream: the session root or metadata directory was moved away and redirected) is not
+         * an error, because nothing of ours remains and nothing foreign may be removed. A lock path holding
+         * someone else's token is reported, because another writer replaced ours. Failing to remove this
+         * call's own token is reported too (a non-authority lock I/O failure).
+         */
+        const ownership = () => {
+            try {
+                if (lstatSync(directory).isSymbolicLink())
+                    return 'foreign';
+                return JSON.parse(readFileSync(ownerFile, 'utf8')).token === token ? 'owned' : 'foreign';
+            }
+            catch (error) {
+                return error.code === 'ENOENT' ? 'absent' : 'foreign';
+            }
+        };
         return { assertOwned, release: async () => {
                 if (released)
                     return;
-                assertOwned();
+                if (ownership() !== 'owned') {
+                    if (ownership() === 'foreign')
+                        fail('config transaction ownership is uncertain; no publication or foreign release');
+                    released = true;
+                    return; // Moved root or metadata: leave the redirected path exactly as found.
+                }
                 released = true;
                 await unlink(ownerFile);
                 await rmdir(directory);

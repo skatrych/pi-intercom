@@ -1072,25 +1072,26 @@ export class AdoptionWorkflow {
     // the step immediately before its own path-scoped commit; a claim file already staged by someone else
     // is someone else's content, and this workflow never commits it.
     const blockers = await this.blockers(home);
-    if (blockers.staged.length) {
-      return halt('GIT', `staged index content: ${displayPaths(blockers.staged)} ${blockers.staged.length === 1 ? 'is' : 'are'} already staged in the real index; this workflow never commits another path's staged content and never cleans or resets it`);
-    }
     const unresolved = await this.unresolvedOperation(home);
-    if (unresolved !== undefined) return halt('GIT', `an unresolved git operation is in progress (${unresolved}); nothing is written`);
-    // Tracked work is unrelated pending work under both policies.
+    // Tracked work is unrelated pending work under both policies, and every reported category is kept
+    // visible in one message: a path can be staged and modified at once, an untracked entry is never called
+    // a tracked change, and only bytes this very invocation wrote at the caller's request are ever excused.
     const tracked = blockers.tracked.filter(entry => entry.path !== CLAIM_FILE);
-    if (tracked.length) {
-      return halt('GIT', `tracked worktree changes outside the claim record: ${displayPaths(tracked.map(entry => entry.path))}; this workflow never commits them and will not clean or reset them`);
-    }
     const untracked = blockers.untracked.filter(entry => entry.path !== CLAIM_FILE);
-    // Under the first-declaration policy only content outside the protected board surface is scratch.
     const protectedDirt = untracked.filter(entry => protectedSurface(entry.path));
-    const scratch = untracked.filter(entry => !protectedSurface(entry.path));
-    if (protectedDirt.length) {
-      return halt('GIT', `untracked content inside the protected board surface: ${displayPaths(protectedDirt.map(entry => entry.path))}; board and claim paths are never committed, cleaned or reset by this workflow`);
-    }
-    if (policy === STRICT && untracked.length) {
-      return halt('GIT', `untracked content outside the claim record: ${displayPaths(untracked.map(entry => entry.path))}; this workflow never commits them and will not clean, ignore or reset them`);
+    // Under a first declaration, unrelated untracked content outside the protected board surface is not a
+    // blocker at all (issue #9), so nothing is reported here; the protected subset above still is. Under the
+    // default strict policy — every ordinary adoption, replacement, and recovery — every untracked path is.
+    const scratch = policy === STRICT ? untracked : [];
+    const evidence = [
+      blockers.staged.length ? `staged index content: ${displayPaths(blockers.staged)}` : '',
+      tracked.length ? `tracked worktree changes: ${displayPaths(tracked.map(entry => entry.origin === undefined ? entry.path : `${entry.origin} -> ${entry.path}`))}` : '',
+      protectedDirt.length ? `untracked content inside the protected board surface: ${displayPaths(protectedDirt.map(entry => entry.path))}` : '',
+      scratch.length ? `untracked content: ${displayPaths(scratch.map(entry => entry.path))}` : '',
+      unresolved === undefined ? '' : `unresolved git operation: ${unresolved}`,
+    ].filter(Boolean);
+    if (evidence.length) {
+      return halt('GIT', `${evidence.join('; ')} — the first-coordinator claim is the only path this workflow writes or commits; it will not commit, clean, ignore, or reset anything else`);
     }
     if (policy === FIRST_DECLARATION) {
       // Unrelated untracked scratch is allowed here, so the protected namespace itself is inspected on
@@ -1109,8 +1110,12 @@ export class AdoptionWorkflow {
   }
   /** Paths git reports as changed, NUL-separated and category-accurate. */
   private async blockers(home: string): Promise<{ staged: string[]; tracked: StatusEntry[]; untracked: StatusEntry[] }> {
-    const staged = (await this.complete(['diff', '--cached', '--name-only', '-z'], home)).split('\0').filter(Boolean);
     const entries = await this.statusEntries(home);
+    // Index content is read from the same NUL-separated entries as everything else. `git diff --cached
+    // --name-only` would name only a rename's destination and silently lose where it came from, and the
+    // whole point of this report is that an operator can see each fact exactly as git recorded it.
+    const staged = entries.filter(entry => entry.index !== '?' && entry.index !== ' ')
+      .map(entry => entry.origin === undefined ? entry.path : `${entry.origin} -> ${entry.path}`);
     return {
       staged,
       tracked: entries.filter(entry => entry.index !== '?' && entry.worktree !== ' ' && entry.worktree !== '?'),
@@ -1561,8 +1566,15 @@ function codeFor(error: unknown): ResultCode {
   // unexpected failure as STALE_PREVIEW would tell an operator something specific that is not true.
   return 'HOST';
 }
+/**
+ * Compose an inner refusal into an outer one. An `AdoptionFailure` is a safety verdict the workflow wrote
+ * itself, with named paths and a bounded path list: shortening it would hide exactly the blocker an operator
+ * needs, so only its control characters are neutralised. Free-form text from an unexpected error stays
+ * capped, because it has no such bound.
+ */
 function reason(error: unknown): string {
   const message = String(error).replace(/^PiIntercom:\s*/, '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
+  if (error instanceof AdoptionFailure) return message;
   return message.length > 240 ? `${message.slice(0, 240)}…` : message;
 }
 /**

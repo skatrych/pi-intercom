@@ -771,11 +771,14 @@ for (const site of ['probe', 'directory']) for (const interruption of ['malforme
   const runtime = await f.startRuntime({ launch: async () => { launches++; return { commandSubmitted: true }; }, probe: async () => { await gate.wait(); return { state: 'disconnected' }; } });
   runtime.options.probe = f.probeWorker; // adoption keeps real probes; only the later resume awaits are held
   assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
+  // Upstream 0.8.0 refuses to relaunch a saved subdirectory worker against the parent roster, so this
+  // resume proof uses a root-level registration; both await sites remain reachable.
+  await runtime.store.update(f.id, c => { c.agents.find(a => a.name === 'Builder').projectDirectory = '.'; });
   if (site === 'probe') runtime.options.probe = async () => { await gate.wait(); return { state: 'disconnected' }; };
   else {
     runtime.options.probe = async () => ({ state: 'disconnected' });
     const original = fs.realpath;
-    fs.realpath = async (...args) => { const result = await original(...args); if (armed && String(args[0]) === path.join(f.home, 'app')) { armed = false; await gate.wait(); } return result; };
+    fs.realpath = async (...args) => { const result = await original(...args); if (armed && String(args[0]) === f.home) { armed = false; await gate.wait(); } return result; };
     syncBuiltinESMExports(); t.after(() => { fs.realpath = original; syncBuiltinESMExports(); });
     armed = true;
   }
