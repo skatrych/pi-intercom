@@ -80,22 +80,24 @@ export class HandoffWorkflow {
                 }
         });
     }
-    assertJob(p) {
-        this.valid();
+    /** Only synchronous ConfigStore update callbacks: runtime/store retain authority ownership. */
+    assertUpdateJob(p) {
+        requireValue(!this.disposed);
         requireValue(!p.ended && this.jobs.get(p.target.sessionId) === p && Date.now() < Date.parse(p.job.deadlineAt));
     }
-    target(c, p) {
-        this.assertJob(p);
+    assertJob(p) { this.valid(); this.assertUpdateJob(p); }
+    targetForUpdate(c, p) {
+        this.assertUpdateJob(p);
         const a = c.agents.find(a => a.sessionId === p.target.sessionId && !a.coordinator);
         requireValue(a && a.closeJob?.jobId === p.job.jobId && pendingClose(a.closeJob) && a.port === p.target.port && a.projectDirectory === p.target.projectDirectory);
         return a;
     }
     async transition(p, state, reason) {
         await this.ctx.update(c => {
-            const a = this.target(c, p);
+            const a = this.targetForUpdate(c, p);
             a.closeJob = { ...a.closeJob, state, updatedAt: new Date().toISOString(), ...(reason ? { reason } : {}) };
             p.job = { ...a.closeJob };
-        }, () => this.assertJob(p));
+        }, () => this.assertUpdateJob(p));
     }
     async finish(p, state, reason) {
         if (p.ended)
@@ -133,7 +135,7 @@ export class HandoffWorkflow {
                 const a = c.agents.find(a => a.sessionId === target.sessionId && !a.coordinator);
                 requireValue(a && !fencedClose(a.closeJob) && a.port === target.port && a.projectDirectory === target.projectDirectory && c.multiplexer === 'herdr');
                 a.closeJob = { ...job };
-            }, () => this.assertJob(p));
+            }, () => this.assertUpdateJob(p));
             await p.initialized;
         }
         catch (error) {
@@ -275,13 +277,13 @@ export class HandoffWorkflow {
             requireValue(p.job.state === 'awaiting_handoff' || p.job.state === 'awaiting_settlement');
             try {
                 await this.ctx.update(c => {
-                    const a = this.target(c, p);
+                    const a = this.targetForUpdate(c, p);
                     if (a.handoff?.jobId === p.job.jobId)
                         requireValue(a.handoff.summary === payload.summary);
                     else
                         a.handoff = { version: 1, jobId: p.job.jobId, summary: payload.summary, updatedAt: new Date().toISOString() };
                     a.closeJob = { ...a.closeJob, state: 'awaiting_settlement', updatedAt: new Date().toISOString() };
-                }, () => this.assertJob(p));
+                }, () => this.assertUpdateJob(p));
                 this.assertJob(p);
                 p.job = { ...p.job, state: 'awaiting_settlement' };
             }

@@ -19,6 +19,7 @@ export interface ReminderClock {
     schedule(callback: () => void, milliseconds: number): () => void;
 }
 interface ReminderHost {
+    captureGuard?(): () => void;
     isCoordinator(): Promise<boolean>;
     busy(): boolean;
     deliver(text: string): void;

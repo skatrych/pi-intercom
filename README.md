@@ -102,9 +102,43 @@ Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headl
 
 ### Startup and launchers
 
-Without shared config, the current working directory becomes the coordinator root. Startup creates `.pi-intercom/config.json`, opens a loopback listener, synchronizes the name `Coordinator`, and waits for user input (no model turn). Existing config is found by walking upward. Invalid/unreadable config is an error and is not overwritten. Unknown session IDs, including forks, are workers, never replacement coordinators.
+Ordinary non-Orchestrator startup discovers config upward; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before discovery: second/wrong/unsafe boards stop, and no-board startup is held for a deliberate root bootstrap decision rather than silently creating a child board. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators. Coordinator actions and boot side effects are held until committed matching claim evidence and local responsibility are ready.
 
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
+
+## Start a fresh coordinator without losing the team
+
+A board can outlive its coordinator's conversation. Adoption lets a fresh session take over that
+board while keeping the worker roster, pending close jobs, reports and history. Workers send to the
+new coordinator on their next message—no worker restart or extension reload is needed.
+
+**Availability:** `/intercom-adopt` requires the separately installed
+[Orchestrator role integration](references/coordinator-adoption.md#availability-and-prerequisites);
+installing this package alone does not add the command. Use a fresh, persisted Orchestrator session
+in a trusted project under the shared projects home, with an idle interactive Pi UI. The projects
+home must be a Git repository with a clean index/worktree. Upgrade every process that writes board
+config to this version before taking over; older writers do not honor its lock.
+
+After ending the old coordinator, enter these commands in the **new Pi session**:
+
+```text
+/intercom-adopt status
+/intercom-adopt
+```
+
+Status shows the board and both identities without changing anything. The second command asks for
+an authorization reference, the exact confirmation that the old session ended, and approval of the
+displayed change. Success records the transition in `coordinator-claim.md` and makes this running
+session the coordinator, without sending workers any work. A registered worker cannot be promoted.
+
+A reachable old coordinator always blocks adoption. An unreachable endpoint **does not prove the
+session ended**; the human must confirm that separately. Failed or timed-out requests can have an
+unknown outcome: inspect status before retrying. The same command can finalize an interrupted
+transition or retry loading responsibility, but cannot recover prepared evidence belonging to a
+different session; that case needs human escalation. Stale locks also need human maintenance, not
+automatic removal. Do not edit board JSON to bypass a stop.
+
+See [recovery and the other limits](references/coordinator-adoption.md#recovery).
 
 ## Explicit workflow
 
@@ -249,7 +283,7 @@ Legacy coordinator-only `dashboardPort` values are accepted for migration, but t
 
 Workers have `coordinator:false` and an existing project directory equal to root or below it. Writes canonicalize directories and check real paths (including symlink escapes). Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
 
-Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. Updates are serialized, join Pi's file-mutation queue, validate, fsync a temporary file and atomically rename. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
+Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. All publications share Pi's file-mutation queue → process-local per-file queue → owner-token filesystem mutex; contention stops without stealing/replay. Updates recheck coordinator authority after lock acquisition, validate, fsync a temporary file and atomically rename. Adoption commits intent first and losslessly changes only the two coordinator identity value tokens; ordinary writes retain their normal serialization. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
 
 HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.1 also exposes side-effect-free `GET /intercom/health`, returning only protocol version and current session ID; it does not submit messages/model turns or write config. Envelope:
 
