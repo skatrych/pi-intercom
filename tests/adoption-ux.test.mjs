@@ -324,6 +324,22 @@ test('AC6 exact wording and valid evidence still complete the adoption', async t
   } finally { await f.dispose(); }
 });
 
+test('AC6 a verified live old coordinator still refuses adoption before any question', async t => {
+  const f = await fixture();
+  try {
+    const boardPort = (await f.board.parsed()).agents.find(agent => agent.coordinator).port;
+    const live = f.track(await f.listen(0, async () => { throw new Error('no worker traffic in this fixture'); },
+      () => ({ version: 1, sessionId: IDS.gone })));
+    await f.board.write((await f.board.read()).replace(String(boardPort), String(live.port)));
+    const before = await surface(f);
+    const result = await f.workflow().run(f.context, 'adopt');
+    assert.equal(result.code, 'OLD_CONNECTED', text(result));
+    assert.match(text(result), /still verifies at its endpoint/);
+    assert.deepEqual(f.ui.prompts.map(prompt => prompt.kind), [], 'a live coordinator is refused before any decision is offered');
+    assertNothingChanged(before, await surface(f));
+  } finally { await f.dispose(); }
+});
+
 // ---- AC7: unrelated untracked content stops blocking a first declaration -------------------------
 
 for (const state of ['a', 'b']) {
