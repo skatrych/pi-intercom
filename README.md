@@ -146,7 +146,7 @@ transition or retry loading responsibility, but cannot recover prepared evidence
 different session; that case needs human escalation. Stale locks also need human maintenance, not
 automatic removal. Do not edit board JSON to bypass a stop.
 
-See [safety, recovery and verification details](references/coordinator-adoption.md).
+See [recovery and the other limits](references/coordinator-adoption.md#recovery).
 
 ## Explicit workflow
 

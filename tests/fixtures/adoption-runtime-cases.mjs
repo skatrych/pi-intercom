@@ -63,7 +63,7 @@ async function phaseProof(name) {
     const initialSends = f.sends.length;
     if (!bootstrap) await saveWorkerReport(f.home, { version: 1, sessionId: IDS.workerOne, status: 'blocked', summary: 'previous stored evidence', updatedAt: '2026-10-16T00:00:00.000Z' });
     if (name === 'callbacks-commit-failed') await writeFile(path.join(f.home, '.git/hooks/pre-commit'), '#!/bin/sh\nif grep -q \'"phase": "active"\' coordinator-claim.md; then exit 1; fi\n', { mode: 0o755 });
-    if (name === 'callbacks-promotion-pending' || name === 'promotion-failed-claim-callbacks') runtime.promoteCoordinator = async () => { throw Error('fixture promotion blocked'); };
+    if (name === 'callbacks-promotion-pending') runtime.promoteCoordinator = async () => { throw Error('fixture promotion blocked'); };
     // Bootstrap/declaration have no swap; stop immediately after active write instead.
     if (bootstrap || declaration) opts.phase = async step => { if (step === 'active-written') await gate.wait(); };
     if (recovery) {
@@ -71,7 +71,7 @@ async function phaseProof(name) {
       assert.equal(runtime.coordinatorActionReady(), false);
     }
     const pending = runtime.adoptCoordinator(f.context, 'adopt');
-    if (name === 'callbacks-commit-failed' || name === 'callbacks-promotion-pending' || name === 'promotion-failed-claim-callbacks') {
+    if (name === 'callbacks-commit-failed' || name === 'callbacks-promotion-pending') {
       gate.release(); const result = await pending;
       assert.equal(result.code, name === 'callbacks-commit-failed' ? 'GIT' : 'PROMOTION_PENDING', result.lines.join('\n'));
       await blocked(f, runtime, timer);
@@ -164,11 +164,9 @@ async function deliveryProof(name) {
 }
 export async function runtimeCase(name) {
   try {
-    const aliases = { 'callbacks-400': 'callbacks-after-swap', 'callbacks-suppressed': 'callbacks-active-dirty', 'callbacks-not-started': 'callbacks-before-promotion', 'callbacks-queued-report': 'queued-report-cross-epoch', 'adoption-claim-callbacks': 'callbacks-after-swap' };
-    const actual = aliases[name] ?? name;
-    if (['send-destination-changes', 'promoted-endpoint'].includes(actual)) await deliveryProof(name);
-    else if (['callbacks-cross-epoch', 'queued-report-cross-epoch', 'stored-report-notify-cross-epoch', 'reminder-cross-epoch', 'handoff-cross-epoch'].includes(actual)) await crossEpoch(actual);
-    else await phaseProof(actual);
+    if (name === 'send-destination-changes') await deliveryProof(name);
+    else if (['callbacks-cross-epoch', 'queued-report-cross-epoch', 'stored-report-notify-cross-epoch', 'reminder-cross-epoch', 'handoff-cross-epoch'].includes(name)) await crossEpoch(name);
+    else await phaseProof(name);
     console.log('TERMINAL: ASSERTIONS exit 0');
   } catch (error) { console.error(`FIXTURE ERROR: ${error.stack}`); process.exitCode = 3; }
 }

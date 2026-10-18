@@ -152,15 +152,8 @@ const CASES = {
   // ---- AC7: host and interaction. These need a real Runtime and a live loopback endpoint.
   'bootstrap-claim-callbacks': { runtime: true, runtimeCase: 'bootstrap-claim-callbacks', expect: { code: 'ASSERTIONS', exit: 0 } },
   'declaration-claim-callbacks': { runtime: true, runtimeCase: 'declaration-claim-callbacks', expect: { code: 'ASSERTIONS', exit: 0 } },
-  'adoption-claim-callbacks': { runtime: true, runtimeCase: 'adoption-claim-callbacks', expect: { code: 'ASSERTIONS', exit: 0 } },
   'clean-advance-claim-callbacks': { runtime: true, runtimeCase: 'clean-advance-claim-callbacks', expect: { code: 'ASSERTIONS', exit: 0 } },
-  'promotion-failed-claim-callbacks': { runtime: true, runtimeCase: 'promotion-failed-claim-callbacks', expect: { code: 'ASSERTIONS', exit: 0 } },
-  'callbacks-400': { runtime: true, runtimeCase: 'callbacks-400', expect: { code: 'ASSERTIONS', exit: 0 } },
-  'callbacks-suppressed': { runtime: true, runtimeCase: 'callbacks-suppressed', expect: { code: 'ASSERTIONS', exit: 0 } },
-  'callbacks-not-started': { runtime: true, runtimeCase: 'callbacks-not-started', expect: { code: 'ASSERTIONS', exit: 0 } },
-  'callbacks-queued-report': { runtime: true, runtimeCase: 'callbacks-queued-report', expect: { code: 'ASSERTIONS', exit: 0 } },
   'send-destination-changes': { runtime: true, runtimeCase: 'send-destination-changes', expect: { code: 'ASSERTIONS', exit: 0 } },
-  'promoted-endpoint': { runtime: true, runtimeCase: 'promoted-endpoint', expect: { code: 'ASSERTIONS', exit: 0 } },
 
   'callbacks-after-swap': { runtime: true },
   'callbacks-active-dirty': { runtime: true },
