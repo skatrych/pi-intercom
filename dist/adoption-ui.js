@@ -214,8 +214,16 @@ export class AdoptionDialog {
         this.timer.unref?.();
         this.tui.requestRender();
     }
-    /** A chunk outside paste framing is one or more complete key events. */
+    /**
+     * A chunk outside paste framing is one or more complete key events. Anything reaching here that still
+     * carries a closing delimiter is framing that never opened a frame: it is not a key, and it is not
+     * ignorable noise, so it fails the step rather than vanishing into the control-character branch.
+     */
     dispatch(data) {
+        if (data.indexOf(PASTE_END) !== -1) {
+            this.fail('a paste end marker arrived with no paste in progress');
+            return;
+        }
         let rest = data;
         while (rest.length > 0 && !this.settled) {
             const match = KEY_SEQUENCE.exec(rest);

@@ -60,3 +60,52 @@ test('bridge rejects copied session manager and uses captured UI, never caller d
   await handlers.get('session_shutdown')(); assert.equal(bus.has(ADOPTION_CHANNEL), false);
   assert.equal((await offers[0].run(ctx, 'adopt')).code, 'SESSION_CHANGED');
 });
+
+// MINOR 3: the routing seam at runtime. A swapped kind/prompt wiring in adoptionContext would otherwise
+// pass every typecheck: this reaches the real interaction through the captured extension context.
+test('bridge routes adoption questions to the custom surface, with kind and prompt intact', async t => {
+  const f = await fixture({ runtime: true, noBoard: true });
+  const prior = Object.fromEntries(['PI_ROLE_DIR', 'PI_ROLES_DIR', 'PI_INTERCOM_PROJECTS_HOME', 'PI_INTERCOM_WORKER_ROLE'].map(key => [key, process.env[key]]));
+  process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator');
+  process.env.PI_ROLES_DIR = path.join(f.home, 'roles');
+  process.env.PI_INTERCOM_PROJECTS_HOME = f.home;
+  delete process.env.PI_INTERCOM_WORKER_ROLE;
+  const handlers = new Map(), bus = new Map();
+  t.after(async () => {
+    await handlers.get('session_shutdown')?.(); await f.dispose();
+    for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  });
+  extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
+    events: { on: (channel, handler) => { bus.set(channel, handler); return () => bus.delete(channel); } } });
+
+  const seen = { input: 0, custom: [] };
+  const ctx = {
+    ...f.context,
+    sessionManager: { ...f.context.sessionManager, getBranch: () => [] },
+    ui: {
+      notify() {}, setWidget() {},
+      input: async () => { seen.input++; return undefined; },
+      confirm: async () => assert.fail('confirm must route through the custom surface too'),
+      custom: async (factory) => {
+        const renders = [];
+        const component = factory({ terminal: { columns: 100, rows: 30 }, requestRender() {} }, { fg: (_c, text) => text }, {}, () => {});
+        renders.push(component.render(100).join('\n'));
+        seen.custom.push({ kind: component.kind, text: renders[0] });
+        component.dispose?.();
+        return { cancelled: true };
+      },
+    },
+  };
+  await handlers.get('session_start')({}, ctx);
+  const offers = []; bus.get(ADOPTION_CHANNEL)({ offers }); assert.equal(offers.length, 1);
+  const result = await offers[0].run(ctx, 'adopt');
+  assert.equal(seen.input, 0, 'no adoption question may reach the host input placeholder path');
+  if (result.code !== 'CANCELLED' && result.code !== 'SESSION_UNPERSISTED') {
+    assert.fail(`routing unreachable: ${result.code} :: ${result.lines.join(' | ')}`);
+  }
+  assert.equal(seen.custom.length, 1, `expected exactly one routed question, saw ${JSON.stringify(seen.custom)}`);
+  assert.equal(seen.custom[0].kind, 'boardInitialize', 'the decision kind must survive the adapter');
+  assert.ok(seen.custom[0].text.includes(f.home), 'the visible screen carries the board root from the prompt');
+  assert.ok(seen.custom[0].text.includes(f.id), 'and the session id from the prompt');
+  assert.equal(result.code, 'CANCELLED', 'a dismissed custom surface ends as a named cancellation');
+});

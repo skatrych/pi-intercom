@@ -96,7 +96,11 @@ export declare class AdoptionDialog<T extends string | boolean> implements Adopt
      * the step fails visibly instead of waiting forever or submitting an incomplete answer.
      */
     private beginPaste;
-    /** A chunk outside paste framing is one or more complete key events. */
+    /**
+     * A chunk outside paste framing is one or more complete key events. Anything reaching here that still
+     * carries a closing delimiter is framing that never opened a frame: it is not a key, and it is not
+     * ignorable noise, so it fails the step rather than vanishing into the control-character branch.
+     */
     private dispatch;
     private key;
     private characters;

@@ -666,10 +666,19 @@ export class AdoptionWorkflow {
         if (!claim) {
             if (surveyed.state !== 'b')
                 return halt('CLAIM_OTHER', 'no claim record exists for this board state; a declaration is never inferred for it');
+            // A board entry that names this session id but a different port is not "this session's board": it is
+            // a pair the runtime cannot verify. Declaring here would commit a claim disagreeing with the board,
+            // so the disagreement is refused before any yes/no is offered.
+            const entry = surveyed.scanned ? coordinator(surveyed.scanned.config) : undefined;
+            if (entry !== undefined && entry.port !== surveyed.identity.port) {
+                return halt('IDENTITY', `the board names ${entry.sessionId} port ${entry.port}, but this runtime endpoint verifies ${surveyed.identity.sessionId} port ${surveyed.identity.port}; the pair is not verified, so no declaration is offered and nothing was written`);
+            }
             // Issue #9: an existing board naming this verified session with no claim history is a first
             // declaration, not an adoption. One explicit yes/no replaces the former typed authority reference.
-            const confirmed = await context.ui.confirm({ kind: 'firstCoordinatorDeclaration', prompt: firstDeclarationPrompt(surveyed.home, surveyed.identity) });
-            if (!confirmed)
+            const confirmed = await this.confirmGate(context, { kind: 'firstCoordinatorDeclaration', prompt: firstDeclarationPrompt(surveyed.home, surveyed.identity) }, 'first-coordinator declaration');
+            if ('stop' in confirmed)
+                return confirmed.stop;
+            if (!confirmed.value)
                 return halt('CANCELLED', `first-coordinator declaration at ${surveyed.home} was declined; nothing was written`);
             return this.declare(context, surveyed, declarationEvidence(surveyed.home, surveyed.identity));
         }
@@ -707,8 +716,10 @@ export class AdoptionWorkflow {
     async bootstrap(context, surveyed) {
         const home = surveyed.home, identity = surveyed.identity;
         // One enriched yes/no: the confirmation IS the authorization, so no text question follows it.
-        const confirmed = await context.ui.confirm({ kind: 'boardInitialize', prompt: boardInitializePrompt(home, identity) });
-        if (!confirmed)
+        const confirmed = await this.confirmGate(context, { kind: 'boardInitialize', prompt: boardInitializePrompt(home, identity) }, 'first-board initialization');
+        if ('stop' in confirmed)
+            return confirmed.stop;
+        if (!confirmed.value)
             return halt('CANCELLED', `first-board initialization at ${home} was declined; nothing was written`);
         const evidence = declarationEvidence(home, identity);
         const store = this.options.storeFor(home);
@@ -795,10 +806,12 @@ export class AdoptionWorkflow {
         if (previous === undefined) {
             const code = surveyed.claim ? 'CLAIM_OTHER' : 'ADOPTION_REQUIRED';
             const record = surveyed.claim ? `record ${surveyed.claim.coordinator.sessionId}/${surveyed.claim.coordinator.port}; ` : 'claim absent; ';
-            const proceed = await context.ui.confirm({ kind: 'adoptionDecision',
+            const proceed = await this.confirmGate(context, { kind: 'adoptionDecision',
                 prompt: [`ADOPTION STOP ${code}`, `${record}this session ${identity.sessionId}/${identity.port}; board ${board.sessionId}/${board.port} at ${surveyed.home}. No coordinator action is authorized.`,
-                    ...gateContext, '', 'Continue to a NEW human adoption decision?'].join('\n') });
-            if (!proceed)
+                    ...gateContext, '', 'Continue to a NEW human adoption decision?'].join('\n') }, 'adoption decision');
+            if ('stop' in proceed)
+                return { stop: proceed.stop };
+            if (!proceed.value)
                 return { stop: halt(code, `${record}this session ${identity.sessionId}/${identity.port}; board ${board.sessionId}/${board.port} — report both; wait for human decision`) };
         }
         const authority = await this.askAdoptionAuthority(context, surveyed, target, source, gateContext, probe);
@@ -806,14 +819,16 @@ export class AdoptionWorkflow {
             return authority;
         const unchanged = leftUnchanged(surveyed.scanned);
         const fenced = unchanged.filter(entry => entry.closeJob !== null && FENCED_STATES.includes(entry.closeJob.state));
-        const confirmed = await context.ui.confirm({
+        const confirmed = await this.confirmGate(context, {
             kind: 'adoptTransition',
             prompt: `Transition ${transitionId}; config SHA256 ${previewHash}. Adopt the board at ${surveyed.home}: coordinator ${board.sessionId} port ${board.port} -> ${identity.sessionId} port ${identity.port}. `
                 + `Old endpoint probe: ${probe.state} (${probe.reason}) — disconnected and unknown are not evidence of termination. `
                 + `Left unchanged: ${roster(unchanged)}${fenced.length ? `; close jobs reported and left fenced: ${fenced.map(entry => `${entry.name}/${entry.closeJob.state}`).join(', ')}` : ''}. `
                 + `No worker is sent anything, and nothing is resumed, removed, interrupted, reloaded or restarted. Confirm this exact transition.`,
-        });
-        if (!confirmed)
+        }, 'exact transition');
+        if ('stop' in confirmed)
+            return { stop: confirmed.stop };
+        if (!confirmed.value)
             return { stop: halt('CANCELLED', 'the exact transition was declined; no evidence, replacement or action is authorized') };
         return { authority: Object.freeze({ ...authority, decision: Object.freeze({ transitionId, boardRoot: surveyed.home,
                     configSha256: previewHash, previous: Object.freeze({ sessionId: board.sessionId, port: board.port }), coordinator: Object.freeze({ sessionId: identity.sessionId, port: identity.port }) }) }) };
@@ -857,6 +872,25 @@ export class AdoptionWorkflow {
             }
             if (error instanceof AdoptionHostUiUnavailable)
                 return { stop: halt('HOST', `${step} cannot be displayed by this Pi UI: ${reason(error)}; no unlabelled or placeholder-only input was opened.`) };
+            throw error;
+        }
+    }
+    /**
+     * One yes/no decision, with the same named failure mapping as `capture`. Without it a malformed paste
+     * during a confirmation escapes as an unattributed `HOST` failure, and the operator loses the one thing
+     * ADR 0009-B requires: which step could not be read. A capture failure is never read as "No" either —
+     * declining is a decision, an unreadable answer is not.
+     */
+    async confirmGate(context, options, step) {
+        try {
+            return { value: await context.ui.confirm(options) === true };
+        }
+        catch (error) {
+            if (error instanceof AdoptionInputCaptureFailure) {
+                return { stop: halt('CONFIRMATION', `${step}: the decision could not be read from this session's Pi UI (${reason(error)}). No partial, normalized or auto-submitted candidate is accepted, and an unreadable answer is not treated as a No.`) };
+            }
+            if (error instanceof AdoptionHostUiUnavailable)
+                return { stop: halt('HOST', `${step} cannot be displayed by this Pi UI: ${reason(error)}; no unlabelled or placeholder-only confirmation was opened.`) };
             throw error;
         }
     }
@@ -1064,12 +1098,14 @@ export class AdoptionWorkflow {
         }
         if (board.sessionId !== identity.sessionId || board.port !== identity.port)
             return halt('RECOVERY_REQUIRED', 'expected-after config does not name the recorded adopting pair');
-        const confirmed = await context.ui.confirm({
+        const confirmed = await this.confirmGate(context, {
             kind: 'finalizeTransition',
             prompt: `Finalize recorded transition ${intent.transitionId} without replacement: ${intent.previous.sessionId} port ${intent.previous.port} -> ${intent.coordinator.sessionId} port ${intent.coordinator.port}, which is already the board entry. `
                 + `Evidence is ${clean ? 'clean committed prepared intent' : 'exactly derived active bytes already in the worktree'}. Commit that active evidence and promote this running session?`,
-        });
-        if (!confirmed)
+        }, 'finalization');
+        if ('stop' in confirmed)
+            return confirmed.stop;
+        if (!confirmed.value)
             return halt('CANCELLED', 'finalization was declined; the existing evidence is preserved unchanged');
         const store = this.options.storeFor(home);
         const epoch = this.options.readiness.close();

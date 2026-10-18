@@ -112,8 +112,8 @@ test('a paste frame split across chunks is reassembled byte-exactly', async t =>
 test('an opening delimiter split across chunks is transport, never answer text', async t => {
   const d = await dialog();
   d.feed(PASTE_START.slice(0, 3));
-  d.feed(`${PASTE_START.slice(3)}one${PASTE_END.slice(0, 2)}`);
-  d.feed(`${PASTE_END.slice(2)}two${PASTE_END}`);
+  d.feed(`${PASTE_START.slice(3)}onetwo${PASTE_END.slice(0, 2)}`);
+  d.feed(PASTE_END.slice(2));
   d.feed('\r');
   assert.equal(d.settled().value, 'onetwo', 'both split delimiters are removed and no byte of the payload is lost');
 });
@@ -240,6 +240,31 @@ test('the same paste with one added space is refused by the domain comparison, u
   d.feed('\r');
   assert.equal(d.settled().value.endsWith(' '), true, 'the trailing space survived, as it must');
   assert.notEqual(d.settled().value, ENDED_WORDING('session-1'), 'so the exact comparison still fails');
+});
+
+test('a closing delimiter arriving after a complete frame fails closed, whole or chunked', async t => {
+  const whole = await dialog();
+  whole.feed(`${PASTE_START}ok${PASTE_END}${PASTE_END}`);
+  assert.match(whole.settled().captureFailure, /no paste in progress/, 'one chunk');
+
+  const chunked = await dialog();
+  chunked.feed(`${PASTE_START}ok${PASTE_END}`);
+  chunked.feed(PASTE_END);
+  assert.match(chunked.settled().captureFailure, /no paste in progress/, 'a later chunk');
+  assert.equal(chunked.settled().value, undefined, 'an accepted first paste is not silently answered after framing broke');
+
+  const late = await dialog();
+  late.feed(`${PASTE_START}ok${PASTE_END}`);
+  late.feed(`x${PASTE_END}`);
+  assert.match(late.settled().captureFailure, /no paste in progress/, 'a stray end in a later chunk, after ordinary keystrokes');
+});
+
+test('two well-formed frames in one chunk still answer, so the failure is only about real ambiguity', async t => {
+  const d = await dialog();
+  d.feed(`${PASTE_START}a${PASTE_END}`);
+  d.feed(`${PASTE_START}b${PASTE_END}`);
+  d.feed('\r');
+  assert.equal(d.settled().value, 'ab', 'sequential pastes append; nothing was guessed away');
 });
 
 // ---- routing contract ------------------------------------------------------------------------------
