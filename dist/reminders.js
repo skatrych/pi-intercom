@@ -1,5 +1,28 @@
-export const REMINDER_INTERVAL_MS = 5 * 60 * 1000;
-export const REMINDER_TEXT = 'Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.\n\nIf there is genuinely nothing to follow up on, call intercom_stop_reminders. Otherwise, reminders continue every five minutes; a new worker call resets the timer.\n\nThis reminder does not authorize new work, retries, worker closure, or publication.';
+/** Operator override for the coordinator reminder interval, in whole minutes. Read once per runtime start. */
+export const REMINDER_MINUTES_ENV = 'PI_INTERCOM_REMINDER_MINUTES';
+export const DEFAULT_REMINDER_MINUTES = 5;
+export const MIN_REMINDER_MINUTES = 1;
+/** floor(2147483647 / 60000): the largest whole-minute delay that stays inside Node's signed 32-bit timeout maximum. */
+export const MAX_REMINDER_MINUTES = 35791;
+export const DEFAULT_REMINDER_INTERVAL_MS = DEFAULT_REMINDER_MINUTES * 60 * 1000;
+/**
+ * Trimmed ASCII decimal whole minutes, leading zeros allowed, value 1-35791.
+ * Anything else (missing, blank, sign, fraction, exponent, hex, suffix, NaN,
+ * Infinity, unsafe or out-of-range) silently returns the default interval: no
+ * throw, no clamp, no disable, and the raw value is never returned or echoed.
+ */
+export function reminderIntervalMs(raw) {
+    const trimmed = raw?.trim() ?? '';
+    if (!/^[0-9]+$/.test(trimmed))
+        return DEFAULT_REMINDER_INTERVAL_MS;
+    const minutes = Number(trimmed);
+    if (!Number.isSafeInteger(minutes) || minutes < MIN_REMINDER_MINUTES || minutes > MAX_REMINDER_MINUTES)
+        return DEFAULT_REMINDER_INTERVAL_MS;
+    return minutes * 60 * 1000;
+}
+/** Production environment read. Callers snapshot the value at runtime start and never reread it while that runtime runs. */
+export function readReminderMinutesEnv() { return process.env[REMINDER_MINUTES_ENV]; }
+export const REMINDER_TEXT = 'Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.\n\nIf there is genuinely nothing to follow up on, call intercom_stop_reminders. Otherwise, reminders continue at the configured interval; a new worker call resets the timer.\n\nThis reminder does not authorize new work, retries, worker closure, or publication.';
 const clock = {
     schedule(callback, milliseconds) {
         const timer = setTimeout(callback, milliseconds);
@@ -11,15 +34,18 @@ const clock = {
 export class CoordinatorReminders {
     host;
     timer;
+    intervalMs;
     generation = 0;
     tick = 0;
     checking = false;
     disposed = false;
     cancel;
     detachOwner;
-    constructor(host, timer = clock) {
+    /** intervalMs comes from reminderIntervalMs(); the scheduler never revalidates operator input. */
+    constructor(host, timer = clock, intervalMs = DEFAULT_REMINDER_INTERVAL_MS) {
         this.host = host;
         this.timer = timer;
+        this.intervalMs = intervalMs;
     }
     arm(signal) {
         if (this.disposed || signal?.aborted)
@@ -92,7 +118,7 @@ export class CoordinatorReminders {
                     this.checking = false;
                 }
             })();
-        }, REMINDER_INTERVAL_MS);
+        }, this.intervalMs);
     }
 }
 //# sourceMappingURL=reminders.js.map

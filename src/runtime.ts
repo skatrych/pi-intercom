@@ -12,7 +12,7 @@ import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose, type CloseProvider, type HandoffKind } from './handoff.js';
-import { CoordinatorReminders, type ReminderClock } from './reminders.js';
+import { CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, readReminderMinutesEnv, reminderIntervalMs, type ReminderClock } from './reminders.js';
 import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, bootClaimEvidence, committedActiveClaimMatches, countBoards, projectsHome, stop, type AdoptionPhase, type CommandContext, type Result } from './adoption.js';
 
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
@@ -75,6 +75,8 @@ export interface RuntimeOptions {
   reminderClock?: ReminderClock;
   /** Test seam for the adoption boundary. Production reads this process's configuration. */
   adoption?: Partial<AdoptionDeps>;
+  /** Test seam for the operator environment. Production reads process.env once per runtime start. */
+  reminderMinutesEnv?: () => string | undefined;
 }
 export interface AdoptionDeps {
   projectsHome: string;
@@ -107,6 +109,8 @@ export class Intercom {
   private reminders?: CoordinatorReminders;
   private reminderRevision = 0;
   private reminderInvocation = 0;
+  /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
+  private reminderIntervalMsCache = DEFAULT_REMINDER_INTERVAL_MS;
   /**
    * Coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
    * projects-home board. It starts closed on unresolved evidence and opens only after committed active
@@ -225,6 +229,9 @@ export class Intercom {
     this.readyClaimBytes = undefined; this.bootEvidenceReady = false;
     this.observationEnabled = !this.orchestratorLaunch();
     const generation = ++this.generation, assertValid = this.validity();
+    // Snapshot the reminder interval once for this runtime. A child tool cannot
+    // change this process environment, and Pi /reload restarts this runtime.
+    this.reminderIntervalMsCache = reminderIntervalMs((this.options.reminderMinutesEnv ?? readReminderMinutesEnv)());
     let record = this.captureObserver();
     try {
       // Count the actual ancestor chain before discovery reads any config or observer creates state.
@@ -322,7 +329,7 @@ export class Intercom {
       isCoordinator: async () => { const fresh = await this.state(); assertValid(); return fresh.me?.coordinator === true; },
       busy: () => this.host.busy(),
       deliver: message => { assertValid(); this.assertActionReady(); this.host.deliver(message, false); },
-    }, this.options.reminderClock);
+    }, this.options.reminderClock, this.reminderIntervalMsCache);
     this.handoff = new HandoffWorkflow({
       state: async () => { const state = await this.state(); if (state.me?.coordinator) this.assertActionReady(this.callbackEpoch.getStore()); return state; },
       assertCurrent: () => { assertValid(); this.assertActionReady(this.callbackEpoch.getStore()); },

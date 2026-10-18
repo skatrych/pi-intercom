@@ -41,6 +41,8 @@ export interface RuntimeOptions {
     reminderClock?: ReminderClock;
     /** Test seam for the adoption boundary. Production reads this process's configuration. */
     adoption?: Partial<AdoptionDeps>;
+    /** Test seam for the operator environment. Production reads process.env once per runtime start. */
+    reminderMinutesEnv?: () => string | undefined;
 }
 export interface AdoptionDeps {
     projectsHome: string;
@@ -78,6 +80,8 @@ export declare class Intercom {
     private reminders?;
     private reminderRevision;
     private reminderInvocation;
+    /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
+    private reminderIntervalMsCache;
     /**
      * Coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
      * projects-home board. It starts closed on unresolved evidence and opens only after committed active
