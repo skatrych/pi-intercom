@@ -1,20 +1,30 @@
 # ADR 0009-C: Ignore only unrelated untracked dirt for first declarations
 
+## Decision statement
+
+Allow unrelated untracked files only when declaring the first coordinator; keep all other Git safety checks.
+
+## Short summary
+
+Scratch content outside the protected board paths must not block either first-declaration case. Keep adoption and recovery strict, inspect protected paths even when ignored, and describe staged, tracked and untracked blockers accurately.
+
+## Details
+
 - Status: Proposed; implementation pending review
 - Date: 2026-10-18
 - Scope: [skatrych/pi-intercom #9](https://github.com/skatrych/pi-intercom/issues/9), refined issue body
 - Inspected base: `main@1d5bb074fa3fe306f394c1a292cbed95ff438f3b`
 - Related: [authorization](0009-first-declaration-authorization.md), [implementation plan](0009-adoption-ux-implementation-plan.md)
 
-## Context
+### Context
 
 `assertGitSafe` rejects every staged path and then every dirty path except the claim; `dirtyPaths` already records whether a status entry is untracked. The refusal nevertheless calls **all** unrelated paths modified tracked files. `reconcile` has its own strict precheck with a generic unrelated-dirt message. Changing only `assertGitSafe` globally would unintentionally relax ordinary adoption, prepared renewal and finalization, since `writeCommit`/`commitClaim` share it.
 
 The refined issue chooses less friction only for first-board creation and first-coordinator declaration, not a board-surface-only cleanliness rule for all transitions. The index must remain globally empty before each workflow-owned commit, even when an unrelated staged path would not be included by `commit --only`.
 
-## Decision
+### Decision
 
-### Explicit private operation policy; strict by default
+#### Explicit private operation policy; strict by default
 
 Introduce a private policy distinguishing `strict` from `first-declaration`. Only the verified state (a) bootstrap and claim-history-free state (b) declaration may select `first-declaration`. Derive it from the backend's validated path, never from caller options, merely from a claim's self-described kind, or from a shared mutable workflow flag.
 
@@ -32,7 +42,7 @@ Thread that policy explicitly through `assertGitSafe`, `writeCommit` and `commit
 
 Do not require scratch directories to be ignored, moved, cleaned or committed. Do not recurse into unrelated scratch clones or regard their boards as ancestors of the actual cwd. Existing cwd-to-projects-home board discovery/count and canonical repository-root requirements remain unchanged.
 
-### Protected surface and recognition
+#### Protected surface and recognition
 
 Paths are relative to the canonical projects-home Git root:
 
@@ -53,7 +63,7 @@ Implement a bounded, no-symlink-follow protected-namespace inspection for the fi
 
 This inspection is limited to the protected namespace; it is not a repository-wide traversal or a new adoption/recovery cleanup policy. Existing adoption's historical-data preservation fixtures (including ignored unrelated historical files) remain unchanged; the new first-declaration exception does not grant a broad new protected-content allowance there.
 
-### Accurate diagnostics in every path
+#### Accurate diagnostics in every path
 
 Classify and name blockers as separate facts:
 
@@ -67,13 +77,13 @@ A mixed staged-and-worktree path can have both classifications; do not hide the 
 
 Use NUL-delimited porcelain/index path queries and parse index/worktree status separately so spaces, quoting, newlines, renames and non-ASCII paths are not misclassified or split into invented filenames. Include source/destination paths for tracked renames/copies. Escape path controls for safe display without changing the underlying path identity. A failed/truncated Git query is uncertainty, never a clean repository; preserve the existing failure-closed behavior and test output-completeness handling when modifying the status reader. Do not change unrelated Git/evidence queries merely for refactoring.
 
-## Required unchanged isolation
+### Required unchanged isolation
 
 Globally empty pre-existing index; unresolved-operation rejection; unrelated tracked-dirt rejection; canonical Git-root/home requirement; board count and safe paths; exact config bytes and newest claim history; shared-lock acquisition/ownership checks; immediately-before-effect/commit rechecks; claim-only `commit --only` and resulting parent/path/byte verification; no hook bypass, staging sweep, cleanup, reset, ignore-file edit, implicit rollback, or automatic retry.
 
 The claim remains the sole changed path in generated commits. A workflow-owned intent-to-add for a new claim is not permission to accept a pre-staged human claim; retain the existing empty-index gates and failed-hook semantics.
 
-## Alternatives and consequences
+### Alternatives and consequences
 
 - Fix only the word “tracked”: necessary but insufficient; retains unrelated scratch friction.
 - Globally ignore untracked paths inside the shared helper: rejected; broadens adoption/recovery contrary to the refinement.
@@ -81,6 +91,6 @@ The claim remains the sole changed path in generated commits. A workflow-owned i
 - Trust `.gitignore` as a safety boundary or skip every protected path by prefix: rejected; ignored unsafe claim/config/layout is still unsafe.
 - Explicit policy threading plus protected-path classification requires more tests, but keeps the exception reviewable and prevents its leakage into recovery. Existing-adoption/recovery strictness conservatively isolates a multi-commit replacement/reconciliation workflow from unrelated pending work, even though each commit is path-scoped.
 
-## Verification
+### Verification
 
 Implementation-plan AC7/8/9 cover both first-declaration paths, unchanged scratch bytes/ignore/index state, claim-only commits, negative controls for ordinary adoption/recovery, ignored protected cases, staged/tracked/mixed diagnostics and last-moment races. This ADR changes no implementation or live board.
