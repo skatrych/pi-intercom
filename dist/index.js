@@ -5,6 +5,7 @@ import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMut
 import { ConfigStore } from './config.js';
 import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
 import { stop } from './adoption.js';
+import { adoptionInteraction } from './adoption-ui.js';
 import { launchers } from './launcher.js';
 import { ensureMonitorPane } from './monitor-launcher.js';
 import { createActivityTracker } from './activity.js';
@@ -76,10 +77,12 @@ function adoptionContext(captured, waitForIdle) {
             getSessionDir: () => captured.sessionManager.getSessionDir(),
         },
         ui: {
-            // Host signature is `input(title, placeholder)` and `confirm(title, message)` in both the developed
-            // against 0.84.4 and the intended 1.2.0 public API. A dismissal resolves undefined, which is a stop.
-            input: async ({ prompt }) => captured.ui.input('Intercom coordinator adoption', prompt),
-            confirm: async ({ prompt }) => captured.ui.confirm('Intercom coordinator adoption', prompt),
+            // Issue #9: no adoption question is ever handed to the host's `input(title, placeholder)`, whose
+            // installed dialog renders the placeholder nowhere. `adoptionInteraction` renders the complete
+            // prompt as durable visible text with raw-preserving answer capture in one Pi-owned screen, and a
+            // host without a custom surface fails closed as `HOST` instead of asking an invisible question.
+            input: options => adoptionInteraction(captured.ui).input(options),
+            confirm: options => adoptionInteraction(captured.ui).confirm(options),
         },
         ...(waitForIdle ? { waitForIdle } : {}),
     };
