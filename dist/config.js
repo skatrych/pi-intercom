@@ -592,8 +592,8 @@ export class ConfigStore {
          * gate -- exactly as the publication gate (`assertOwned`) and the former release gating did. A lock
          * redirected outside the root is left exactly as found even while it still carries our token, and no
          * release failure is raised for it, so an in-flight error is never replaced (upstream's cleanup
-         * boundary). Leaving a lock we cannot safely reach is fail-closed: the next writer sees a foreign
-         * owner and stops rather than this call unlinking files outside the root.
+         * boundary). Leaving a lock we cannot safely reach is fail-closed: the next writer is refused by the
+         * same root check before it can touch anything, rather than this call unlinking outside the root.
          */
         const outsideRoot = async () => {
             try {
