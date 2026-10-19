@@ -65,6 +65,31 @@ async function reportBytes(f) {
   const directory = path.join(f.home, '.pi-intercom/reports');
   return Promise.all((await readdir(directory)).sort().map(async name => [name, await readFile(path.join(directory, name), 'utf8')]));
 }
+/**
+ * Hold a proof at the runtime's own admission boundary.
+ *
+ * Every await a coordinator fence must survive sits inside config.directory() -- the check that separates
+ * coordinator admission from dispatch. At the root-level directories upstream 0.8.0 requires, that check
+ * resolves the board root, which is ALSO what the pre-admission ConfigStore.read() path resolves, so
+ * matching the target path alone fires during read() and the proof becomes vacuous. The hold is therefore
+ * anchored on the directory() frame itself. If that frame is ever absent the barrier never fires and the
+ * proof times out awaiting gate.reached, which fails loudly instead of silently proving nothing.
+ */
+function holdAtAdmissionBoundary(home, gate) {
+  const original = fs.realpath;
+  let armed = false;
+  fs.realpath = async (...args) => {
+    const result = await original(...args);
+    const inDirectory = /at (?:async )?directory \(file:[^)]*[\\/]config\.js:/.test(new Error().stack ?? '');
+    if (armed && String(args[0]) === home && inDirectory) { armed = false; await gate.wait(); }
+    return result;
+  };
+  syncBuiltinESMExports();
+  return {
+    arm() { armed = true; },
+    restore() { fs.realpath = original; syncBuiltinESMExports(); },
+  };
+}
 async function damageAnchor(f, damage) {
   const active = await f.claim.read();
   if (damage === 'malformed-newest-restored') { await f.claim.write('# malformed newer evidence\n'); await f.claim.commit(); await f.claim.write(active); }
@@ -749,15 +774,13 @@ for (const stage of ['snapshot', 'probe']) test(`worker_status ${stage} final re
 });
 
 test('create_worker carries the admitted epoch through the runtime await', { timeout: 15000 }, async t => {
-  const f = await fixture({ runtime: true }); t.after(f.dispose); const gate = barrier(); t.after(gate.release); let launches = 0, armed = false;
+  const f = await fixture({ runtime: true }); t.after(f.dispose); const gate = barrier(); t.after(gate.release); let launches = 0;
   const runtime = await f.startRuntime({ launch: async () => { launches++; return { commandSubmitted: true }; }, probe: async () => { await gate.wait(); return { state: 'disconnected' }; } });
   runtime.options.probe = f.probeWorker;
   assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
   runtime.options.probe = async () => { await gate.wait(); return { state: 'disconnected' }; };
-  const original = fs.realpath;
-  fs.realpath = async (...args) => { const result = await original(...args); if (armed && String(args[0]) === f.home) { armed = false; await gate.wait(); } return result; };
-  syncBuiltinESMExports(); t.after(() => { fs.realpath = original; syncBuiltinESMExports(); });
-  armed = true;
+  const hold = holdAtAdmissionBoundary(f.home, gate); t.after(() => hold.restore());
+  hold.arm();
   const pending = runtime.tool('create_worker', { projectDirectory: '.' });
   const refused = assert.rejects(pending, /ADOPTION_NOT_READY/); await gate.reached;
   await damageAnchor(f, 'malformed-newest-restored');
@@ -767,7 +790,7 @@ test('create_worker carries the admitted epoch through the runtime await', { tim
 // resume_worker has its own await chain after adoption: the resume preflight probe, then the project
 // directory TOCTOU check, then a fresh state read. No dispatch is authorized on a stale proof.
 for (const site of ['probe', 'directory']) for (const interruption of ['malformed-newest-restored', 'closed']) test(`resume_worker carries the admitted epoch across the ${site} await: ${interruption}`, { timeout: 15000 }, async t => {
-  const f = await fixture({ runtime: true }); t.after(f.dispose); const gate = barrier(); t.after(gate.release); let launches = 0, armed = false;
+  const f = await fixture({ runtime: true }); t.after(f.dispose); const gate = barrier(); t.after(gate.release); let launches = 0;
   const runtime = await f.startRuntime({ launch: async () => { launches++; return { commandSubmitted: true }; }, probe: async () => { await gate.wait(); return { state: 'disconnected' }; } });
   runtime.options.probe = f.probeWorker; // adoption keeps real probes; only the later resume awaits are held
   assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
@@ -777,10 +800,8 @@ for (const site of ['probe', 'directory']) for (const interruption of ['malforme
   if (site === 'probe') runtime.options.probe = async () => { await gate.wait(); return { state: 'disconnected' }; };
   else {
     runtime.options.probe = async () => ({ state: 'disconnected' });
-    const original = fs.realpath;
-    fs.realpath = async (...args) => { const result = await original(...args); if (armed && String(args[0]) === f.home) { armed = false; await gate.wait(); } return result; };
-    syncBuiltinESMExports(); t.after(() => { fs.realpath = original; syncBuiltinESMExports(); });
-    armed = true;
+    const hold = holdAtAdmissionBoundary(f.home, gate); t.after(() => hold.restore());
+    hold.arm();
   }
   const pending = runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true });
   const refused = assert.rejects(pending, /ADOPTION_NOT_READY/); await gate.reached;
