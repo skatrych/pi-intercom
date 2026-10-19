@@ -465,7 +465,19 @@ export class ConfigStore {
      * an error, because nothing of ours remains and nothing foreign may be removed. A lock path holding
      * someone else's token is reported, because another writer replaced ours. Failing to remove this
      * call's own token is reported too (a non-authority lock I/O failure).
+     *
+     * Token equality is NOT root authority. Every branch revalidates the lock location against the
+     * pinned session root first -- upstream's root-pinned escape check, then this fork's stricter lock
+     * gate -- exactly as the publication gate (`assertOwned`) and the former release gating did. A lock
+     * redirected outside the root is left exactly as found even while it still carries our token, and no
+     * release failure is raised for it, so an in-flight error is never replaced (upstream's cleanup
+     * boundary). Leaving a lock we cannot safely reach is fail-closed: the next writer sees a foreign
+     * owner and stops rather than this call unlinking files outside the root.
      */
+    const outsideRoot = async (): Promise<boolean> => {
+      try { await this.assertLocalPaths(); this.assertSafePaths(); return false; }
+      catch { return true; }
+    };
     const ownership = (): 'owned' | 'foreign' | 'absent' => {
       try {
         if (lstatSync(directory).isSymbolicLink()) return 'foreign';
@@ -474,9 +486,11 @@ export class ConfigStore {
     };
     return { assertOwned, release: async () => {
       if (released) return;
-      if (ownership() !== 'owned') {
-        if (ownership() === 'foreign') fail('config transaction ownership is uncertain; no publication or foreign release');
-        released = true; return; // Moved root or metadata: leave the redirected path exactly as found.
+      if (await outsideRoot()) { released = true; return; }
+      const state = ownership();
+      if (state !== 'owned') {
+        if (state === 'foreign') fail('config transaction ownership is uncertain; no publication or foreign release');
+        released = true; return; // Nothing of ours is reachable here: leave the path exactly as found.
       }
       released = true;
       await unlink(ownerFile);

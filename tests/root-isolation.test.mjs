@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir, realpath, unlink, rename } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { ConfigStore } from '../dist/config.js';
@@ -220,6 +221,29 @@ test('cleanup after stable root or metadata redirect preserves the original erro
     assert.equal(await readFile(outsideTemp, 'utf8'), 'outside collision must survive cleanup');
     assert.equal(await readFile(external.file, 'utf8'), original);
   }
+});
+
+// Upstream's cleanup test above redirects while a TEMPORARY file is being closed. This one redirects the
+// metadata directory while a transaction lock is HELD, so the lock directory that release is asked to
+// remove still carries this call's own token. Token equality would authorize that deletion; only root
+// authority may. This is the case upstream's test does not cover, because it only checks file content.
+test('a transaction release never removes a same-token lock redirected outside the root', async t => {
+  const f = await fixture(t);
+  await new ConfigStore(f.root).initialize('local', 12345);
+  const store = new ConfigStore(f.root);
+  const outsideLock = path.join(f.outside, '.pi-intercom', 'config.lock');
+  await assert.rejects(store.update('local', async () => {
+    await rename(path.join(f.root, '.pi-intercom'), path.join(f.outside, '.pi-intercom'));
+    await symlink(path.join(f.outside, '.pi-intercom'), path.join(f.root, '.pi-intercom'),
+      process.platform === 'win32' ? 'junction' : 'dir');
+    throw new Error('injected failure while the lock is redirected');
+  }), /injected failure while the lock is redirected/);
+  // Release must not follow the redirect: the token inside matches this call, and matching is not enough.
+  assert.ok(existsSync(path.join(outsideLock, 'owner.json')), 'same-token owner record survives');
+  // Fail-closed is the intended consequence: an unreachable lock is left for a human, so the next writer
+  // is refused outright instead of this call unlinking outside the validated root.
+  await assert.rejects(store.update('local', config => config), /escapes session root/);
+  assert.ok(existsSync(path.join(outsideLock, 'owner.json')), 'still untouched after the refused write');
 });
 
 test('custom store cannot redirect validated root; create/resume only launch same-cwd workers', async t => {
