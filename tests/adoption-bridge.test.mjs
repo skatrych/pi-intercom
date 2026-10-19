@@ -79,6 +79,7 @@ test('bridge routes adoption questions to the custom surface, with kind and prom
     for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
   });
   extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
+    registerFlag() {}, getFlag: () => undefined,
     events: { on: (channel, handler) => { bus.set(channel, handler); return () => bus.delete(channel); } } });
 
   const seen = { input: 0, custom: [] };
