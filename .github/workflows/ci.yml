@@ -11,8 +11,14 @@ permissions:
 jobs:
   validate:
     strategy:
+      # A Windows failure must never cancel the Ubuntu leg. With fail-fast on,
+      # run 39421474040 cancelled an Ubuntu job whose every step had succeeded.
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+    # Interim visible baseline for #18: Windows-only, job-level, advisory.
+    # Ubuntu stays blocking. Raw Windows results stay inspectable on the job.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
