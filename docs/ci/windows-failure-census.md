@@ -203,7 +203,13 @@ clusters are name-based groupings over the 8 files — they do not partition the
 335 + 3 + 2 = 340 distinct keys ✓. No unexplained remainder: every one of the 340 keys
 carries a cause in the appendix.
 
+Nothing in this table should be read as evidence that the claim-gate, admission-prefix,
+B1-B3 fencing or store-authority behaviours work. For those clusters only the *fixture*
+failure is classified; the behaviour stays untested. Follow-ups are filed as #19-#23 (§7).
+
 ### Residual question on the roles cluster (deliberately not resolved here)
+
+Filed as **#21**; summarised here so this census stays readable standalone.
 
 `ConfigStore.assertSafePaths` (`src/config.ts:401`) fails closed with
 `unsafe config root alias` when `realpathSync(root) !== path.resolve(root)`, and
@@ -249,16 +255,18 @@ in §5 and are not part of this churn.
 
 ## 7. Follow-ups
 
-Full remediation is out of scope for this CI-hygiene issue (refinement AC4). Owners are
-proposed; the coordinator assigns them.
+Full remediation is out of scope for this CI-hygiene issue (refinement AC4). All five are
+**filed as plain Backlog issues, deliberately unassigned** — the coordinator assigns
+owners. The "Owner" column below is the proposed area of responsibility, not a claim of
+assignment.
 
-| # | Follow-up | Classification | Owner (proposed) | Verification command / test selection |
-| --- | --- | --- | --- | --- |
-| F1 | Wrap the two fixture paths in `pathToFileURL(...).href` at `tests/fixtures/adoption-fixture.mjs:15` and `tests/fixtures/adoption-cases.mjs:16`, matching the convention already used at `tests/version.test.mjs:24`. A valid replacement fixture, not a skip — no assertion changes. | platform-assumption | Test-fixtures owner | `node --test tests/adoption-bridge.test.mjs tests/adoption-contract.test.mjs tests/adoption-review-regressions.test.mjs tests/adoption-runtime-extra.test.mjs tests/adoption-ux.test.mjs tests/adoption.test.mjs` — must show the `ERR_UNSUPPORTED_ESM_URL_SCHEME` count drop to 0 |
-| F2 | Canonicalise the fixture root in `tests/roles.test.mjs` `setup()` so the expected root is compared in the same canonical form the product uses. Changes the fixture, not the assertion. | platform-assumption | Test-fixtures owner | `node --test tests/roles.test.mjs` — the 3 `strictEqual` failures at `:62`, `:81`, `:117` must clear |
-| F3 | Settle the §5 residual question: can a legitimate Windows short-name project root be refused by `src/config.ts:401` / `runtime.ts:147`? Requires a reproducer; keep the safety assertions **unchanged**. Blocked on a proven reproducer before any product change. | unclassified → TBC | Runtime owner | Windows 8.3-short-name reproducer against the two guards. Do not relax either assertion. |
-| F4 | Triage the two `until()` timeout residuals (`roles.test.mjs:236`, `handoff.test.mjs:201`) — need a repeat-run sample on either platform before classification. 3s deadline is the only known bound. | unclassified | Runtime owner | `node --test tests/roles.test.mjs --test-name-pattern "close retains the saved role"` and `node --test tests/handoff.test.mjs --test-name-pattern "deadline never forces close"`, repeated, on Ubuntu |
-| F5 | Re-decide Windows status: keep advisory or promote to blocking. Promotion requires a full green Windows run with no unexplained new skips. | policy | Coordinator | A `Validate` run where `validate (windows-latest)` reports 0 fail and 4 skipped, matching Ubuntu |
+| Issue | # | Follow-up | Classification | Owner (proposed, unassigned) | Verification command / test selection |
+| --- | --- | --- | --- | --- | --- |
+| [#19](https://github.com/skatrych/pi-intercom/issues/19) | F1 | Wrap the two fixture paths in `pathToFileURL(...).href` at `tests/fixtures/adoption-fixture.mjs:15` and `tests/fixtures/adoption-cases.mjs:16`, matching the convention already used at `tests/version.test.mjs:24`. A valid replacement fixture, not a skip — no assertion changes. | platform-assumption | Test-fixtures owner | `node --test tests/adoption-bridge.test.mjs tests/adoption-contract.test.mjs tests/adoption-review-regressions.test.mjs tests/adoption-runtime-extra.test.mjs tests/adoption-ux.test.mjs tests/adoption.test.mjs` — must show the `ERR_UNSUPPORTED_ESM_URL_SCHEME` count drop to 0 |
+| [#20](https://github.com/skatrych/pi-intercom/issues/20) | F2 | Canonicalise the fixture root in `tests/roles.test.mjs` `setup()` so the expected root is compared in the same canonical form the product uses. Changes the fixture, not the assertion. | platform-assumption | Test-fixtures owner | `node --test tests/roles.test.mjs` — the 3 `strictEqual` failures at `:62`, `:81`, `:117` must clear |
+| [#21](https://github.com/skatrych/pi-intercom/issues/21) | F3 | Settle the §5 residual question: can a legitimate Windows short-name project root be refused by `src/config.ts:401` / `runtime.ts:147`? Requires a reproducer; keep the safety assertions **unchanged**. Blocked on a proven reproducer before any product change. | unclassified → TBC | Runtime owner | Windows 8.3-short-name reproducer against the two guards. Do not relax either assertion. |
+| [#22](https://github.com/skatrych/pi-intercom/issues/22) | F4 | Triage the two `until()` timeout residuals (`roles.test.mjs:236`, `handoff.test.mjs:201`) — need a repeat-run sample on either platform before classification. 3s deadline is the only known bound. | unclassified | Runtime owner | `node --test tests/roles.test.mjs --test-name-pattern "close retains the saved role"` and `node --test tests/handoff.test.mjs --test-name-pattern "deadline never forces close"`, repeated, on Ubuntu |
+| [#23](https://github.com/skatrych/pi-intercom/issues/23) | F5 | Re-decide Windows status: keep advisory or promote to blocking. Promotion requires a full green Windows run with no unexplained new skips. | policy | Coordinator | A `Validate` run where `validate (windows-latest)` reports 0 fail and 4 skipped, matching Ubuntu |
 
 ## 8. Closure checklist
 
@@ -266,7 +274,7 @@ proposed; the coordinator assigns them.
 - [x] Ubuntu cannot be cancelled by a Windows failure (`fail-fast: false`; §2 documents the defect it fixes).
 - [x] Census keyed by file + test name, totals reconciled including skips, common/main-only/PR-only identified, changed tests not presented as fixes (§3, §6, appendix).
 - [x] Per-cluster members, representative log reference, precondition, classification; unknowns left explicitly unclassified (§5).
-- [ ] Follow-ups filed as issues with owners and verification commands — §7 drafted, pending filing.
+- [x] Follow-ups filed as issues with owners and verification commands — filed as #19, #20, #21, #22, #23 (plain Backlog, unassigned, no closing keywords in any body).
 - [ ] Closure comment linking this run, this census and the follow-up issues.
 
 ## Appendix — full failure census (340 distinct keys)
