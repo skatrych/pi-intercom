@@ -26,6 +26,7 @@ test('real adapter stays read-only while no-board host persists an ordinary non-
   const handlers = new Map(), bus = new Map();
   t.after(async () => { await handlers.get('session_shutdown')?.(); await f.dispose(); for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
   extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
+    registerFlag() {}, getFlag: () => undefined,
     events: { on: (channel, handler) => { bus.set(channel, handler); return () => bus.delete(channel); } } });
   const ctx = { ...f.context, sessionManager: { ...f.context.sessionManager, getBranch: () => [] }, ui: { notify() {}, setWidget() {} } };
   await handlers.get('session_start')({}, ctx);
@@ -44,6 +45,8 @@ test('bridge rejects copied session manager and uses captured UI, never caller d
   t.after(() => { for (const [key, value] of Object.entries({ PI_ROLE_DIR: prior.role, PI_ROLES_DIR: prior.roles, PI_INTERCOM_PROJECTS_HOME: prior.home, PI_INTERCOM_WORKER_ROLE: prior.worker })) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
   const handlers = new Map(), bus = new Map();
   const pi = { on: (event, fn) => handlers.set(event, fn), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
+    // Upstream 0.8.0 registers --intercom-root at factory time; unset here means the plain session-cwd root.
+    registerFlag() {}, getFlag: () => undefined,
     events: { on: (channel, fn) => { bus.set(channel, fn); return () => bus.delete(channel); } } };
   extension(pi);
   const ctx = { ...f.context, ui: { input: async () => undefined, confirm: async () => false, notify() {}, setWidget() {} } };
@@ -76,6 +79,7 @@ test('bridge routes adoption questions to the custom surface, with kind and prom
     for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
   });
   extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
+    registerFlag() {}, getFlag: () => undefined,
     events: { on: (channel, handler) => { bus.set(channel, handler); return () => bus.delete(channel); } } });
 
   const seen = { input: 0, custom: [] };

@@ -26,6 +26,8 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.5.1:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
 >
+> **0.8.0:** Config is restricted to the session working directory. No parent search or explicit-parent override; shared-config subfolder launches are refused.
+>
 > **0.7.0:** Coordinator-local reminders follow worker calls, at a five-minute default that [you can configure](#reminder-interval). Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
 
 > **0.6.1:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
@@ -102,7 +104,13 @@ Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headl
 
 ### Startup and launchers
 
-Ordinary non-Orchestrator startup discovers config upward; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before discovery: second/wrong/unsafe boards stop, and no-board startup is held for a deliberate root bootstrap decision rather than silently creating a child board. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators. Coordinator actions and boot side effects are held until committed matching claim evidence and local responsibility are ready.
+**Strict root isolation (0.8.0):** The session's starting working directory is its config root. An explicit flag cannot widen this boundary. Only `<root>/.pi-intercom/config.json` is considered: there is no upward search, Git-root inference, or home-directory fallback. If that exact config is absent, startup creates a local coordinator config, opens a loopback listener, preserves the session/tab name, and waits for user input (no model turn). Invalid/unreadable local config is an error and is not overwritten. A session ID absent from an existing selected config, including a fork, is a worker, never a replacement coordinator.
+
+Created/resumed workers receive `--intercom-root /absolute/session/root` explicitly as a same-directory assertion, **not permission to read a parent config**. The supplied root must canonically equal the session working directory, and its exact config must already exist. A mismatched root is rejected before reading its config or creating startup resources. No environment variable selects a parent root. Shared-roster workers must start in the coordinator's root; create/resume requests for subfolders are rejected before launch instead of silently changing the working directory. Linked metadata/config paths that escape the root and stable redirects of an already validated root are rejected. Monitor/logging readers retain stricter rules and may reject even internal links. These guards cover config access and temporary-config cleanup. They do not sandbox all filesystem I/O, pin an already-running telemetry writer after filesystem changes, or provide an atomic defense against concurrent filesystem replacement.
+
+**Upgrade note:** Existing subfolder workers cannot rejoin a parent roster by supplying a flag. Their saved history/config entries are retained, but launching them in a subfolder with the parent's config is refused. Use workers whose configured directory is the coordinator root, and explicitly describe any subfolder work in their assignment. Independent sessions started in subfolders use only their own local config; ancestor files are left untouched.
+
+Ordinary non-Orchestrator startup uses only that local config; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before reading any config: second/wrong/unsafe boards stop, and no-board startup is held for a deliberate root bootstrap decision rather than silently creating a child board. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators. Coordinator actions and boot side effects are held until committed matching claim evidence and local responsibility are ready.
 
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
 
@@ -146,8 +154,8 @@ See [recovery and the other limits](references/coordinator-adoption.md#recovery)
 
 ## Explicit workflow
 
-1. Coordinator calls `intercom_create_worker({projectDirectory:"."})`. No worker identity, responsibility, callback address or special config path is passed. Optional `role` is a logical Pi role name; see [Role-aware workers](#role-aware-workers).
-2. Anonymous worker opens its own endpoint and sends its session ID, actual port and root-relative project directory to coordinator Pi. A role-aware worker also reports that logical role name. Registration starts a normal coordinator turn when idle or queues steering when busy. It creates **no config entry**. The reported role is remembered only so the later explicit configure can store it on that session; it does not assign a name or responsibility.
+1. Coordinator calls `intercom_create_worker({projectDirectory:"."})`. The launcher passes the same-directory root assertion; no worker identity, responsibility, callback address or special config path is passed. Optional `role` is a logical Pi role name; see [Role-aware workers](#role-aware-workers).
+2. Anonymous worker opens its own endpoint and sends its session ID, actual port and root-relative project directory to coordinator Pi. A role-aware worker also reports that logical role name. Registration starts a normal coordinator turn when idle or queues steering when busy. It creates **no config entry or hidden pending-registration map**. The reported role is remembered only so the later explicit configure can store it on that session; it does not assign a name or responsibility.
 3. Coordinator decides and calls `intercom_configure_worker` with **all five explicit fields**: `sessionId`, `port`, `projectDirectory`, `name`, `description`. Optional `role` stores the logical Pi role when registration did not already report one. This only writes config. Name and description remain communication metadata.
 4. Coordinator separately calls `intercom_reload_worker({to:"Builder"})`. Worker rereads responsibility and synchronizes Pi/Herdr tab names. **This is not Pi `/reload`, a restart, cancellation, or work assignment.** No model turn starts.
 5. Coordinator sends explicit work using `intercom_send({to:"Builder",message:"..."})`. Workers can communicate directly with configured peers. Findings do not authorize unrelated implementation. Progress questions ask for reporting and continuation, not cancellation.
@@ -202,7 +210,7 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 
 | Tool | Arguments | Permission / effect |
 |---|---|---|
-| `intercom_create_worker` | `projectDirectory?` (default `.`), `role?` | Coordinator; launch anonymous worker. `role` launches through `pi-role <role>` on Linux |
+| `intercom_create_worker` | `projectDirectory?` (default `.`), `role?` | Coordinator; launch anonymous worker at the same root only. `role` launches through `pi-role <role>` on Linux |
 | `intercom_configure_worker` | `sessionId`, `port`, `projectDirectory`, `name`, `description`, `role?` | Coordinator; explicit fields, writes only. `role` is the logical Pi role, separate from name and description |
 | `intercom_reload_worker` | `to` (worker name) | Coordinator; passive config/name reload |
 | `intercom_send` | `to` (name), `message` | Configured, responsibility-loaded sessions; asynchronous message |
@@ -407,6 +415,14 @@ Published versions are immutable. For a new release, bump package and lockfile v
 - New coordinator-process environment variable `PI_INTERCOM_REMINDER_MINUTES` selects the reminder interval in whole minutes (trimmed ASCII digits, `1`-`35791`), read once per runtime start. Unset or unusable input keeps the existing five-minute default.
 - Reminder text and tool descriptions are interval-neutral instead of naming five minutes. All other scheduling, reset/rearm, authorization, busy-skip, and disposal semantics are unchanged, as is `intercom_stop_reminders` as the disable operation.
 - Local validation: 237 tests, typecheck and the isolated package gate on the approved base. See `tests/reminder-config.test.mjs` and `tests/reminders.test.mjs` for the parser, boundary, fake-clock delay, runtime-start snapshot, and default-path regressions.
+
+### 0.8.0 Strict session-root isolation
+
+- Never search parent folders for config, even when a local config is missing or malformed. An explicit root must canonically equal the session working directory; it cannot permit a parent config.
+- Validate before startup resources, reject escaping/dangling config links and stable root redirects, and guard temporary-config cleanup. These are config protections, not a filesystem sandbox or atomic TOCTOU guarantee.
+- Created/resumed workers receive an explicit same-directory root assertion. Shared-config subfolder launches are now rejected, not silently relocated. Existing registrations/history remain intact.
+- Includes the coordinator reminders from the preserved 0.7.0 GitHub release, whose npm publication was blocked by authorization after the repository transfer.
+- Local validation: 205 tests, typecheck and isolated package-install checks passed. Native Windows/Linux CI gates publication.
 
 ### 0.7.0 Coordinator reminders
 

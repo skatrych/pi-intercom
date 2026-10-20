@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigStore, directory, named, validateConfig } from '../dist/config.js';
@@ -18,14 +18,19 @@ test('atomic first creation publishes complete config: exactly one winner', asyn
   assert.equal(results.filter(Boolean).length, 1);
   assert.equal((await s.read()).agents.length, 1);
 });
-test('upward discovery, descendant validation and invalid config preservation', async t => {
+test('exact-root discovery, explicit same-root validation and invalid config preservation', async t => {
   const s = await fixture(t); await s.initialize('coordinator', 12345);
   const child = path.join(s.root, 'a', 'b'); await mkdir(child, { recursive: true });
-  assert.equal((await ConfigStore.discover(child)).root, s.root);
+  assert.equal(await ConfigStore.discover(child), undefined);
+  await assert.rejects(ConfigStore.workspace(child, s.root), /must equal/);
+  assert.equal((await ConfigStore.workspace(s.root, s.root)).root, await realpath(s.root));
   assert.equal(await directory(s.root, child), 'a/b');
   await assert.rejects(directory(s.root, '..'), /descendant/);
   await writeFile(s.file, '{broken');
-  await assert.rejects(ConfigStore.discover(child));
+  assert.equal(await ConfigStore.discover(child), undefined);
+  await assert.rejects(ConfigStore.discover(s.root));
+  await assert.rejects(ConfigStore.workspace(child, s.root), /must equal/);
+  await assert.rejects(ConfigStore.workspace(s.root, s.root));
   await assert.rejects(s.update('coordinator', c => c.agents.pop()));
   assert.equal(await readFile(s.file, 'utf8'), '{broken');
 });

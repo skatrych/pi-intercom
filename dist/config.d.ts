@@ -126,7 +126,10 @@ export declare class ConfigStore {
     readonly root: string;
     private readonly options;
     readonly file: string;
+    private canonicalRoot?;
     constructor(root: string, options?: ConfigStoreOptions);
+    private assertLocalPaths;
+    validateRoot(expectedCanonicalRoot: string): Promise<void>;
     /** Ordinary reads retain baseline parsing; lossless/duplicate-key checks are adoption-only. */
     read(): Promise<Config>;
     /**
@@ -159,7 +162,9 @@ export declare class ConfigStore {
     private publicationGuard;
     private acquireLock;
     static discover(cwd: string): Promise<ConfigStore | undefined>;
+    static workspace(cwd: string, workspaceRoot: string): Promise<ConfigStore>;
     protected openTemporary(file: string): Promise<import("fs/promises").FileHandle>;
+    private cleanupTemporary;
     private temporary;
     initialize(id: string, boundPort: number, assertValid?: () => void): Promise<boolean>;
     private publish;

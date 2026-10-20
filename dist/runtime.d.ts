@@ -24,6 +24,8 @@ export interface Host {
 export interface LaunchRequest {
     multiplexer: 'herdr' | 'none';
     cwd: string;
+    /** Explicit absolute session root; must canonically equal `cwd`. Parent roots are never allowed. */
+    workspaceRoot: string;
     sessionId?: string;
     /** Logical role. The launcher wraps Pi with `pi-role`; this is not a Pi home. */
     role?: string;
@@ -39,10 +41,12 @@ export interface RuntimeOptions {
     /** Test seam; production defaults to 120 seconds, values above that are capped. */
     closeTimeoutMs?: number;
     reminderClock?: ReminderClock;
-    /** Test seam for the adoption boundary. Production reads this process's configuration. */
-    adoption?: Partial<AdoptionDeps>;
+    /** Explicit launcher-provided root must equal canonical cwd; no parent-root exception. */
+    workspaceRoot?: string;
     /** Test seam for the operator environment. Production reads process.env once per runtime start. */
     reminderMinutesEnv?: () => string | undefined;
+    /** Test seam for the adoption boundary. Production reads this process's configuration. */
+    adoption?: Partial<AdoptionDeps>;
 }
 export interface AdoptionDeps {
     projectsHome: string;
@@ -62,6 +66,8 @@ export declare class Intercom {
     private active;
     private generation;
     private initialId;
+    private configuredRoot?;
+    private configuredFile?;
     responsibility?: Agent;
     private observer?;
     /** A no-board Orchestrator must not create a board directory through logging before bootstrap. */

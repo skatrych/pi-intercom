@@ -1,9 +1,9 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
-import { realpath } from 'node:fs/promises';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError } from './observability.js';
 import { ConfigStore, WORKER_ROLE_ENV, coordinator, directory, fail, logicalRole, named, requireCoordinator, text, validateConfig } from './config.js';
 import { listen, send, reportPayload } from './transport.js';
@@ -56,6 +56,8 @@ export class Intercom {
     active = false;
     generation = 0;
     initialId = '';
+    configuredRoot;
+    configuredFile;
     responsibility;
     observer;
     /** A no-board Orchestrator must not create a board directory through logging before bootstrap. */
@@ -188,6 +190,14 @@ export class Intercom {
         const id = this.host.sessionId();
         if (!this.active || id !== this.initialId)
             fail('session is inactive or replaced');
+        if (this.configuredRoot !== undefined && (this.store.root !== this.configuredRoot || this.store.file !== this.configuredFile)) {
+            // Upstream's boundary pin refuses the operation. It is checked here, before any store guard runs,
+            // so also drop this fork's coordinator action authority: a store whose validated root changed can
+            // neither write safely now nor be trusted by a later coordinator action.
+            if (this.authorityReady)
+                this.closeActionEpoch('config store boundary changed; explicitly reconcile before acting');
+            fail('config store boundary changed');
+        }
         return id;
     }
     validity() {
@@ -206,6 +216,8 @@ export class Intercom {
             fail('runtime already active');
         this.initialId = this.host.sessionId();
         this.active = true;
+        this.configuredRoot = undefined;
+        this.configuredFile = undefined;
         this.probeController = new AbortController();
         this.resumeFences.clear();
         this.registeredRoles.clear();
@@ -220,6 +232,7 @@ export class Intercom {
         const generation = ++this.generation, assertValid = this.validity();
         // Snapshot the reminder interval once for this runtime. A child tool cannot
         // change this process environment, and Pi /reload restarts this runtime.
+        // Snapshot the reminder interval once for this runtime; startServices consumes it.
         this.reminderIntervalMsCache = reminderIntervalMs((this.options.reminderMinutesEnv ?? readReminderMinutesEnv)());
         let record = this.captureObserver();
         try {
@@ -238,19 +251,35 @@ export class Intercom {
                 countedRoot = root;
                 countedBoard = boards.length === 1;
             }
-            // Never discover above the already-counted projects home or fall back to an unrelated board.
-            const discovered = countedRoot ? (countedBoard ? new ConfigStore(countedRoot) : undefined) : await ConfigStore.discover(this.host.cwd);
+            // Upstream 0.8.0: an explicit --intercom-root must canonically equal the session cwd; a parent
+            // root is never honored. Fork Orchestrator launches carry no such flag, so the counted
+            // projects-home board below is the only way a session binds an ancestor board, and it is still
+            // pinned and revalidated by the checks underneath exactly like a session-local root.
+            const discovered = this.options.workspaceRoot !== undefined
+                ? await ConfigStore.workspace(this.host.cwd, this.options.workspaceRoot)
+                : countedRoot
+                    // Never discover above the already-counted projects home or fall back to an unrelated board.
+                    ? (countedBoard ? new ConfigStore(countedRoot) : undefined)
+                    : await ConfigStore.discover(this.host.cwd);
             assertValid();
-            this.store = this.options.store?.(discovered?.root ?? countedRoot ?? this.host.cwd) ?? discovered ?? new ConfigStore(countedRoot ?? this.host.cwd);
+            const root = discovered?.root ?? await realpath(countedRoot ?? this.host.cwd);
+            assertValid();
+            this.store = this.options.store?.(root) ?? discovered ?? new ConfigStore(root);
+            if (this.store.root !== root || this.store.file !== path.join(root, '.pi-intercom', 'config.json'))
+                fail('config store must retain validated session root');
+            this.configuredRoot = root;
+            this.configuredFile = this.store.file;
+            await this.store.validateRoot(root);
+            assertValid();
             this.observationEnabled = !countedRoot || countedBoard;
+            const previous = discovered ? await this.store.read() : undefined;
+            assertValid();
             try {
                 this.observer = this.options.observe ? this.options.observe(this.store.root, this.initialId) : new LocalObserver(this.store.root, this.initialId);
             }
             catch { /* Logging is optional on failure. */ }
             record = this.captureObserver();
             record('runtime.starting');
-            const previous = discovered ? await this.store.read() : undefined;
-            assertValid();
             const own = previous?.agents.find(a => a.sessionId === this.id());
             const endpoint = await (this.options.listen ?? listen)(own?.port, m => { assertValid(); return this.receive(m); }, () => {
                 assertValid();
@@ -959,9 +988,11 @@ export class Intercom {
         if (operation === 'create_worker') {
             const relative = await directory(this.store.root, args.projectDirectory ?? '.');
             assertCurrent();
+            if (relative !== '.')
+                fail('worker working directory must equal the config root; subdirectory launches would read a forbidden parent config');
             const role = requestedRole(args.role);
             armReminder();
-            const launched = await this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), ...(role ? { role } : {}) }, assertValid);
+            const launched = await this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), workspaceRoot: this.store.root, ...(role ? { role } : {}) }, assertValid);
             // The role is not durable until configure_worker saves it. Echo it so a restarted coordinator can pass it explicitly.
             return role && launched && typeof launched === 'object' ? { ...launched, role } : launched;
         }
@@ -990,6 +1021,16 @@ export class Intercom {
                 fail('Resume requires explicit user confirmation that the previous worker session is closed (confirmClosed:true). Disconnected alone is not proof of closure.');
             if (this.resumeFences.has(target.sessionId))
                 fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');
+            const relative = await directory(this.store.root, target.projectDirectory);
+            assertValid();
+            if (relative !== '.')
+                fail('worker working directory must equal the config root; subdirectory resumes would read a forbidden parent config');
+            const cwd = path.resolve(this.store.root, relative);
+            // Directory validation is read-only; recheck admission after that await.
+            if (this.resumeFences.has(target.sessionId))
+                fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');
+            if (this.handoff?.isClosing(target.sessionId))
+                fail('worker close is active or uncertain; resume is fenced');
             const fence = { inFlight: true, submitted: false, announced: false };
             this.resumeFences.set(target.sessionId, fence);
             armReminder();
@@ -999,9 +1040,6 @@ export class Intercom {
                 assertCurrent();
                 if (connection.state === 'connected')
                     fail('Worker endpoint is still connected; refusing to resume the same session twice.');
-                const relative = await directory(this.store.root, target.projectDirectory);
-                assertCurrent();
-                const cwd = path.resolve(this.store.root, relative);
                 const fresh = await this.state();
                 assertCurrent();
                 requireCoordinator(fresh.config, id);
@@ -1012,7 +1050,7 @@ export class Intercom {
                     fail('worker close is active or uncertain; resume is fenced');
                 if (current.role !== undefined && !logicalRole(current.role))
                     fail('invalid role');
-                const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, sessionId: current.sessionId, ...(current.role ? { role: current.role } : {}) }, () => { assertValid(); fence.submitted = true; });
+                const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, workspaceRoot: this.store.root, sessionId: current.sessionId, ...(current.role ? { role: current.role } : {}) }, () => { assertValid(); fence.submitted = true; });
                 completed = true;
                 return result;
             }

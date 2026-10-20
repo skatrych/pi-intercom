@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, rename, unlink, open, link, stat, rmdir } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rename, unlink, open, link, stat, lstat, rmdir } from 'node:fs/promises';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -362,14 +362,53 @@ export class ConfigStore {
     root;
     options;
     file;
+    canonicalRoot;
     constructor(root, options = {}) {
         this.root = root;
         this.options = options;
         this.file = path.join(root, '.pi-intercom', 'config.json');
     }
+    async assertLocalPaths() {
+        const root = await realpath(this.root);
+        if (this.canonicalRoot === undefined)
+            this.canonicalRoot = root;
+        else if (root !== this.canonicalRoot)
+            fail('config root canonical location changed');
+        // Reject existing escaping links/junctions before following them for any
+        // config access. These path checks are best effort, not TOCTOU protection.
+        for (const [location, directory] of [[path.dirname(this.file), true], [this.file, false]]) {
+            try {
+                await lstat(location);
+            }
+            catch (error) {
+                if (error.code === 'ENOENT')
+                    continue;
+                throw error;
+            }
+            let resolved;
+            try {
+                resolved = await realpath(location);
+            }
+            catch {
+                fail('local config path cannot be resolved safely');
+            }
+            const relative = path.relative(root, resolved);
+            if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+                fail('local config path escapes session root');
+            const metadata = await stat(resolved);
+            if (directory ? !metadata.isDirectory() : !metadata.isFile())
+                fail('invalid local config path type');
+        }
+    }
+    async validateRoot(expectedCanonicalRoot) {
+        await this.assertLocalPaths();
+        if (this.canonicalRoot !== expectedCanonicalRoot)
+            fail('config root canonical location changed');
+    }
     /** Ordinary reads retain baseline parsing; lossless/duplicate-key checks are adoption-only. */
     async read() {
-        // Missing, malformed and unreadable files propagate; never overwrite them.
+        // Missing, malformed and unreadable local files propagate; no fallback.
+        await this.assertLocalPaths();
         return validateConfig(JSON.parse(await readFile(this.file, 'utf8')));
     }
     /**
@@ -413,6 +452,8 @@ export class ConfigStore {
                 try {
                     return await insideTransaction.run(locks, run);
                 }
+                // Release is reported, not swallowed: release() itself decides when nothing of ours remains and
+                // therefore has nothing to report. It never removes a lock this call does not own.
                 finally {
                     await lock.release();
                 }
@@ -480,6 +521,15 @@ export class ConfigStore {
         assertValid();
     }
     async acquireLock(authorityGuard) {
+        // Upstream's session-root isolation runs first and keeps its own refusal text (that message is the
+        // published contract), but an acquisition-path refusal still closes this fork's action epoch.
+        try {
+            await this.assertLocalPaths();
+        }
+        catch (error) {
+            this.authorityRefused(authorityGuard);
+            throw error;
+        }
         this.authorityGate(() => this.assertSafePaths(), authorityGuard);
         await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
         this.authorityGate(() => this.assertSafePaths(), authorityGuard);
@@ -530,37 +580,103 @@ export class ConfigStore {
             if (released || lstatSync(directory).isSymbolicLink() || JSON.parse(readFileSync(ownerFile, 'utf8')).token !== token)
                 fail('config transaction ownership is uncertain; no publication or foreign release');
         };
+        /**
+         * Release distinguishes three states so two explicit contracts hold at once. A lock path that is
+         * simply gone (upstream: the session root or metadata directory was moved away and redirected) is not
+         * an error, because nothing of ours remains and nothing foreign may be removed. A lock path holding
+         * someone else's token is reported, because another writer replaced ours. Failing to remove this
+         * call's own token is reported too (a non-authority lock I/O failure).
+         *
+         * Token equality is NOT root authority. Every branch revalidates the lock location against the
+         * pinned session root first -- upstream's root-pinned escape check, then this fork's stricter lock
+         * gate -- exactly as the publication gate (`assertOwned`) and the former release gating did. A lock
+         * redirected outside the root is left exactly as found even while it still carries our token, and no
+         * release failure is raised for it, so an in-flight error is never replaced (upstream's cleanup
+         * boundary). Leaving a lock we cannot safely reach is fail-closed: the next writer is refused by the
+         * same root check before it can touch anything, rather than this call unlinking outside the root.
+         */
+        const outsideRoot = async () => {
+            try {
+                await this.assertLocalPaths();
+                this.assertSafePaths();
+                return false;
+            }
+            catch {
+                return true;
+            }
+        };
+        const ownership = () => {
+            try {
+                if (lstatSync(directory).isSymbolicLink())
+                    return 'foreign';
+                return JSON.parse(readFileSync(ownerFile, 'utf8')).token === token ? 'owned' : 'foreign';
+            }
+            catch (error) {
+                return error.code === 'ENOENT' ? 'absent' : 'foreign';
+            }
+        };
         return { assertOwned, release: async () => {
                 if (released)
                     return;
-                assertOwned();
+                if (await outsideRoot()) {
+                    released = true;
+                    return;
+                }
+                const state = ownership();
+                if (state !== 'owned') {
+                    if (state === 'foreign')
+                        fail('config transaction ownership is uncertain; no publication or foreign release');
+                    released = true;
+                    return; // Nothing of ours is reachable here: leave the path exactly as found.
+                }
                 released = true;
                 await unlink(ownerFile);
                 await rmdir(directory);
             } };
     }
     static async discover(cwd) {
-        let at = path.resolve(cwd);
-        for (;;) {
-            const store = new ConfigStore(at);
-            try {
-                await store.read();
-                return store;
-            }
-            catch (error) {
-                if (error.code !== 'ENOENT')
-                    throw error;
-            }
-            const parent = path.dirname(at);
-            if (parent === at)
-                return undefined;
-            at = parent;
+        const store = new ConfigStore(await realpath(cwd));
+        try {
+            await store.read();
+            return store;
+        }
+        catch (error) {
+            if (error.code !== 'ENOENT')
+                throw error;
+            return undefined;
         }
     }
+    static async workspace(cwd, workspaceRoot) {
+        text(workspaceRoot, 'workspaceRoot');
+        if (!path.isAbsolute(workspaceRoot))
+            fail('workspaceRoot must be absolute');
+        const root = await realpath(workspaceRoot);
+        if (!(await stat(root)).isDirectory())
+            fail('workspaceRoot is not a directory');
+        const current = await realpath(cwd);
+        if (path.relative(root, current) !== '')
+            fail('workspaceRoot must equal the session working directory; parent configs are forbidden');
+        const store = new ConfigStore(root);
+        await store.read(); // Explicit worker mode must never create a replacement coordinator.
+        return store;
+    }
     openTemporary(file) { return open(file, 'wx'); }
+    async cleanupTemporary(temp) {
+        // A moved root may leave an unpublished temp behind. Never follow a
+        // replacement parent outside the pinned root just to clean up. This guard
+        // is independent of lifecycle/deadline expiry so ordinary failures clean up.
+        await this.assertLocalPaths();
+        const resolved = await realpath(temp);
+        const relative = path.relative(this.canonicalRoot, resolved);
+        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+            fail('temporary config path escapes session root');
+        await unlink(temp);
+    }
     async temporary(config) {
         validateConfig(config);
+        await this.assertLocalPaths();
         await mkdir(path.dirname(this.file), { recursive: true });
+        await this.assertLocalPaths();
         const temp = `${this.file}.${randomUUID()}.tmp`;
         const handle = await this.openTemporary(temp);
         try {
@@ -572,7 +688,7 @@ export class ConfigStore {
         catch (error) {
             // Cleanup failures must not replace the original write/sync/close error.
             await handle.close().catch(() => { });
-            await unlink(temp).catch(() => { });
+            await this.cleanupTemporary(temp).catch(() => { });
             throw error;
         }
     }
@@ -583,6 +699,7 @@ export class ConfigStore {
             assertValid();
             const temp = await this.temporary({ version: 1, multiplexer: 'herdr', agents: [{ sessionId: id, name: 'Coordinator', coordinator: true, description: DEFAULT_DESCRIPTION, port: boundPort, projectDirectory: '.' }] });
             try {
+                await this.assertLocalPaths();
                 assertValid();
                 this.publicationGuard(assertValid);
                 try {
@@ -592,14 +709,14 @@ export class ConfigStore {
                     if (e.code !== 'EEXIST')
                         throw e;
                     await this.read();
-                    await unlink(temp);
+                    await this.cleanupTemporary(temp);
                     return false;
                 }
-                await unlink(temp);
+                await this.cleanupTemporary(temp);
                 return true;
             }
             catch (error) {
-                await unlink(temp).catch(() => { });
+                await this.cleanupTemporary(temp).catch(() => { });
                 throw error;
             }
         });
@@ -616,6 +733,7 @@ export class ConfigStore {
             // outside config persistence. The elapsed budget bounds retry initiation,
             // not the duration of an already-submitted OS rename.
             const expired = attempt > 0 && now() - started >= RENAME_BUDGET_MS;
+            await this.assertLocalPaths();
             this.publicationGuard(assertValid, authorityGuard);
             if (expired)
                 throw originalError;
@@ -704,7 +822,7 @@ export class ConfigStore {
                 }, assertValid);
             }
             catch (error) {
-                await unlink(temp).catch(() => { });
+                await this.cleanupTemporary(temp).catch(() => { });
                 throw error;
             }
             return c;

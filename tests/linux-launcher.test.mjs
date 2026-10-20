@@ -8,7 +8,7 @@ import path from 'node:path';
 import { launchers } from '../dist/launcher.js';
 
 const options = { platform: 'linux', extension: "/source/O'Brien $HOME;`echo bad`/index.ts",
-  env: { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'workspace' }, sessionExists: async () => true };
+  env: { HERDR_ENV: '1', HERDR_WORKSPACE_ID: 'workspace', PI_INTERCOM_ROOT: '/unrelated/inherited-root' }, sessionExists: async () => true };
 const created = JSON.stringify({ result: { tab: { tab_id: 'tab' }, root_pane: { pane_id: 'pane' } } });
 
 test('Linux Herdr uses returned pane and quotes cwd, extension and resume ID literally', { skip: process.platform !== 'linux' }, async t => {
@@ -21,7 +21,8 @@ test('Linux Herdr uses returned pane and quotes cwd, extension and resume ID lit
   const calls = [];
   const launcher = launchers({ ...options, run: async (file, args) => { calls.push({ file, args }); return created; } });
   const sessionId = "session'$HOME;`echo bad`";
-  const result = await launcher.launch({ multiplexer: 'herdr', cwd, sessionId });
+  const workspaceRoot = cwd;
+  const result = await launcher.launch({ multiplexer: 'herdr', cwd, workspaceRoot, sessionId });
   assert.deepEqual(calls[0], { file: 'herdr', args: ['tab', 'create', '--workspace', 'workspace', '--cwd', cwd, '--label', 'Intercom (anonymous)', '--no-focus'] });
   assert.match(calls[1].args[3], /exec pi /);
   assert.doesNotMatch(calls[1].args[3], /PI_CODING_AGENT_DIR|PI_INTERCOM_WORKER_ROLE|pi-role/);
@@ -30,17 +31,29 @@ test('Linux Herdr uses returned pane and quotes cwd, extension and resume ID lit
   assert.equal(result.commandSubmitted, true);
   assert.equal(result.registrationAwaited, false);
   const { stdout } = await promisify(execFile)('/bin/sh', ['-c', calls[1].args[3]], { env: { ...process.env, PATH: `${root}:${process.env.PATH}` } });
-  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, '-e', options.extension, '--session', sessionId]);
+  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, '-e', options.extension, '--intercom-root', workspaceRoot, '--session', sessionId]);
 });
 
 test('Linux rejects unsupported launcher, missing workspace and missing resume before launch', async () => {
   const run = async () => assert.fail('must not launch');
-  await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'none', cwd: '/tmp' }), /No terminal fallback/);
-  await assert.rejects(launchers({ ...options, env: {}, run }).launch({ multiplexer: 'herdr', cwd: '/tmp' }), /no fallback/);
-  await assert.rejects(launchers({ ...options, sessionExists: async () => false, run }).launch({ multiplexer: 'herdr', cwd: '/tmp', sessionId: 'missing' }), /not found/);
-  await assert.rejects(launchers({ ...options, platform: 'darwin', run }).launch({ multiplexer: 'herdr', cwd: '/tmp' }), /Windows and Linux/);
+  await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'none', cwd: '/tmp', workspaceRoot: '/tmp' }), /No terminal fallback/);
+  await assert.rejects(launchers({ ...options, env: {}, run }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp' }), /no fallback/);
+  await assert.rejects(launchers({ ...options, sessionExists: async () => false, run }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp', sessionId: 'missing' }), /not found/);
+  await assert.rejects(launchers({ ...options, platform: 'darwin', run }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp' }), /Windows and Linux/);
 });
 
+test('Linux launch ignores inherited root and requires an explicit absolute root', async () => {
+  const launcher = launchers({ ...options, run: async () => assert.fail('no launch') });
+  for (const workspaceRoot of [undefined, '', '.', 'D:/windows-path', '/tmp/bad\0root']) {
+    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot }), /explicit absolute workspace root/);
+  }
+});
+test('Linux rejects parent or unrelated explicit roots before lookup or spawn', async () => {
+  const launcher = launchers({ ...options, sessionExists: async () => assert.fail('no lookup'), run: async () => assert.fail('no launch') });
+  for (const workspaceRoot of ['/tmp', '/', '/unrelated']) {
+    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp/child', workspaceRoot, sessionId: 'saved' }), /root must equal its working directory/);
+  }
+});
 test('Linux role launch wraps Pi with a quoted pi-role and keeps normal arguments and session lookup', { skip: process.platform !== 'linux' }, async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-linux-role-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -65,7 +78,7 @@ test('Linux role launch wraps Pi with a quoted pi-role and keeps normal argument
       return created;
     },
   });
-  await launcher.launch({ multiplexer: 'herdr', cwd, sessionId, role });
+  await launcher.launch({ multiplexer: 'herdr', cwd, workspaceRoot: cwd, sessionId, role });
   assert.deepEqual(lookup, { dir: cwd, id: sessionId });
   assert.equal(calls[0].file, 'sh');
   assert.deepEqual(calls[1].args, ['--print', role]);
@@ -74,7 +87,7 @@ test('Linux role launch wraps Pi with a quoted pi-role and keeps normal argument
   assert.match(command, /exec /);
   assert.doesNotMatch(command, /PI_CODING_AGENT_DIR|exec pi |not-a-pi-home/);
   const { stdout } = await promisify(execFile)('/bin/sh', ['-c', command], { env: { ...process.env, PATH: `${root}:${process.env.PATH}` } });
-  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, role, 'UNSET', role, '-e', options.extension, '--session', sessionId]);
+  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, role, 'UNSET', role, '-e', options.extension, '--intercom-root', cwd, '--session', sessionId]);
   await assert.rejects(access(path.join(cwd, 'pwned')), /ENOENT/);
 });
 
@@ -85,27 +98,27 @@ test('missing role or launcher fails preflight before a pane is created', async 
     if (file === 'sh') return '/usr/bin/pi-role\n';
     if (args[0] === '--print') throw new Error("pi-role: role 'developer' not found");
     assert.fail('no pane');
-  } }).launch({ multiplexer: 'herdr', cwd: '/tmp', role: 'developer' }), /not available from pi-role --print/);
+  } }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp', role: 'developer' }), /not available from pi-role --print/);
   assert.deepEqual(missingRole, ['sh', 'pi-role']);
   await assert.rejects(launchers({ ...options, run: async file => {
     if (file === 'sh') throw new Error('not found');
     assert.fail('no pane');
-  } }).launch({ multiplexer: 'herdr', cwd: '/tmp', role: 'developer' }), /role launcher not found: pi-role/);
+  } }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp', role: 'developer' }), /role launcher not found: pi-role/);
 });
 
 test('invalid role syntax and a control-character launcher never start a process', async () => {
   const run = async () => assert.fail('must not launch');
   for (const role of ['../../something', "developer'; touch pwned; '", 'has space', '..', '.hidden', 'sessions', 'credentials', 'auth.json', 'history', 'cache']) {
-    await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'herdr', cwd: '/tmp', role }), /invalid role/);
+    await assert.rejects(launchers({ ...options, run }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp', role }), /invalid role/);
   }
   await assert.rejects(launchers({
     ...options, run, env: { ...options.env, PI_INTERCOM_ROLE_LAUNCHER: 'pi-role\ntouch pwned' },
-  }).launch({ multiplexer: 'herdr', cwd: '/tmp', role: 'developer' }), /invalid PI_INTERCOM_ROLE_LAUNCHER/);
+  }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp', role: 'developer' }), /invalid PI_INTERCOM_ROLE_LAUNCHER/);
 });
 
 test('Linux partial command submission failure leaves tab and never retries', async () => {
   let count = 0;
   const launcher = launchers({ ...options, run: async () => { if (++count === 1) return created; throw new Error('submission failed'); } });
-  await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp' }), /may remain; no automatic cleanup/);
+  await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp' }), /may remain; no automatic cleanup/);
   assert.equal(count, 2);
 });
