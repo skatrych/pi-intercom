@@ -119,14 +119,16 @@ test('outer queue precedes local filesystem acquisition, which precedes mutation
   gate.release(); await pending; assert.deepEqual(order, ['outer', 'mutate']);
 });
 
-test('supported repeated invocation binds confirmation to UUID/hash and timestamps after wording', async t => {
+test('supported repeated invocation binds confirmation to UUID/hash and timestamps after the yes', async t => {
   const f = await fixture(); t.after(f.dispose);
   const transitionId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', before = await f.board.read();
   let time = '2026-10-16T00:00:00.000Z';
-  const input = f.context.ui.input;
-  f.context.ui = { ...f.context.ui, input: async options => {
-    const value = await input(options);
-    if (options.kind === 'endedWording') time = '2026-10-16T01:00:00.000Z';
+  const confirm = f.context.ui.confirm;
+  f.context.ui = { ...f.context.ui, confirm: async options => {
+    const value = await confirm(options);
+    // The clock moves only once the human has actually answered, so a timestamp taken before the
+    // decision — from a preview, a cached answer, or an invocation — would be the earlier one.
+    if (options.kind === 'adoptTransition' && value === true) time = '2026-10-16T01:00:00.000Z';
     return value;
   } };
   const workflow = f.workflow({ uuid: () => transitionId, now: () => new Date(time) });

@@ -275,16 +275,30 @@ export async function createFixture(options = {}) {
   };
 }
 
-/** A mock of the supported Pi dialog surface. Answers are keyed by prompt kind, never by call order. */
 /**
- * A controllable UI that records the prompt *string* the workflow passed, keyed by a stable decision
- * `kind`. That proves the workflow constructed a question with the expected content and routed answers
- * by identity rather than call order — it proves nothing about a terminal. Whether text actually
- * reaches the screen, and whether a paste keeps its bytes, belong to `adoption-ui.test.mjs`, which
- * drives the real dialog and reads its real rendered lines.
+ * A controllable mock of the one surface the adoption workflow may ask a question on: a yes/no decision.
+ * Answers are keyed by a stable decision `kind`, never by call order, and every call records the full
+ * prompt *string* the workflow constructed. That proves a question was built with the expected content
+ * and that answers are routed by identity — it proves nothing about a terminal. Whether the two choices
+ * are actually selectable, whether the safe one is preselected, and whether the whole question is painted
+ * are the subject of `adoption-ui.test.mjs`, which drives the host's real dialog component and reads its
+ * real rendered lines.
  *
- * There are no free-form arguments: identity, ports, paths, confirmation, and outcomes cannot be
- * supplied or overridden — the only inputs are which decision is answered and how.
+ * Two structural guarantees, both issue #12 acceptance criteria, are enforced here rather than asserted
+ * case by case:
+ *
+ * - there is **no `input` member at all**. A workflow that still asked for typed text would throw
+ *   `ui.input is not a function` on the way past this mock, in every case, not only in a test that
+ *   happens to look for it; and
+ * - `confirm` returns a boolean or throws. An answer cannot be a string, so no case can smuggle a typed
+ *   value through the yes/no seam, and an unreadable answer is expressed as a thrown named failure.
+ *
+ * Recognised answers: `'confirm'` (yes), `'decline'` (no, the default), a literal boolean, and
+ * `{ throws: error }` for a surface that cannot render the question or cannot read the answer. A
+ * dismissal needs no separate spelling: the real adapter reports one as a decline, which is a `false`.
+ *
+ * There are no free-form arguments: identity, ports, paths, confirmation and outcomes cannot be supplied
+ * or overridden — the only inputs are which decision is answered and how.
  */
 export function mockUi(answers = {}) {
   const prompts = [];
@@ -293,23 +307,16 @@ export function mockUi(answers = {}) {
     if (typeof kind !== 'string' || kind === '') throw new Error('a decision prompt must carry a stable kind');
     return kind;
   };
-  const answer = (kind, fallback) => {
-    const value = answers[kind] ?? fallback;
-    if (typeof value === 'string') return value;
-    if (value && value.kind === 'prompt') return value.value;
-    return value;
-  };
   const ui = {
-    input: async options => {
-      const kind = requireKind(options.kind);
-      prompts.push({ kind, prompt: options.prompt, placeholder: options.placeholder });
-      return answer(kind, undefined);
-    },
     confirm: async options => {
       const kind = requireKind(options.kind);
       prompts.push({ kind, prompt: options.prompt });
-      const value = answer(kind, 'decline');
-      return value === 'confirm' ? true : value === 'decline' ? false : value;
+      const value = answers[kind] ?? 'decline';
+      if (value && typeof value === 'object' && value.throws) throw value.throws;
+      if (value === 'confirm') return true;
+      if (value === 'decline') return false;
+      if (typeof value === 'boolean') return value;
+      throw new Error(`a yes/no decision answer must be 'confirm', 'decline', {throws} or a boolean; got ${JSON.stringify(value)}`);
     },
   };
   return { ui, prompts, ended: sessionId => ENDED_WORDING(sessionId) };

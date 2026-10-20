@@ -1,278 +1,127 @@
-// Issue #9 prompt-visibility regressions (ADR 0009-B): what an operator sees, and what a paste can and
-// cannot become. The mock UI in the adoption fixtures records prompt strings, which proves the workflow
-// constructed a question but proves nothing about a terminal. These cases drive the real dialog component
-// with real byte sequences and read real rendered lines, so "visible" and "byte-exact" are demonstrated
-// rather than asserted. No Pi host, board, or terminal emulator is involved.
+// Real adapter + native SelectList + bounded overlay viewport. Not real-host evidence; see ADR 0012.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AdoptionDialog, PASTE_START, PASTE_END, MINIMUM_WIDTH, MINIMUM_HEIGHT, escapeControlCharacters, adoptionInteraction } from '../dist/adoption-ui.js';
-
-const theme = { fg: (_color, text) => text };
-
-/** A host TUI carrying only the two members the dialog is allowed to require. */
-function hostTui({ columns = 90, rows = 24 } = {}) {
-  const renders = { count: 0 };
-  return { tui: { terminal: { columns, rows }, requestRender: () => { renders.count++; } }, renders };
+import { visibleWidth } from 'pi-intercom-tui';
+import { AdoptionSelector, askAdoptionDecision, adoptionInteraction, selectionPrompt, escapeControlCharacters } from '../dist/adoption-ui.js';
+import { AdoptionDecisionCaptureFailure, AdoptionHostUiUnavailable } from '../dist/adoption.js';
+const ANSI = /\x1b\[[0-9;]*m/g;
+const prompt = [
+  `Board root: ${'/very/deep/projects/home/'.repeat(8)}`,
+  'Current: 01a15161-da4d-73e7-ba68-c0a394830b98 port 43901',
+  'Previous: 01a15157-833e-7557-aee5-3858d48dc87e port 41233',
+  `Config SHA256: ${'9ae0c1'.padEnd(64, '0')}`,
+  'Disconnected is not evidence of termination.',
+  ...Array.from({ length: 30 }, (_, i) => `required effect ${i}: untouched workers and close-job fences.`),
+].join('\n');
+function dialog(columns = 80, rows = 24) {
+  const size = { columns, rows };
+  let component, resolved = false;
+  const surface = { custom: (factory, options) => new Promise(resolve => {
+    assert.equal(options.overlay, true);
+    component = factory({ terminal: size, requestRender() {} }, { fg: (_name, value) => value }, {}, result => { resolved = true; resolve(result); });
+  }) };
+  return { surface, size, get component() { return component; }, get resolved() { return resolved; },
+    paint: () => component.render(size.columns - 2).map(line => line.replace(ANSI, '')),
+    key: data => component.handleInput(data) };
 }
-
-/** Drive the component the way Pi does: feed bytes, then read the lines it would paint. */
-async function dialog(options = {}) {
-  const { tui, renders } = hostTui(options);
-  const settlements = [];
-  const component = new AdoptionDialog(tui, theme, options.kind ?? 'authorityRecord', options.prompt ?? 'prompt',
-    options.mode ?? 'input', settlement => settlements.push(settlement), await import('pi-intercom-tui'), options.pasteTimeoutMs ?? 40);
-  const feed = data => { component.handleInput(data); component.invalidate(); return rendered(); };
-  const rendered = () => component.render(options.width ?? 80).map(line => stripAnsi(line));
-  const settled = () => {
-    assert.equal(settlements.length, 1, 'one interaction, one settlement');
-    return settlements[0];
-  };
-  return { component, feed, rendered, settlements, settled, renders };
+function open(columns = 80, rows = 24) {
+  const d = dialog(columns, rows);
+  const answer = askAdoptionDecision(d.surface, { kind: 'adoptTransition', prompt });
+  d.paint();
+  return { d, answer };
 }
+const marked = d => d.paint().find(line => line.trim().startsWith('→'))?.trim();
 
-const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
-const stripAnsi = line => line.replace(ansi, '');
-const joined = lines => lines.join('\n');
-const waitFor = async predicate => {
-  for (let attempt = 0; attempt < 200 && !predicate(); attempt++) await new Promise(resolve => setTimeout(resolve, 5));
-  return predicate();
-};
-
-// ---- visible text, not placeholder text -----------------------------------------------------------
-
-test('the question is painted as durable content beside its answer control', async t => {
-  const prompt = 'Type the authorising record.\nAn empty answer cannot produce a claim.';
-  const d = await dialog({ prompt });
-  const lines = d.feed('r');
-  assert.ok(joined(lines).includes('Type the authorising record.'), `question must be visible: ${joined(lines)}`);
-  assert.ok(joined(lines).includes('An empty answer cannot produce a claim.'), 'every paragraph is visible');
-  assert.ok(joined(lines).includes('r'), 'the answer is visible next to the question');
-  assert.ok(!lines.some(line => line.trim() === ''), 'the screen is filled with content, not blank placeholder space');
-  assert.equal(d.renders.count > 0, true, 'every keystroke asks Pi to repaint');
+test('native selection control defaults No; navigation is not consent; explicit activation is', async () => {
+  const first = open();
+  assert.equal(marked(first.d), '→ No');
+  first.d.key('\r'); assert.equal(await first.answer, false);
+  const second = open();
+  second.d.key('\x1b[B'); assert.equal(marked(second.d), '→ Yes');
+  assert.equal(second.d.resolved, false);
+  second.d.key('\x1b[A'); assert.equal(marked(second.d), '→ No');
+  second.d.key('\x1b[B'); second.d.key('\r'); assert.equal(await second.answer, true);
+  const third = open(); third.d.key('\x1b'); assert.equal(await third.answer, false);
 });
 
-test('a long question scrolls instead of being clipped away, and the scroll keys are named', async t => {
-  const prompt = Array.from({ length: 40 }, (_, index) => `line ${index}`).join('\n');
-  const d = await dialog({ prompt, rows: 8 });
-  const first = joined(d.feed(''));
-  assert.ok(first.includes('line 0'), 'the beginning is visible');
-  assert.ok(!first.includes('line 39'), 'a question longer than the screen cannot all be visible at once');
-  assert.match(first, /PageUp|PageDown/, 'the dialog says how to see the rest');
-  for (let index = 0; index < 20; index++) d.feed('\x1b[6~');
-  const bottom = joined(d.rendered());
-  assert.ok(bottom.includes('line 39'), `scrolling reaches the end: ${bottom.slice(-120)}`);
+for (const [columns, rows] of [[100, 30], [60, 18], [40, 12]]) test(`full scrollable context at actual ${columns}x${rows}`, async () => {
+  const { d, answer } = open(columns, rows);
+  const all = [];
+  let previous = '';
+  for (let pages = 0; pages < 300; pages++) {
+    const painted = d.paint();
+    assert.ok(painted.length <= rows - 2, `bounded height: ${painted.length}`);
+    assert.ok(painted.every(line => visibleWidth(line) <= columns - 2), 'every row fits overlay');
+    assert.ok(painted.some(line => line.trim() === 'Yes'));
+    assert.equal(marked(d), '→ No');
+    const range = painted.find(line => line.startsWith('Context '));
+    if (range === previous) break;
+    previous = range;
+    all.push(...painted.slice(0, painted.indexOf(range)));
+    d.key('\x1b[6~');
+  }
+  const joined = all.join('').replace(/\s/g, '');
+  for (const line of selectionPrompt('adoptTransition', prompt).split('\n')) {
+    assert.ok(joined.includes(line.replace(/\s/g, '')), `retrievable: ${line}`);
+  }
+  d.key('\x1b[H'); assert.match(d.paint().join('\n'), /Intercom coordinator/);
+  d.key('\x1b[F'); assert.match(d.paint().join('\n'), /required effect 29/);
+  d.key('\x1b'); assert.equal(await answer, false);
 });
 
-test('terminal too small closes with a named host failure rather than asking an invisible question', async t => {
-  for (const size of [{ columns: MINIMUM_WIDTH - 1, rows: 40, width: MINIMUM_WIDTH - 1 }, { columns: 120, rows: MINIMUM_HEIGHT - 1 }]) {
-    const d = await dialog(size);
-    d.rendered();
-    d.rendered();
-    // Pi repaints on a timer, so the render call is what notices; the settlement is a microtask after it.
-    assert.equal(await waitFor(() => d.settlements.length === 1), true, 'a too-small screen settles on its own');
-    assert.match(d.settled().hostFailure, /smaller than the 20x7 needed/, JSON.stringify(size));
-    assert.equal(d.settled().value, undefined, 'no answer is ever produced');
+test('typing, multi-key batches and bracketed paste (including split markers) never activate', async () => {
+  const { d, answer } = open();
+  for (const input of ['yes', 'y', 'No', ' ', '\x1b[B\r', 'Yes\r', '\x1b[200~\x1b[B\r\x1b[201~', '\x1b[20', '0~', '\x1b[B', '\r', '\x1b[201~']) d.key(input);
+  assert.equal(d.resolved, false);
+  assert.equal(marked(d), '→ No');
+  d.key('\x1b'); assert.equal(await answer, false);
+});
+
+test('malformed paste is CONFIRMATION; unfinished paste never grants consent and can be cancelled', async () => {
+  for (const payload of ['\x1b[201~', '\x1b[200~\x1b[200~']) {
+    const { d, answer } = open(); d.key(payload);
+    await assert.rejects(answer, AdoptionDecisionCaptureFailure);
+  }
+  const { d, answer } = open(); d.key('\x1b[200~'); d.key('Yes\r');
+  assert.equal(d.resolved, false); d.key('\x1b'); assert.equal(await answer, false);
+});
+
+test('resize repaginates without omission or answer; unusable dimensions fail HOST before acceptance', async () => {
+  const { d, answer } = open(); d.key('\x1b[F');
+  d.size.columns = 40; d.size.rows = 12;
+  assert.ok(d.paint().length <= 10);
+  assert.equal(d.resolved, false);
+  d.size.rows = 8; d.key('\x1b[B'); d.key('\r');
+  await assert.rejects(answer, AdoptionHostUiUnavailable);
+});
+
+test('absent/throwing custom surface fails HOST, never falls back to text or native truncated title', async () => {
+  for (const surface of [undefined, {}, { select: async () => 'Yes' }, { input: () => assert.fail('input') }, { custom: async () => { throw new Error('broken'); } }]) {
+    await assert.rejects(() => askAdoptionDecision(surface, { kind: 'k', prompt: 'p' }), AdoptionHostUiUnavailable);
   }
 });
 
-// ---- paste is transport-decoded, never content-normalised -----------------------------------------
-
-test('a paste keeps the exact bytes, including the CRLF that makes it not match', async t => {
-  const payload = 'I confirm coordinator session-1 ended\r\n';
-  const d = await dialog();
-  d.feed(`${PASTE_START}${payload}${PASTE_END}`);
-  d.feed('\r');
-  assert.equal(d.settled().value, payload, 'CRLF survives a paste');
+test('malformed runtime capture is CONFIRMATION, distinct from No/undefined and yes', async () => {
+  for (const value of ['yes', 'Yes ', '', 'Yes\0No', null, true, 1, {}, [], Symbol('bad')]) {
+    await assert.rejects(() => askAdoptionDecision({ custom: async () => value }, { kind: 'k', prompt: 'p' }), AdoptionDecisionCaptureFailure);
+  }
+  for (const [value, expected] of [['Yes', true], ['No', false], [undefined, false]]) {
+    assert.equal(await askAdoptionDecision({ custom: async () => value }, { kind: 'k', prompt: 'p' }), expected);
+  }
 });
 
-test('paste payload newlines never submit, and a later Enter submits the whole value', async t => {
-  const d = await dialog();
-  d.feed(`${PASTE_START}first\nsecond${PASTE_END}`);
-  assert.equal(d.settlements.length, 0, 'a newline inside a paste frame is payload, not Enter');
-  d.feed('\r');
-  assert.equal(d.settled().value, 'first\nsecond');
+test('no answer before a painted viewport and no text field', () => {
+  let answered = false;
+  const d = new AdoptionSelector('question', () => ({ columns: 80, rows: 24 }), () => {}, () => { answered = true; });
+  d.handleInput('\x1b[B'); d.handleInput('\r'); assert.equal(answered, false);
+  const painted = d.render(78).join('\n');
+  assert.ok(!/^\s*>\s/m.test(painted));
+  assert.match(painted, /→ No/);
 });
 
-test('tabs and a trailing space survive a paste unchanged', async t => {
-  const d = await dialog();
-  d.feed(`${PASTE_START}a\tb ${PASTE_END}`);
-  d.feed('\r');
-  assert.equal(d.settled().value, 'a\tb ');
-});
-
-test('a paste frame split across chunks is reassembled byte-exactly', async t => {
-  const d = await dialog();
-  d.feed(`${PASTE_START}exact`);
-  d.feed(' sentence');
-  d.feed(PASTE_END);
-  d.feed('\r');
-  assert.equal(d.settled().value, 'exact sentence');
-});
-
-test('an opening delimiter split across chunks is transport, never answer text', async t => {
-  const d = await dialog();
-  d.feed(PASTE_START.slice(0, 3));
-  d.feed(`${PASTE_START.slice(3)}onetwo${PASTE_END.slice(0, 2)}`);
-  d.feed(PASTE_END.slice(2));
-  d.feed('\r');
-  assert.equal(d.settled().value, 'onetwo', 'both split delimiters are removed and no byte of the payload is lost');
-});
-
-test('a held start prefix that never completes cannot capture the rest of the interaction', async t => {
-  const d = await dialog();
-  d.feed('\x1b[2');
-  d.feed('x');
-  d.feed('\r');
-  // `ESC [ 2 x` is one complete CSI sequence, so nothing of it is answer text; what matters is that the
-  // dialog left paste mode and this Enter really did end the interaction.
-  assert.equal(d.settled().value, '', 'a control sequence is not answer text');
-  d.feed('later');
-  d.feed('\r');
-  assert.equal(d.settlements.length, 1, 'the interaction ended at the first Enter, not after a stuck paste');
-});
-
-test('an unterminated paste fails visibly and never becomes a candidate answer', async t => {
-  const d = await dialog({ pasteTimeoutMs: 20 });
-  d.feed(`${PASTE_START}half an answer`);
-  assert.equal(await waitFor(() => d.settlements.length === 1), true, 'an unfinished frame cannot wait forever');
-  assert.match(d.settled().captureFailure, /never completed/);
-  assert.equal(d.settled().value, undefined, 'a partial paste is not an answer');
-  d.feed('\r');
-  assert.equal(d.settlements.length, 1, 'nothing is settled twice');
-});
-
-test('a nested paste start fails closed instead of guessing a payload', async t => {
-  const d = await dialog({ pasteTimeoutMs: 20 });
-  d.feed(`${PASTE_START}a${PASTE_START}b${PASTE_END}`);
-  assert.equal(await waitFor(() => d.settlements.length === 1), true, 'a nested frame cannot stay open');
-  assert.match(d.settled().captureFailure, /second paste start/);
-});
-
-test('an unexpected paste end fails closed', async t => {
-  const d = await dialog();
-  d.feed(PASTE_END);
-  assert.match(d.settled().captureFailure, /no paste in progress/);
-});
-
-test('an empty paste frame is a real empty answer, which the domain still refuses', async t => {
-  const d = await dialog();
-  d.feed(`${PASTE_START}${PASTE_END}`);
-  d.feed('\r');
-  assert.equal(d.settled().value, '', 'an empty paste is reported honestly as empty');
-});
-
-test('dismissal discards every buffered byte instead of keeping them for later', async t => {
-  const d = await dialog();
-  d.feed('typed');
-  d.feed('\x1b');
-  assert.equal(await waitFor(() => d.settlements.length === 1), true, 'Escape ends the interaction');
-  assert.equal(d.settled().cancelled, true);
-  d.feed('more');
-  d.feed('\r');
-  assert.equal(d.settlements.length, 1, 'a dismissed dialog is finished');
-  assert.equal(d.settled().value, undefined, 'the discarded text never resurfaces as an answer');
-});
-
-test('control characters are displayed as symbols while the compared answer stays byte-exact', async t => {
-  const d = await dialog();
-  d.feed(`${PASTE_START}a\tb${PASTE_END}`);
-  const lines = joined(d.rendered());
-  assert.ok(lines.includes(escapeControlCharacters('a\tb')), `the tab is shown as a symbol: ${JSON.stringify(lines)}`);
-  assert.ok(!lines.includes('\tb'), 'a raw tab is not painted as layout');
-  d.feed('\r');
-  assert.equal(d.settled().value, 'a\tb', 'display never changes the answer');
-});
-
-// ---- confirmations --------------------------------------------------------------------------------
-
-test('yes/no answers are distinct from dismissal, and either may be submitted', async t => {
-  const yes = await dialog({ mode: 'confirm' });
-  yes.feed('y');
-  yes.feed('\r');
-  assert.equal(yes.settled().value, true);
-  const no = await dialog({ mode: 'confirm' });
-  no.feed('n');
-  no.feed('\r');
-  assert.equal(no.settled().value, false);
-  const dismissed = await dialog({ mode: 'confirm' });
-  dismissed.feed('\x1b');
-  assert.equal(await waitFor(() => dismissed.settlements.length === 1), true, 'Escape ends the interaction');
-  assert.equal(dismissed.settled().cancelled, true);
-  assert.equal(dismissed.settled().value, undefined, 'dismissal is not a No');
-});
-
-test('the selected answer is shown as selected', async t => {
-  const d = await dialog({ mode: 'confirm' });
-  assert.match(joined(d.feed('y')), /Yes/);
-  assert.match(joined(d.rendered()), /No/);
-});
-
-test('a long ended-wording sentence stays complete on a narrow terminal', async t => {
-  const sessionId = 'c'.repeat(120);
-  const prompt = `Type exactly:\nENDED ${'I confirm coordinator ' + sessionId + ' ended'}`;
-  const d = await dialog({ prompt, width: 24, columns: 24, rows: 12 });
-  // A long id cannot fit a narrow line: wrapping must carry every character to a following line, and the
-  // scroll indicator must admit there is more. Scrolling to the end has to show the tail, not an ellipsis.
-  const first = joined(d.feed(''));
-  assert.match(first, /instructions \d+-\d+ of \d+/, 'the operator is told the question continues');
-  for (let index = 0; index < 20; index++) d.feed('\x1b[6~');
-  const tail = joined(d.rendered());
-  // Rejoin the wrapped lines: the characters were never dropped, only moved to the next line.
-  const body = tail.split('\n').filter(line => /^\S/.test(line) && !line.startsWith('>')).join('');
-  assert.ok(body.includes(sessionId), `every character of the long id is reachable by scrolling: ${body}`);
-  assert.ok(body.includes('ended'), 'and so is the end of the sentence');
-});
-
-test('a pasted exact sentence reaches the domain byte-identically, which is the whole gate', async t => {
-  const expected = `I confirm coordinator ${'a'.repeat(64)} ended`;
-  const d = await dialog();
-  d.feed(`${PASTE_START}${expected}${PASTE_END}`);
-  d.feed('\r');
-  const { ENDED_WORDING } = await import('../dist/adoption.js');
-  assert.equal(d.settled().value, expected, 'no normalization happened in the dialog');
-  assert.equal(d.settled().value, ENDED_WORDING('a'.repeat(64)), 'and the value is exactly what the domain compares against');
-});
-
-test('the same paste with one added space is refused by the domain comparison, unchanged', async t => {
-  const { ENDED_WORDING } = await import('../dist/adoption.js');
-  const d = await dialog();
-  d.feed(`${PASTE_START}${ENDED_WORDING('session-1')} ${PASTE_END}`);
-  d.feed('\r');
-  assert.equal(d.settled().value.endsWith(' '), true, 'the trailing space survived, as it must');
-  assert.notEqual(d.settled().value, ENDED_WORDING('session-1'), 'so the exact comparison still fails');
-});
-
-test('a closing delimiter arriving after a complete frame fails closed, whole or chunked', async t => {
-  const whole = await dialog();
-  whole.feed(`${PASTE_START}ok${PASTE_END}${PASTE_END}`);
-  assert.match(whole.settled().captureFailure, /no paste in progress/, 'one chunk');
-
-  const chunked = await dialog();
-  chunked.feed(`${PASTE_START}ok${PASTE_END}`);
-  chunked.feed(PASTE_END);
-  assert.match(chunked.settled().captureFailure, /no paste in progress/, 'a later chunk');
-  assert.equal(chunked.settled().value, undefined, 'an accepted first paste is not silently answered after framing broke');
-
-  const late = await dialog();
-  late.feed(`${PASTE_START}ok${PASTE_END}`);
-  late.feed(`x${PASTE_END}`);
-  assert.match(late.settled().captureFailure, /no paste in progress/, 'a stray end in a later chunk, after ordinary keystrokes');
-});
-
-test('two well-formed frames in one chunk still answer, so the failure is only about real ambiguity', async t => {
-  const d = await dialog();
-  d.feed(`${PASTE_START}a${PASTE_END}`);
-  d.feed(`${PASTE_START}b${PASTE_END}`);
-  d.feed('\r');
-  assert.equal(d.settled().value, 'ab', 'sequential pastes append; nothing was guessed away');
-});
-
-// ---- routing contract ------------------------------------------------------------------------------
-
-test('a host with no custom surface is a named refusal, never a placeholder question', async t => {
-  const routed = adoptionInteraction({});
-  await assert.rejects(() => routed.input({ kind: 'authorityRecord', prompt: 'Type the authorising record.' }),
-    /no custom interaction surface/);
-  await assert.rejects(() => routed.confirm({ kind: 'boardInitialize', prompt: 'Initialize the first board?' }),
-    /no custom interaction surface/);
+test('question is durable full text, controls rendered as data, and adapter has no input', () => {
+  assert.equal(selectionPrompt('k', 'one\ntwo'), 'Intercom coordinator adoption · k\n\none\ntwo');
+  assert.equal(escapeControlCharacters('a\x1bb\tc\rd'), 'a<0x1b>b⇥c␍d');
+  assert.ok(selectionPrompt('k', 'x'.repeat(100_000)).endsWith('x'.repeat(100_000)));
+  assert.deepEqual(Object.keys(adoptionInteraction(undefined)), ['confirm']);
 });

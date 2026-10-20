@@ -18,8 +18,9 @@ import { LOG_FILE_PATTERN } from './observability.js';
  * `Intercom.adoptCoordinator`, which the role-local `/intercom-adopt` command invokes with a supported
  * Pi command context. There are no identity, port, path, role, confirmation, or JSON parameters: every
  * authority value comes from this process's launch configuration, the persisted Pi session, this
- * runtime's bound endpoint, the config read made inside the transaction, or an answer typed by the
- * human into this session's own Pi UI.
+ * runtime's bound endpoint, the config read made inside the transaction, or an explicit yes answered
+ * in this session's own Pi UI. Nothing is ever typed: no text answer is requested anywhere in this
+ * flow, and no generated evidence claims otherwise.
  */
 
 export const PROJECTS_HOME_ENV = 'PI_INTERCOM_PROJECTS_HOME';
@@ -28,23 +29,26 @@ export const ORCHESTRATOR_ROLE = 'orchestrator';
 export const CLAIM_FILE = 'coordinator-claim.md';
 export const CONFIG_DIRECTORY = '.pi-intercom';
 export const REBRIEF_SOURCE = 'handoff.md (open assignments)';
+/**
+ * The canonical ended-coordinator attestation. Issue #12 keeps it as a claim-schema invariant: it is the
+ * stored form of the attestation a yes accepts, never a transcription of typed text. `parseClaim` still
+ * requires it verbatim for `kind: 'adoption'`, so historical records and new ones validate identically.
+ */
 export const ENDED_WORDING = (sessionId: string): string => `I confirm coordinator ${sessionId} ended`;
 
 /**
- * A malformed or incomplete bracketed paste is a capture failure, never an answer. The adapter reports
- * it instead of fabricating, normalizing, or auto-submitting a candidate; the domain names the step.
+ * A selection surface that returned something which is neither an offered choice nor a dismissal is a
+ * capture failure, never an answer. The adapter reports it instead of guessing, so an unreadable
+ * decision can never be read as a yes — or as a no.
  */
-export class AdoptionInputCaptureFailure extends Error {
-  constructor(message = 'the pasted answer was not a complete, well-framed bracketed paste') { super(message); this.name = 'AdoptionInputCaptureFailure'; }
+export class AdoptionDecisionCaptureFailure extends Error {
+  constructor(message: string) { super(message); this.name = 'AdoptionDecisionCaptureFailure'; }
 }
-/** The captured Pi UI cannot render a durable visible question. Fail closed; never open an invisible input. */
+/** The captured Pi UI cannot render a visible selection dialog. Fail closed; never open a text input. */
 export class AdoptionHostUiUnavailable extends Error {
   constructor(message: string) { super(message); this.name = 'AdoptionHostUiUnavailable'; }
 }
 
-/** Named human-gate steps. Every refusal names one of these, so an invisible question cannot be guessed at. */
-export const RECORD_STEP = 'authorising record';
-export const ENDED_STEP = 'ended-wording confirmation';
 export const DISCONNECTED_WARNING = 'A disconnected or unknown endpoint probe is not evidence that a coordinator terminated.';
 
 /**
@@ -207,12 +211,15 @@ export interface CommandContext {
   isProjectTrusted(): boolean;
   isIdle(): boolean;
   sessionManager: { getSessionId(): string; getSessionFile(): string | undefined; getSessionDir(): string | undefined };
-    /**
+  /**
+   * The one human surface this flow has: a selection-style dialog offering exactly two answers. There is
+   * no text-input member, deliberately — issue #12 removed every typed gate, and a workflow that cannot
+   * ask a yes/no on a selection surface stops instead of falling back to a text field.
+   *
    * Every decision carries a stable `kind`, so an operator, a test, and the audit trail can tell which
-   * question was answered, declined, left blank, or cancelled. Prompt text is for humans and changes.
+   * question was answered, declined, or left unanswered. Prompt text is for humans and changes.
    */
   ui: {
-    input(options: { kind: string; prompt: string; placeholder?: string }): Promise<string | undefined>;
     confirm(options: { kind: string; prompt: string }): Promise<boolean>;
   };
   waitForIdle?(): Promise<void>;
@@ -384,7 +391,7 @@ export class AdoptionWorkflow {
     const launch = this.launchRole();
     if (!launch.authorized) return halt('AUTH', `${launch.detail}; this workflow is available only to the canonical Orchestrator launch role`);
     if (context.mode !== 'tui') return halt('MODE', `a human decision requires the interactive Pi UI, not mode ${context.mode}`);
-    if (!context.hasUI || !context.ui?.input || !context.ui?.confirm) return halt('MODE', 'no dialog-capable Pi UI is available to capture a human decision');
+    if (!context.hasUI || !context.ui?.confirm) return halt('MODE', 'no selection-capable Pi UI is available to capture a human decision');
     if (!context.isProjectTrusted()) return halt('TRUST', 'project trust is required before honoring shared board configuration');
     if (context.sessionManager.getSessionId() !== this.options.sessionId()) return halt('SESSION_CHANGED', 'the command context session is not this runtime session');
     if (requirements.idle) {
@@ -638,7 +645,7 @@ export class AdoptionWorkflow {
       }
       // Issue #9: an existing board naming this verified session with no claim history is a first
       // declaration, not an adoption. One explicit yes/no replaces the former typed authority reference.
-      const confirmed = await this.confirmGate(context, { kind: 'firstCoordinatorDeclaration', prompt: firstDeclarationPrompt(surveyed.home, surveyed.identity) }, 'first-coordinator declaration');
+      const confirmed = await this.confirmGate(context, { kind: 'firstCoordinatorDeclaration', prompt: firstDeclarationPrompt(surveyed.home, surveyed.identity, surveyed.scanned!) }, 'first-coordinator declaration');
       if ('stop' in confirmed) return confirmed.stop;
       if (!confirmed.value) return halt('CANCELLED', `first-coordinator declaration at ${surveyed.home} was declined; nothing was written`);
       return this.declare(context, surveyed, declarationEvidence(surveyed.home, surveyed.identity));
@@ -727,9 +734,16 @@ export class AdoptionWorkflow {
   // ---- AC3/AC4 human decision ---------------------------------------------------------
 
   /**
-   * AC3 collisions, AC4 old-endpoint probe, then the human answers, in that order. Identity and the
-   * ended confirmation are typed into this session's own Pi UI: no parameter, argument, saved default,
-   * or model text can supply them, and no decline produces a write.
+   * AC3 collisions, AC4 old-endpoint probe, then the human answers exactly once. Identity and the target
+   * are backend-selected: no parameter, argument, saved default, or model text can supply them.
+   *
+   * Issue #12: this is one decision, not three. The former preliminary "continue?" question, the typed
+   * authorising record, and the typed exact-ended sentence are gone, because a second question is a
+   * second decision and the human ruled that a single contextual yes is the confirmation. Everything
+   * that question used to ask is now stated before the answer instead: the attestation that the named
+   * coordinator has ended, the disconnected/unknown warning, and the exact replacement being authorized.
+   * Nothing else moved: collisions, the old-endpoint probe, and every later gate still refuse here, in
+   * this order, before any dialog opens.
    */
   private async humanAdoptionDecision(context: CommandContext, surveyed: Survey, previous?: ClaimPrevious, priorTransitionId?: string): Promise<{ authority: Authority } | { stop: Result }> {
     const identity = surveyed.identity, board = coordinator(surveyed.scanned!.config);
@@ -751,81 +765,41 @@ export class AdoptionWorkflow {
     }
     const transitionId = priorTransitionId ?? (this.options.uuid?.() ?? randomUUID()).toLowerCase();
     const previewHash = sha256(surveyed.scanned!.raw);
-    const gateContext = targetLines(surveyed, target, source, probe);
-    if (previous === undefined) {
-      const code = surveyed.claim ? 'CLAIM_OTHER' : 'ADOPTION_REQUIRED';
-      const record = surveyed.claim ? `record ${surveyed.claim.coordinator.sessionId}/${surveyed.claim.coordinator.port}; ` : 'claim absent; ';
-      const proceed = await this.confirmGate(context, { kind: 'adoptionDecision',
-        prompt: [`ADOPTION STOP ${code}`, `${record}this session ${identity.sessionId}/${identity.port}; board ${board.sessionId}/${board.port} at ${surveyed.home}. No coordinator action is authorized.`,
-          ...gateContext, '', 'Continue to a NEW human adoption decision?'].join('\n') }, 'adoption decision');
-      if ('stop' in proceed) return { stop: proceed.stop };
-      if (!proceed.value) return { stop: halt(code, `${record}this session ${identity.sessionId}/${identity.port}; board ${board.sessionId}/${board.port} — report both; wait for human decision`) };
-    }
-    const authority = await this.askAdoptionAuthority(context, surveyed, target, source, gateContext, probe);
-    if ('stop' in authority) return authority;
     const unchanged = leftUnchanged(surveyed.scanned!);
     const fenced = unchanged.filter(entry => entry.closeJob !== null && FENCED_STATES.includes(entry.closeJob.state));
+    const renewed = previous !== undefined;
     const confirmed = await this.confirmGate(context, {
-      kind: 'adoptTransition',
-      prompt: `Transition ${transitionId}; config SHA256 ${previewHash}. Adopt the board at ${surveyed.home}: coordinator ${board.sessionId} port ${board.port} -> ${identity.sessionId} port ${identity.port}. `
-        + `Old endpoint probe: ${probe.state} (${probe.reason}) — disconnected and unknown are not evidence of termination. `
-        + `Left unchanged: ${roster(unchanged)}${fenced.length ? `; close jobs reported and left fenced: ${fenced.map(entry => `${entry.name}/${entry.closeJob!.state}`).join(', ')}` : ''}. `
-        + `No worker is sent anything, and nothing is resumed, removed, interrupted, reloaded or restarted. Confirm this exact transition.`,
-    }, 'exact transition');
+      kind: renewed ? 'renewAdoptionDecision' : 'adoptTransition',
+      prompt: adoptionDecisionPrompt({
+        surveyed, target, source, probe, board, transitionId, previewHash, unchanged, fenced, renewed,
+      }),
+    }, renewed ? 'adoption decision renewal' : 'adoption decision');
     if ('stop' in confirmed) return { stop: confirmed.stop };
-    if (!confirmed.value) return { stop: halt('CANCELLED', 'the exact transition was declined; no evidence, replacement or action is authorized') };
-    return { authority: Object.freeze({ ...authority, decision: Object.freeze({ transitionId, boardRoot: surveyed.home,
-      configSha256: previewHash, previous: Object.freeze({ sessionId: board.sessionId, port: board.port }), coordinator: Object.freeze({ sessionId: identity.sessionId, port: identity.port }) }) }) };
+    if (!confirmed.value) {
+      const [code, evidence] = declinedAdoption(surveyed, renewed, identity, board, target, transitionId);
+      return { stop: halt(code, evidence) };
+    }
+    // Only an affirmative answer reaching this line creates authority. It is recorded as what it is:
+    // a captured local yes, generated by this implementation, never a transcription of typed text.
+    const decision = Object.freeze({ transitionId, boardRoot: surveyed.home, configSha256: previewHash,
+      previous: Object.freeze({ sessionId: board.sessionId, port: board.port }), coordinator: Object.freeze({ sessionId: identity.sessionId, port: identity.port }) });
+    return { authority: Object.freeze({ ...adoptionEvidence({ boardRoot: surveyed.home, identity, target, transitionId, configSha256: previewHash }),
+      confirmedEndedAt: (this.options.now?.() ?? new Date()).toISOString(), decision }) };
   }
   /**
-   * AC4: the typed authority reference and the exact ended wording, or a named refusal. Issue #9: every
-   * refusal names its step, a failed ended wording repeats the complete expected sentence, and nothing
-   * here can be reached by a first-declaration path. The exact comparison is never normalized.
-   */
-  private async askAdoptionAuthority(context: CommandContext, surveyed: Survey, target: { sessionId: string; port: number }, source: string, gateContext: string[], probe: WorkerConnection): Promise<Authority | { stop: Result }> {
-    const record = await this.capture(context, { kind: 'authorityRecord', prompt: authorityRecordPrompt(surveyed.home, [`Board ${surveyed.home}: coordinator ${target.sessionId}/${target.port} → ${surveyed.identity.sessionId}/${surveyed.identity.port} (${source}).`, ...gateContext]) }, RECORD_STEP);
-    if ('stop' in record) return record;
-    const trimmed = record.value.trim();
-    if (trimmed === '') return { stop: halt('CONFIRMATION', `${RECORD_STEP}: a non-empty authorising record is required; an empty or whitespace-only answer cannot produce a claim. Nothing was written.`) };
-    if (trimmed.length > 2000) return { stop: halt('CONFIRMATION', `${RECORD_STEP}: the authorising record is longer than the 2000 characters the claim schema allows. Nothing was written; the answer is not echoed.`) };
-    if (/[\x00-\x1f\x7f-\x9f]/.test(trimmed)) return { stop: halt('CONFIRMATION', `${RECORD_STEP}: the authorising record contains control characters, which the claim schema cannot store. Nothing was written; the answer is not echoed.`) };
-    const expected = ENDED_WORDING(target.sessionId);
-    const wording = await this.capture(context, { kind: 'endedWording', prompt: endedWordingPrompt(target, gateContext) }, ENDED_STEP,
-      `Expected exactly, for the coordinator named above (${target.sessionId}, port ${target.port}):\n${expected}\n${DISCONNECTED_WARNING}`);
-    if ('stop' in wording) return wording;
-    if (wording.value !== expected) {
-      return { stop: halt('CONFIRMATION', endedWordingFailure(target, 'the answer is not exactly the required sentence. No trimming, case change, approximation or substitution is accepted.')) };
-    }
-    return { record: trimmed, wording: wording.value, confirmedEndedAt: (this.options.now?.() ?? new Date()).toISOString() };
-  }
-  /** One captured text answer, or a refusal that names the step. A malformed paste is never a candidate answer. */
-  private async capture(context: CommandContext, options: { kind: string; prompt: string }, step: string, captureFailure?: string): Promise<{ value: string } | { stop: Result }> {
-    try {
-      const value = await context.ui.input(options);
-      if (value === undefined) return { stop: halt('CANCELLED', `${step} was cancelled; nothing was written and no later adoption step is attempted`) };
-      return { value };
-    } catch (error) {
-      if (error instanceof AdoptionInputCaptureFailure) {
-        return { stop: halt('CONFIRMATION', [`${step}: the answer could not be read from this session's Pi UI (${reason(error)}). No partial, normalized or auto-submitted candidate is accepted.`, captureFailure, 'Nothing was written; invoke again for a fresh decision.'].filter(Boolean).join('\n')) };
-      }
-      if (error instanceof AdoptionHostUiUnavailable) return { stop: halt('HOST', `${step} cannot be displayed by this Pi UI: ${reason(error)}; no unlabelled or placeholder-only input was opened.`) };
-      throw error;
-    }
-  }
-  /**
-   * One yes/no decision, with the same named failure mapping as `capture`. Without it a malformed paste
-   * during a confirmation escapes as an unattributed `HOST` failure, and the operator loses the one thing
-   * ADR 0009-B requires: which step could not be read. A capture failure is never read as "No" either —
-   * declining is a decision, an unreadable answer is not.
+   * One yes/no decision, with one named failure mapping for every step. A refusal from the surface
+   * itself is never silently read as "No": an unavailable selection surface is a named `HOST` stop, and
+   * an answer that is neither offered choice nor a dismissal is a named `CONFIRMATION` stop. Declining
+   * is a decision; an unreadable one is not, and neither is ever a yes.
    */
   private async confirmGate(context: CommandContext, options: { kind: string; prompt: string }, step: string): Promise<{ value: boolean } | { stop: Result }> {
     try {
       return { value: await context.ui.confirm(options) === true };
     } catch (error) {
-      if (error instanceof AdoptionInputCaptureFailure) {
-        return { stop: halt('CONFIRMATION', `${step}: the decision could not be read from this session's Pi UI (${reason(error)}). No partial, normalized or auto-submitted candidate is accepted, and an unreadable answer is not treated as a No.`) };
+      if (error instanceof AdoptionDecisionCaptureFailure) {
+        return { stop: halt('CONFIRMATION', `${step}: the decision could not be read from this session's Pi UI (${reason(error)}). Nothing was written, and an unreadable answer is treated as neither a yes nor a No; invoke again for a fresh decision.`) };
       }
-      if (error instanceof AdoptionHostUiUnavailable) return { stop: halt('HOST', `${step} cannot be displayed by this Pi UI: ${reason(error)}; no unlabelled or placeholder-only confirmation was opened.`) };
+      if (error instanceof AdoptionHostUiUnavailable) return { stop: halt('HOST', `${step} cannot be displayed by this Pi UI: ${reason(error)}; no text input was opened in its place.`) };
       throw error;
     }
   }
@@ -1007,8 +981,7 @@ export class AdoptionWorkflow {
     if (board.sessionId !== identity.sessionId || board.port !== identity.port) return halt('RECOVERY_REQUIRED', 'expected-after config does not name the recorded adopting pair');
     const confirmed = await this.confirmGate(context, {
       kind: 'finalizeTransition',
-      prompt: `Finalize recorded transition ${intent.transitionId} without replacement: ${intent.previous.sessionId} port ${intent.previous.port} -> ${intent.coordinator.sessionId} port ${intent.coordinator.port}, which is already the board entry. `
-        + `Evidence is ${clean ? 'clean committed prepared intent' : 'exactly derived active bytes already in the worktree'}. Commit that active evidence and promote this running session?`,
+      prompt: finalizationPrompt({ home, identity, intent, evidence: clean ? 'clean committed prepared intent' : 'exactly derived active bytes already in the worktree' }),
     }, 'finalization');
     if ('stop' in confirmed) return confirmed.stop;
     if (!confirmed.value) return halt('CANCELLED', 'finalization was declined; the existing evidence is preserved unchanged');
@@ -1407,7 +1380,7 @@ export async function bootClaimEvidence(input: { home: string; identity: { sessi
     return { ready: true, detail: `${CLAIM_FILE} active evidence matches this board and session (commit ${commit})` };
   } catch (error) { return { ready: false, detail: `${CLAIM_FILE} is not verified committed active evidence: ${reason(error)}` }; }
 }
-/** The one generated-evidence template (ADR 0009-A). Bounded: the full board root stays in the claim, the authority record carries its labelled SHA256. */
+/** The one generated-evidence template (ADR 0009-A, issue #12). Bounded: the full board root stays in the claim, the authority record carries its labelled SHA256. */
 export function declarationEvidence(boardRoot: string, identity: ResolvedIdentity): DeclarationEvidence {
   const hash = sha256(boardRoot);
   return Object.freeze({
@@ -1415,6 +1388,27 @@ export function declarationEvidence(boardRoot: string, identity: ResolvedIdentit
     wording: `Explicit yes/no decision: this session's captured local Pi UI answered yes to the first-coordinator declaration for boardRoot SHA256 ${hash}. Implementation-generated wording, not a typed termination confirmation.`,
   });
 }
+/**
+ * The adoption counterpart (issue #12). `record` is an implementation-generated account of the single
+ * captured yes: it names the decision, both identity pairs, and the exact transition it authorized, and
+ * it says plainly that it was generated rather than typed or copied from an external ticket.
+ *
+ * `wording` is the canonical `ENDED_WORDING(target)` unchanged. That is deliberate: the schema binds an
+ * adoption claim to that exact sentence, and the sentence is the stored form of the attestation the yes
+ * accepts — "this human confirmed the named coordinator ended" — not a transcription of anything typed.
+ * Historical claims that already carry it therefore keep validating with no schema change.
+ */
+export function adoptionEvidence(input: {
+  boardRoot: string; identity: ResolvedIdentity; target: { sessionId: string; port: number };
+  transitionId: string; configSha256: string;
+}): { record: string; wording: string } {
+  const hash = sha256(input.boardRoot);
+  return Object.freeze({
+    record: `Human answered yes to the single adoption decision in the captured local Pi UI: session ${input.identity.sessionId} port ${input.identity.port} replaces coordinator ${input.target.sessionId} port ${input.target.port}; transition ${input.transitionId}; config SHA256 ${input.configSha256}; boardRoot SHA256 ${hash}. Implementation-generated evidence of that decision, not a typed statement and not an external reference.`,
+    wording: ENDED_WORDING(input.target.sessionId),
+  });
+}
+
 interface Authority {
   record: string; wording: string; confirmedEndedAt: string;
   decision?: { transitionId: string; boardRoot: string; configSha256: string;
@@ -1459,11 +1453,13 @@ const DECLARATION_EFFECT = [
   '- load this session\'s responsibility, and open coordinator action readiness only after that committed evidence and this endpoint both verify.',
   'No worker is contacted, and no other path is written, staged, committed, cleaned or reset.',
 ].join('\n');
-const DECLARATION_AUTHORIZATION = 'No text answer is requested. This yes/no decision is the authorization; the recorded authority evidence is generated by this implementation from your answer and says so.';
+const AUTHORIZATION_PROVENANCE = 'No text answer is requested. This yes/no decision is the whole authorization; the recorded authority evidence is generated by this implementation from your answer and says so.';
+const SAFER_DEFAULT = 'No is preselected and is the safe answer: it writes nothing and authorizes no action. Esc or a dismissal declines the same way. Answering yes is deliberate; a new decision requires a fresh invocation.';
+const DECLARATION_AUTHORIZATION = [AUTHORIZATION_PROVENANCE, '', SAFER_DEFAULT];
 
 export function boardInitializePrompt(home: string, identity: ResolvedIdentity): string {
   return [
-    'Initialize the first Intercom board at the projects home?',
+    'Initialize the first Intercom board at the projects home, and declare this session its first coordinator?',
     '',
     ...declarationContext(home, identity),
     '',
@@ -1472,29 +1468,36 @@ export function boardInitializePrompt(home: string, identity: ResolvedIdentity):
     '',
     DECLARATION_EFFECT,
     '',
-    DECLARATION_AUTHORIZATION,
+    ...DECLARATION_AUTHORIZATION,
   ].join('\n');
 }
-export function firstDeclarationPrompt(home: string, identity: ResolvedIdentity): string {
+export function firstDeclarationPrompt(home: string, identity: ResolvedIdentity, scanned?: ScannedConfig): string {
   return [
     'Declare this session the first coordinator of the existing board?',
     '',
     ...declarationContext(home, identity),
     '',
     `The board config already exists and is NOT replaced. No ${CLAIM_FILE} history exists for this board, so this is a first declaration, not an adoption of another coordinator.`,
+    'No coordinator has ended, none is being replaced, and no termination is asserted or recorded.',
+    ...(scanned ? [`Current config bytes SHA256: ${sha256(scanned.raw)}`, ...untouchedContext(leftUnchanged(scanned))] : []),
     '',
     DECLARATION_EFFECT,
     '',
-    DECLARATION_AUTHORIZATION,
+    ...DECLARATION_AUTHORIZATION,
   ].join('\n');
 }
 /** Which coordinator the backend selected, and why: never an operator- or model-chosen identity. */
+/**
+ * Which coordinator the backend selected, and why: never an operator- or model-chosen identity. Nothing
+ * that another line already states is repeated here; what is unique to a target is the selected pair, its
+ * provenance, the pairs that are explicitly not it, and the probe that must not be read as evidence of
+ * termination.
+ */
 function targetLines(surveyed: Survey, target: { sessionId: string; port: number }, source: string, probe: WorkerConnection): string[] {
   const board = surveyed.scanned ? coordinator(surveyed.scanned.config) : undefined;
   const pair = (entry: { sessionId: string; port: number }) => `${entry.sessionId} (port ${entry.port})`;
   const lines = [
     `Coordinator whose termination you are confirming: ${pair(target)} — ${source}.`,
-    `This session (the adopting session): ${pair(surveyed.identity)}`,
   ];
   if (board && (board.sessionId !== target.sessionId || board.port !== target.port)) {
     lines.push(`Configured board coordinator entry: ${pair(board)} (not the selected target).`);
@@ -1505,40 +1508,113 @@ function targetLines(surveyed: Survey, target: { sessionId: string; port: number
   lines.push(`Old endpoint probe: ${probe.state}${probe.reason ? ` (${probe.reason})` : ''} — ${DISCONNECTED_WARNING}`);
   return lines;
 }
-export function authorityRecordPrompt(home: string, context: string[]): string {
+export function adoptionDecisionPrompt(input: {
+  surveyed: Survey; target: { sessionId: string; port: number }; source: string;
+  probe: WorkerConnection; board: { sessionId: string; port: number }; transitionId: string;
+  previewHash: string; unchanged: ClaimLeftEntry[]; fenced: ClaimLeftEntry[]; renewed: boolean;
+}): string {
+  const { surveyed, target, probe, board, transitionId, previewHash, unchanged, fenced } = input;
+  const pair = (entry: { sessionId: string; port: number }) => `${entry.sessionId} (port ${entry.port})`;
+  const claim = surveyed.claim;
+  const claimLine = claim === undefined
+    ? `No ${CLAIM_FILE} has ever been committed for this board, so no previous coordinator decision is on file.`
+    : `Committed ${CLAIM_FILE} currently names ${pair(claim.coordinator)} in phase ${claim.phase}${input.renewed ? ', the prepared intent being renewed' : ''}.`;
+  const lines = [
+    input.renewed
+      ? `Renew the adoption decision for the committed prepared transition ${transitionId}, then complete the replacement it records?`
+      : `Adopt this board: replace coordinator ${pair(board)} with this session ${pair(surveyed.identity)}, and commit the evidence for that exact transition?`,
+    '',
+    `Board root (canonical projects home): ${surveyed.home}`,
+    `This session (the adopting coordinator), verified from the persisted Pi session and this runtime endpoint: ${surveyed.identity.sessionId}`,
+    `This runtime endpoint port: ${surveyed.identity.port}`,
+    `Configured board coordinator entry: ${pair(board)}`,
+    '',
+    ...targetLines(surveyed, target, input.source, probe),
+    claimLine,
+    `Current config bytes SHA256: ${previewHash}`,
+    '',
+  ];
+  if (input.renewed) {
+    lines.push(
+      `This transition is already committed as a prepared intent. Nothing new is chosen here: the same transition id, the same previous and adopting pairs, and the same expected config hash are reused, and the renewal only refreshes the authority evidence and its timestamp for that existing transition.`,
+      '',
+    );
+  }
+  lines.push(
+    'By answering yes, you do two things at once:',
+    `1. You state that coordinator ${target.sessionId} has ended. ${DISCONNECTED_WARNING}`,
+    '   Your yes records exactly this attestation in the committed claim:',
+    `   ${ENDED_WORDING(target.sessionId)}`,
+    `2. You authorize exactly this transition ${transitionId}: the ${CLAIM_FILE} prepared-intent commit, the replacement of the board coordinator entry with ${pair(surveyed.identity)}, the ${CLAIM_FILE} active-evidence commit, and promotion of this running session.`,
+    '',
+    'Nothing else is authorized, and nothing is written until you answer yes.',
+    `Left unchanged: ${roster(unchanged)}${fenced.length ? `; close jobs reported and left fenced: ${fenced.map(entry => `${entry.name}/${entry.closeJob!.state}`).join(', ')}` : ''}.`,
+    'No worker is sent anything, and nothing is resumed, removed, interrupted, reloaded or restarted.',
+    'No other path is written, staged, committed, cleaned or reset, and no hook is bypassed.',
+    '',
+    AUTHORIZATION_PROVENANCE,
+    '',
+    SAFER_DEFAULT,
+  );
+  if (claim !== undefined) {
+    lines.push('', 'Until an adoption completes, this session holds no coordinator authority: no worker can be created, messaged, resumed, removed or closed from it.');
+  }
+  return lines.join('\n');
+}
+/**
+ * The refusal left by a No or a dismissal. It keeps the identities a bare `CANCELLED` would drop: the
+ * former preliminary question used to print them, and an operator who declines still needs to know which
+ * board, which coordinator, and which claim state they are looking at.
+ */
+function declinedAdoption(surveyed: Survey, renewed: boolean, identity: ResolvedIdentity, board: { sessionId: string; port: number },
+  target: { sessionId: string; port: number }, transitionId: string): [ResultCode, string] {
+  const pair = (entry: { sessionId: string; port: number }) => `${entry.sessionId}/${entry.port}`;
+  if (renewed) return ['CANCELLED', `renewal of prepared transition ${transitionId} was declined; the committed prepared intent and its existing evidence are preserved unchanged, action readiness stays closed, and a fresh invocation is required for a new decision`] as const;
+  const code: ResultCode = surveyed.claim ? 'CLAIM_OTHER' : 'ADOPTION_REQUIRED';
+  const record = surveyed.claim ? `record ${pair(surveyed.claim.coordinator)}; ` : 'claim absent; ';
+  return [code, `${record}this session ${pair(identity)}; board ${pair(board)}; adopted coordinator ${pair(target)} — declined, nothing was written, no coordinator action is authorized; report all of them; a fresh invocation is required for a new decision`] as const;
+}
+
+/**
+ * Evidence-only finalization of an already-recorded transition. Issue #12: it is still exactly one
+ * decision, and it authorizes no replacement — so the question must not read like one, and the existing
+ * anchored authority evidence is neither rewritten nor refreshed by this answer.
+ */
+function untouchedContext(unchanged: ClaimLeftEntry[]): string[] {
+  const fenced = unchanged.filter(entry => entry.closeJob !== null && FENCED_STATES.includes(entry.closeJob.state));
   return [
-    `Authorising record for adopting the board at ${home}`,
+    `Left unchanged: ${roster(unchanged)}; close jobs reported and left fenced: ${fenced.map(entry => `${entry.name}/${entry.closeJob!.state}`).join(', ') || 'none'}.`,
+    'No worker is sent anything, and nothing is resumed, removed, interrupted, reloaded or restarted.',
+  ];
+}
+export function finalizationPrompt(input: {
+  home: string; identity: ResolvedIdentity; intent: ClaimRecord; evidence: string;
+}): string {
+  const pair = (entry: { sessionId: string; port: number }) => `${entry.sessionId} (port ${entry.port})`;
+  return [
+    `Finalize recorded transition ${input.intent.transitionId} without replacement: commit its active evidence and promote this running session?`,
     '',
-    ...context,
+    `Board root (canonical projects home): ${input.home}`,
+    `This session, verified from the persisted Pi session and this runtime endpoint: ${input.identity.sessionId}`,
+    `This runtime endpoint port: ${input.identity.port}`,
     '',
-    'A required reference to the human decision that authorised this adoption: a ticket, commit, dated note, or similar non-empty text.',
-    'It is stored verbatim (trimmed, at most 2000 characters, no control characters) in the committed claim record.',
-    'It is never echoed back in a later diagnostic.',
+    `Previous coordinator recorded in the committed intent: ${pair(input.intent.previous!)}`,
+    `Adopting coordinator recorded in the committed intent: ${pair(input.intent.coordinator)} — already the configured board entry.`,
+    `Evidence state: ${input.evidence}.`,
+    `Current config bytes SHA256: ${input.intent.configAfterSha256}`,
+    `Transition config before SHA256: ${input.intent.configBeforeSha256}`,
+    ...untouchedContext(input.intent.leftUnchanged),
+    '',
+    'By answering yes, you authorize exactly two things: committing the active evidence for this already-recorded transition, and promoting this running session once that commit and this endpoint both verify.',
+    'No coordinator entry is replaced, no config is written, no new termination attestation is generated, and no existing evidence is rewritten — the authority the prepared intent already records stays exactly as committed.',
+    'Nothing is written until you answer yes.',
+    '',
+    'No text answer is requested. This yes/no authorizes evidence completion only; the anchored authority evidence is preserved, not regenerated from this answer.',
+    '',
+    SAFER_DEFAULT,
   ].join('\n');
 }
-export function endedWordingPrompt(target: { sessionId: string; port: number }, context: string[]): string {
-  return [
-    'Ended-coordinator confirmation',
-    '',
-    ...context,
-    '',
-    'Type or paste exactly this sentence, and nothing else. It is compared character by character:',
-    ENDED_WORDING(target.sessionId),
-    '',
-    'Approximations, another session id, different capitalisation, and added leading/trailing whitespace are all refused.',
-    `Submitting this sentence is one of three separate gates; it does not itself adopt anything. ${DISCONNECTED_WARNING}`,
-  ].join('\n');
-}
-/** The complete, unabbreviated refusal text for a failed ended-wording answer. Never routed through `reason()`. */
-export function endedWordingFailure(target: { sessionId: string; port: number }, detail: string): string {
-  return [
-    `${ENDED_STEP}: ${detail}`,
-    `Expected exactly, for the coordinator named above (${target.sessionId}, port ${target.port}):`,
-    ENDED_WORDING(target.sessionId),
-    DISCONNECTED_WARNING,
-    'Nothing was written, no coordinator was replaced, and no approximation is accepted; invoke again for a fresh decision.',
-  ].join('\n');
-}
+
 function bootDescription(state: BootState, board: Agent, own: Agent | undefined): string {
   if (state === 'a') return 'no board found between cwd and the projects home (ConfigStore.discover; Runtime.start initialization branch)';
   if (state === 'b') return 'own sessionId is the coordinator entry (requireCoordinator; Runtime.start coordinator branch)';

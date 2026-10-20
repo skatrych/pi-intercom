@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { mkdir, rm } from 'node:fs/promises';
 import { createFixture, configText, commandContext, mockUi, IDS } from './adoption-fixture.mjs';
-import { AdoptionWorkflow, ENDED_WORDING, leftUnchanged } from '../../dist/adoption.js';
+import { AdoptionWorkflow, leftUnchanged } from '../../dist/adoption.js';
 import { listen } from '../../dist/transport.js';
 import { Intercom } from '../../dist/runtime.js';
 
@@ -13,7 +13,14 @@ export const barrier = () => {
   const resume = new Promise(resolve => { release = resolve; });
   return { reached, release, wait: async () => { arrived(); await resume; } };
 };
-export const yesUI = () => mockUi({ boardInitialize: 'confirm', firstCoordinatorDeclaration: 'confirm', adoptionDecision: 'confirm', adoptTransition: 'confirm', authorityRecord: 'adoption fixture authorization', endedWording: ENDED_WORDING(IDS.gone), finalizeTransition: 'confirm' });
+/**
+ * The affirmative default for every admissible branch: one yes/no per decision kind, nothing typed.
+ * An unlisted kind is a decline, so a new decision cannot silently become an accepted path.
+ */
+export const yesUI = () => mockUi({
+  boardInitialize: 'confirm', firstCoordinatorDeclaration: 'confirm', adoptTransition: 'confirm',
+  renewAdoptionDecision: 'confirm', finalizeTransition: 'confirm',
+});
 export async function fixture(options = {}) {
   const f = await createFixture();
   await mkdir(path.join(f.home, 'roles/orchestrator'), { recursive: true });

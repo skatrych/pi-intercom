@@ -25,8 +25,7 @@ test('real adapter stays read-only while no-board host persists an ordinary non-
   process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator'); process.env.PI_ROLES_DIR = path.join(f.home, 'roles'); process.env.PI_INTERCOM_PROJECTS_HOME = f.home; delete process.env.PI_INTERCOM_WORKER_ROLE;
   const handlers = new Map(), bus = new Map();
   t.after(async () => { await handlers.get('session_shutdown')?.(); await f.dispose(); for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
-  extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
-    registerFlag() {}, getFlag: () => undefined,
+  extension({ registerFlag() {}, getFlag: () => undefined, on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
     events: { on: (channel, handler) => { bus.set(channel, handler); return () => bus.delete(channel); } } });
   const ctx = { ...f.context, sessionManager: { ...f.context.sessionManager, getBranch: () => [] }, ui: { notify() {}, setWidget() {} } };
   await handlers.get('session_start')({}, ctx);
@@ -44,9 +43,7 @@ test('bridge rejects copied session manager and uses captured UI, never caller d
   process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator'); process.env.PI_ROLES_DIR = path.join(f.home, 'roles'); process.env.PI_INTERCOM_PROJECTS_HOME = f.home; delete process.env.PI_INTERCOM_WORKER_ROLE;
   t.after(() => { for (const [key, value] of Object.entries({ PI_ROLE_DIR: prior.role, PI_ROLES_DIR: prior.roles, PI_INTERCOM_PROJECTS_HOME: prior.home, PI_INTERCOM_WORKER_ROLE: prior.worker })) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
   const handlers = new Map(), bus = new Map();
-  const pi = { on: (event, fn) => handlers.set(event, fn), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
-    // Upstream 0.8.0 registers --intercom-root at factory time; unset here means the plain session-cwd root.
-    registerFlag() {}, getFlag: () => undefined,
+  const pi = { registerFlag() {}, getFlag: () => undefined, on: (event, fn) => handlers.set(event, fn), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
     events: { on: (channel, fn) => { bus.set(channel, fn); return () => bus.delete(channel); } } };
   extension(pi);
   const ctx = { ...f.context, ui: { input: async () => undefined, confirm: async () => false, notify() {}, setWidget() {} } };
@@ -64,9 +61,10 @@ test('bridge rejects copied session manager and uses captured UI, never caller d
   assert.equal((await offers[0].run(ctx, 'adopt')).code, 'SESSION_CHANGED');
 });
 
-// MINOR 3: the routing seam at runtime. A swapped kind/prompt wiring in adoptionContext would otherwise
-// pass every typecheck: this reaches the real interaction through the captured extension context.
-test('bridge routes adoption questions to the custom surface, with kind and prompt intact', async t => {
+// MINOR 3 / issue #12 AC2: the routing seam at runtime. A swapped kind/prompt wiring in adoptionContext
+// would otherwise pass every typecheck: this reaches the real interaction through the captured extension
+// context, where the only thing a question may touch is the host's own selection dialog.
+test('bridge routes the adoption decision to the host selection dialog, with kind and prompt intact', async t => {
   const f = await fixture({ runtime: true, noBoard: true });
   const prior = Object.fromEntries(['PI_ROLE_DIR', 'PI_ROLES_DIR', 'PI_INTERCOM_PROJECTS_HOME', 'PI_INTERCOM_WORKER_ROLE'].map(key => [key, process.env[key]]));
   process.env.PI_ROLE_DIR = path.join(f.home, 'roles/orchestrator');
@@ -78,38 +76,32 @@ test('bridge routes adoption questions to the custom surface, with kind and prom
     await handlers.get('session_shutdown')?.(); await f.dispose();
     for (const [key, value] of Object.entries(prior)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
   });
-  extension({ on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
-    registerFlag() {}, getFlag: () => undefined,
+  extension({ registerFlag() {}, getFlag: () => undefined, on: (event, handler) => handlers.set(event, handler), registerTool() {}, getSessionName: () => '', setSessionName() {}, sendUserMessage: () => assert.fail('no model turn'),
     events: { on: (channel, handler) => { bus.set(channel, handler); return () => bus.delete(channel); } } });
 
-  const seen = { input: 0, custom: [] };
+  const asked = [];
+  const forbidden = name => () => assert.fail(`an adoption question must never reach the host ${name} surface`);
   const ctx = {
     ...f.context,
     sessionManager: { ...f.context.sessionManager, getBranch: () => [] },
     ui: {
       notify() {}, setWidget() {},
-      input: async () => { seen.input++; return undefined; },
-      confirm: async () => assert.fail('confirm must route through the custom surface too'),
-      custom: async (factory) => {
-        const renders = [];
-        const component = factory({ terminal: { columns: 100, rows: 30 }, requestRender() {} }, { fg: (_c, text) => text }, {}, () => {});
-        renders.push(component.render(100).join('\n'));
-        seen.custom.push({ kind: component.kind, text: renders[0] });
-        component.dispose?.();
-        return { cancelled: true };
+      // Every other host interaction surface is booby-trapped: the adoption flow must not use one.
+      input: forbidden('input'), confirm: forbidden('confirm'), select: forbidden('select'), editor: forbidden('editor'),
+      custom: async factory => {
+        const component = factory({ terminal: { columns: 80, rows: 24 }, requestRender() {} }, { fg: (_name, value) => value }, {}, () => {});
+        asked.push({ title: component.question, paint: component.render(78).join('\n') });
+        return undefined;
       },
     },
   };
   await handlers.get('session_start')({}, ctx);
   const offers = []; bus.get(ADOPTION_CHANNEL)({ offers }); assert.equal(offers.length, 1);
   const result = await offers[0].run(ctx, 'adopt');
-  assert.equal(seen.input, 0, 'no adoption question may reach the host input placeholder path');
-  if (result.code !== 'CANCELLED' && result.code !== 'SESSION_UNPERSISTED') {
-    assert.fail(`routing unreachable: ${result.code} :: ${result.lines.join(' | ')}`);
-  }
-  assert.equal(seen.custom.length, 1, `expected exactly one routed question, saw ${JSON.stringify(seen.custom)}`);
-  assert.equal(seen.custom[0].kind, 'boardInitialize', 'the decision kind must survive the adapter');
-  assert.ok(seen.custom[0].text.includes(f.home), 'the visible screen carries the board root from the prompt');
-  assert.ok(seen.custom[0].text.includes(f.id), 'and the session id from the prompt');
-  assert.equal(result.code, 'CANCELLED', 'a dismissed custom surface ends as a named cancellation');
+  assert.equal(asked.length, 1, `expected exactly one routed question, saw ${JSON.stringify(asked.map(entry => entry.title))}`);
+  assert.match(asked[0].title, /^Intercom coordinator adoption · boardInitialize\n/, 'the decision kind must survive the adapter');
+  assert.match(asked[0].paint, /→ No/, 'the visible selection defaults to No');
+  assert.ok(asked[0].title.includes(f.home), 'the question carries the board root');
+  assert.ok(asked[0].title.includes(f.id), 'and the session id');
+  assert.equal(result.code, 'CANCELLED', 'a dismissed selection ends as a named refusal');
 });
