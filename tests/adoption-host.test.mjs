@@ -24,6 +24,10 @@ test('packed source loads against public Pi 1.2.0; actual SessionManager/custom-
   const packed = JSON.parse(npm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, encoding: 'utf8', env: { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false' } }));
   execFileSync('tar', ['-xzf', path.join(temp, packed[0].filename), '-C', temp], { timeout: 15_000 });
   const packageRoot = path.join(temp, 'package');
+  // A packed extension must have its declared runtime dependencies installed, just as Pi's managed
+  // npm loader does. Peer packages remain host-provided; never resolve a developer machine alias.
+  npm(['install', '--ignore-scripts', '--omit=dev', '--legacy-peer-deps', '--no-audit', '--no-fund', '--package-lock=false'],
+    { cwd: packageRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, npm_config_update_notifier: 'false' } });
   // The same public-host fixture can be copied into an immutable baseline archive. Absence of a
   // not-yet-existing feature is then expected, not falsely attributed as a baseline host failure.
   const adoptionExpected = process.env.PI_ADOPTION_TEST_BASELINE !== '1';

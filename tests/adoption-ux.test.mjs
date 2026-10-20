@@ -165,6 +165,11 @@ test('AC2 existing self board with no claim history: explicit declaration, no ty
     for (const required of [f.home, f.id, String(f.endpoint.port), 'is NOT replaced', 'first declaration, not an adoption']) {
       assert.ok(prompt.includes(required), `the declaration question must show ${required}: ${prompt}`);
     }
+    assert.ok(prompt.includes(f.sha256(before.board)), 'declaration shows the exact config hash');
+    for (const worker of (await f.board.parsed()).agents.filter(agent => !agent.coordinator)) {
+      assert.ok(prompt.includes(worker.name), 'declaration names each untouched worker');
+      if (worker.closeJob) assert.ok(prompt.includes(`${worker.name}/${worker.closeJob.state}`), 'declaration shows each close-job fence');
+    }
     const record = parseClaim(await f.claim.read());
     assert.equal(record.authority.kind, 'first-coordinator declaration');
     assert.equal(record.coordinator.port, f.endpoint.port);
@@ -498,6 +503,12 @@ test('AC6 prepared-after finalization performs no replacement and does not rewri
     const prompt = scripted.prompts[0].prompt;
     assert.ok(prompt.includes(f.home) && prompt.includes(f.id), 'the question still shows the root and this session');
     assert.match(prompt, /without replacement/, 'and says it authorizes no replacement');
+    assert.ok(prompt.includes(anchored.configAfterSha256) && prompt.includes(anchored.configBeforeSha256), 'finalization shows both relevant config hashes');
+    for (const worker of anchored.leftUnchanged) {
+      assert.ok(prompt.includes(worker.name), 'finalization names each untouched worker');
+      if (worker.closeJob) assert.ok(prompt.includes(`${worker.name}/${worker.closeJob.state}`), 'finalization shows each close-job fence');
+    }
+    assert.ok(prompt.includes('not regenerated from this answer'), 'finalization does not promise newly generated authority');
     const after = parseClaim(await f.claim.read());
     assert.equal(after.phase, 'active');
     assert.equal(after.authority.record, anchored.authority.record, 'the anchored authority record is preserved byte-for-byte');

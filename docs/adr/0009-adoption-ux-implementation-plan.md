@@ -1,5 +1,13 @@
 # Issue 9: Adoption UX implementation plan
 
+> **Partly superseded (2026-10-19, issue #12).** The typed authority record and typed exact-ended-wording
+> inputs this plan specifies, their per-step validation failures, and their raw-preserving paste path are
+> removed: nothing is typed in the adoption flow any more, and each human-touching branch asks exactly one
+> yes/no on a supported visible selection surface using native SelectList controls. See
+> [ADR 0012](0012-single-decision-selection.md). The plan's visibility, real-adapter, and
+> "an answer arriving is not rendering evidence" requirements, and every non-confirmation gate, remain in
+> force.
+
 - Status: Proposed; documentation only, no implementation authorized/performed by this plan
 - Date: 2026-10-18
 - Authoritative requirements: [refined issue #9 body](https://github.com/skatrych/pi-intercom/issues/9), read with `gh issue view 9 -R skatrych/pi-intercom`

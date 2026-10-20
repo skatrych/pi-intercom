@@ -114,6 +114,10 @@ def exercise(index, c, r, action='no'):
     print('PASS branch=%d %s %dx%d pages=%d answer=%s full-context=exact' %
           (index, questions[index]['kind'], c, r, pages, action), flush=True)
 
+def interrupted(_signum, _frame):
+    raise TimeoutError('parent smoke deadline interrupted the disposable host check')
+
+signal.signal(signal.SIGTERM, interrupted)
 try:
     resize(columns, rows)
     # Wait for an idle editor; no prompt/model input is ever submitted.

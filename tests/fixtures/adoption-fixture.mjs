@@ -150,7 +150,7 @@ export async function createFixture(options = {}) {
   const removed = [];
 
   const git = async (args, cwd = home) => {
-    try { const { stdout } = await execute('git', args, { cwd }); return { code: 0, stdout, stderr: '' }; }
+    try { const { stdout } = await execute('git', args, { cwd, timeout: 10_000 }); return { code: 0, stdout, stderr: '' }; }
     catch (error) { return { code: typeof error.code === 'number' ? error.code : 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }; }
   };
   const gitOk = async (args, cwd) => {
