@@ -9,8 +9,8 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const npm = (args, options = {}) => process.env.npm_execpath
-  ? execFileSync(process.execPath, [process.env.npm_execpath, ...args], options)
-  : execFileSync('npm', args, options);
+  ? execFileSync(process.execPath, [process.env.npm_execpath, ...args], { timeout: 30_000, ...options })
+  : execFileSync('npm', args, { timeout: 30_000, ...options });
 const hostRoot = process.env.PI_ADOPTION_HOST_ROOT ?? path.join(npm(['root', '-g'], { encoding: 'utf8' }).trim(), '@earendil-works/pi-coding-agent');
 
 test('packed source loads against public Pi 1.2.0; actual SessionManager/custom-dir/event-bus APIs', async t => {
@@ -22,8 +22,12 @@ test('packed source loads against public Pi 1.2.0; actual SessionManager/custom-
   process.env.HOME = temp; process.env.PI_CODING_AGENT_DIR = path.join(temp, 'agent'); process.env.PI_OFFLINE = '1';
   const host = await import(pathToFileURL(path.join(hostRoot, 'dist/index.js')));
   const packed = JSON.parse(npm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, encoding: 'utf8', env: { ...process.env, npm_config_offline: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false' } }));
-  execFileSync('tar', ['-xzf', path.join(temp, packed[0].filename), '-C', temp]);
+  execFileSync('tar', ['-xzf', path.join(temp, packed[0].filename), '-C', temp], { timeout: 15_000 });
   const packageRoot = path.join(temp, 'package');
+  // A packed extension must have its declared runtime dependencies installed, just as Pi's managed
+  // npm loader does. Peer packages remain host-provided; never resolve a developer machine alias.
+  npm(['install', '--ignore-scripts', '--omit=dev', '--legacy-peer-deps', '--no-audit', '--no-fund', '--package-lock=false'],
+    { cwd: packageRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, npm_config_update_notifier: 'false' } });
   // The same public-host fixture can be copied into an immutable baseline archive. Absence of a
   // not-yet-existing feature is then expected, not falsely attributed as a baseline host failure.
   const adoptionExpected = process.env.PI_ADOPTION_TEST_BASELINE !== '1';
@@ -54,6 +58,6 @@ test('packed source loads against public Pi 1.2.0; actual SessionManager/custom-
   // Compile the entire shipped source against the intended host's exported public declarations.
   const config = path.join(temp, 'host-tsconfig.json');
   await writeFile(config, JSON.stringify({ extends: path.join(root, 'tsconfig.json'), compilerOptions: { noEmit: true, paths: { '@earendil-works/pi-coding-agent': [path.join(hostRoot, 'dist/index.d.ts')] } }, include: [path.join(root, 'src/**/*.ts')] }));
-  execFileSync(process.execPath, [path.join(root, 'node_modules/typescript/bin/tsc'), '-p', config], { cwd: root, encoding: 'utf8' });
+  execFileSync(process.execPath, [path.join(root, 'node_modules/typescript/bin/tsc'), '-p', config], { cwd: root, encoding: 'utf8', timeout: 30_000 });
   console.log(`HOST PROOF: Pi ${manifest.version}; Node ${process.version}; packed factory load, custom persisted session, synchronous bus/unsubscribe, full public-declaration typecheck; zero session_start/model/auth/ports`);
 });

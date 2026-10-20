@@ -10,11 +10,21 @@ Use one Pi-owned screen with complete, scrollable instructions and an empty answ
 
 ## Details
 
-- Status: Proposed; host rendering proof is a delivery gate
-- Date: 2026-10-18
+- Status: Partially superseded. The durable-visibility requirement stands; the answer field it specified
+  is removed by [ADR 0012](0012-single-decision-selection.md), because nothing is typed any more.
+- Date: 2026-10-18; superseded in part 2026-10-19
 - Scope: [skatrych/pi-intercom #9](https://github.com/skatrych/pi-intercom/issues/9), refined issue body
 - Inspected base: `main@1d5bb074fa3fe306f394c1a292cbed95ff438f3b`
-- Related: [authorization](0009-first-declaration-authorization.md), [implementation plan](0009-adoption-ux-implementation-plan.md)
+- Related: [authorization](0009-first-declaration-authorization.md), [implementation plan](0009-adoption-ux-implementation-plan.md), [one contextual yes/no](0012-single-decision-selection.md)
+
+What survives this ADR, unchanged by #12: a question is durable visible text and never a placeholder; an
+answer arriving is not proof the question was displayed; a host that cannot render the surface fails
+closed and is documented rather than worked around silently; and the requirement to record real-host
+evidence with its limitations, or to leave that record explicitly pending. What does not survive: the
+raw-preserving answer field and its paste framing, which existed only to make a typed answer byte-exact,
+but not durable paging: #12's supported visible selection workaround retains a bounded scroll viewport
+and native SelectList choices through public custom UI. See `references/coordinator-adoption.md` for
+real-host PTY evidence. The control-character display defense remains at the adapter boundary.
 
 ### Context and source evidence
 

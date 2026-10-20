@@ -1,5 +1,12 @@
 # ADR 0009-A: First-declaration authorization is an explicit local UI decision
 
+> **Partly superseded (2026-10-19, issue #12).** Paragraphs requiring the exact ended sentence to be
+> *typed*, and the authorising-record input step, are removed: the canonical sentence is now the stored
+> form of the attestation a single yes accepts, and it is printed in full before the answer. See
+> [ADR 0012](0012-single-decision-selection.md). Backend target selection, the labels that keep the four
+> identities apart, the disconnected/unknown warning, and the rule that receipt of an answer proves
+> nothing about rendering all stay in force.
+
 ## Decision statement
 
 A human's explicit yes authorizes the first coordinator declaration; replacing another coordinator still requires the typed confirmations.

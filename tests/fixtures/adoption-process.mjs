@@ -1,7 +1,7 @@
 // Private IPC participant for fixed disposable process-race/crash tests; never shipped/CLI product.
 import path from 'node:path';
 import { readFile, rename } from 'node:fs/promises';
-import { AdoptionWorkflow, ENDED_WORDING } from '../../dist/adoption.js';
+import { AdoptionWorkflow } from '../../dist/adoption.js';
 import { ConfigStore } from '../../dist/config.js';
 import { listen } from '../../dist/transport.js';
 import { HandoffWorkflow } from '../../dist/handoff.js';
@@ -29,8 +29,8 @@ process.on('message', async message => {
       const { probeWorker } = await import('../../dist/connections.js');
       const sessionFile = path.join(root, `.pi/default-sessions/2026-10-16T09-00-00-000Z_${id}.jsonl`);
       let previewHeld = false;
-      const ui = { input: async ({ kind }) => kind === 'endedWording' ? ENDED_WORDING(IDS.gone) : 'adoption fixture authorization',
-        confirm: async () => { if (hold === 'preview' && !previewHeld) { previewHeld = true; await wait('preview'); } return true; } };
+      // One yes/no per branch, nothing typed: the only surface this participant offers is `confirm`.
+      const ui = { confirm: async () => { if (hold === 'preview' && !previewHeld) { previewHeld = true; await wait('preview'); } return true; } };
       const context = { cwd: root, mode: 'tui', hasUI: true, isProjectTrusted: () => true, isIdle: () => true, ui,
         sessionManager: { getSessionId: () => id, getSessionFile: () => sessionFile, getSessionDir: () => path.dirname(sessionFile) } };
       const workflow = new AdoptionWorkflow({ projectsHome: root, rolesDirectory: path.join(root, 'roles'), roleDirectory: path.join(root, 'roles/orchestrator'),

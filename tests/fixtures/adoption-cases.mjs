@@ -9,10 +9,6 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { CLOSE_JOBS, IDS, ROLES, bindEndpoint, commandContext, configText, createFixture, mockUi, recorder } from './adoption-fixture.mjs';
-import { ENDED_WORDING } from '../../dist/adoption.js';
-
-/** The exact confirmation sentence for the predecessor this case leaves behind. */
-const ENDED_FOR = spec => ENDED_WORDING(spec.own === 'coordinator' ? IDS.gone : IDS.gone);
 // Nothing in this file is reachable from src/: it is a disposable proof harness.
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +32,15 @@ export async function runCase(name, spec) {
     await scenario.build();
     const first = await scenario.run();
     scenario.print('PHASE 1', first);
+    // Display-proof mode (scripts/adoption-dialog-host-check.mjs): print each question the operator would
+    // have been shown and stop. Every answer was a no, so nothing is authorized by this mode, and no
+    // expected-outcome assertion is made or needed.
+    if (spec.questions) {
+      scenario.printCaptured();
+      say(`TERMINAL: ${first.code} exit ${first.exitCode}`);
+      process.exitCode = 0;
+      return;
+    }
     scenario.expect('phase1', first);
     let last = first;
     if (spec.reinvoke) {
@@ -57,7 +62,7 @@ export async function runCase(name, spec) {
 const KNOWN_KEYS = new Set(['own', 'role', 'config', 'noBoard', 'boardAtChild', 'extraBoard', 'extraBoardEmpty',
   'symlinkEscape', 'outsideCwd', 'cwdChild', 'cwdOutside', 'session', 'sessionDir', 'seed', 'claim', 'lock', 'hook',
   'ports', 'ownHealth', 'oldEndpoint', 'reconnect', 'answers', 'noUi', 'forgedArguments', 'during', 'preparedSwap',
-  'dirty', 'reinvoke', 'promote', 'promoted', 'publish', 'expect', 'assert', 'note', 'run', 'runtime', 'runtimeCase',
+  'dirty', 'reinvoke', 'promote', 'promoted', 'publish', 'expect', 'assert', 'note', 'run', 'runtime', 'runtimeCase', 'questions',
   'race', 'crash', 'untrusted', 'busy', 'retryPromotion']);
 
 /** An unrecognised spec key would silently stop testing anything, so it is a hard error. */
@@ -182,15 +187,21 @@ class Scenario {
       close: () => { this.readiness.openFlag = false; return ++this.readiness.current; },
       open: () => { this.readiness.openFlag = true; return ++this.readiness.current; },
     };
-    // The human types exactly the sentence the prompt displays, taken from the product's own constant.
-    const wording = ENDED_FOR(this.spec);
-    const specAnswers = { ...(this.spec.answers ?? {}) };
-    if (specAnswers.endedWording && typeof specAnswers.endedWording.value === 'boolean' === false
-      && specAnswers.endedWording.value !== undefined && specAnswers.endedWording.value !== null) {
-      specAnswers.endedWording = { kind: 'prompt', value: String(specAnswers.endedWording.value).replace('{old}', wording) };
+    // Nothing is typed: a case answers by naming the decision `kind` and whether it was accepted. Two
+    // declarative shorthands stand for a surface that fails: `{ throws: 'host' }` cannot render a
+    // selection dialog, `{ throws: 'capture' }` returns something that is neither choice nor dismissal.
+    const answers = {};
+    const surfaceFailure = name => name === 'host'
+      ? new this.parts.adoption.AdoptionHostUiUnavailable('fixture: this Pi UI renders no selection dialog')
+      : name === 'capture'
+        ? new this.parts.adoption.AdoptionDecisionCaptureFailure('fixture: the selection surface returned an answer that is neither Yes nor No')
+        : undefined;
+    for (const [kind, value] of Object.entries(this.spec.answers ?? {})) {
+      const failure = value && typeof value === 'object' && typeof value.throws === 'string' ? surfaceFailure(value.throws) : undefined;
+      answers[kind] = failure === undefined ? value : { throws: failure };
     }
-    if (specAnswers.endedWording?.value === '{old}') specAnswers.endedWording = { kind: 'prompt', value: wording };
-    this.mock = mockUi(specAnswers);
+    this.mock = mockUi(answers);
+    this.answersFor = answers;
     this.context = commandContext(fixture, {
       cwd: this.cwd(),
       sessionId: this.ownIdValue,
@@ -320,7 +331,6 @@ class Scenario {
     const inner = this.context.ui;
     let changed = false;
     this.context.ui = {
-      input: options => inner.input(options),
       confirm: async options => {
         const answer = await inner.confirm(options);
         if (!answer || changed) return answer;
@@ -516,10 +526,32 @@ class Scenario {
     return workflow.run(this.context, 'adopt', []);
   }
 
+  /** Print each captured question verbatim between unambiguous markers. Never answers yes. */
+  printCaptured() {
+    for (const prompt of this.ui?.prompts ?? []) {
+      say(`QUESTION BEGIN ${prompt.kind}`);
+      say(prompt.prompt);
+      say(`QUESTION END ${prompt.kind}`);
+    }
+  }
+
   async assertions(last) {
     // Echo the requested set so the batch driver can prove each one actually ran.
     say(`ASSERTIONS REQUESTED: ${this.assertionsToRun.join(',')}`);
     for (const assertion of this.assertionsToRun) {
+      // Issue #12 AC1: the exact ordered decision list a branch presents. `decisions:` with nothing
+      // after the colon is a positive claim that the branch asks for no decision at all, which is how a
+      // refusal path proves it stayed dialog-free.
+      if (assertion.startsWith('decisions:')) {
+        const expected = assertion === 'decisions:' ? [] : assertion.slice('decisions:'.length).split(',');
+        const reached = this.ui?.prompts ?? [];
+        assert(JSON.stringify(reached.map(prompt => prompt.kind)) === JSON.stringify(expected),
+          `the decisions an operator is asked for are part of the specification: expected [${expected.join(', ')}], observed [${reached.map(prompt => prompt.kind).join(', ')}]`);
+        assert(reached.every(prompt => typeof prompt.prompt === 'string' && prompt.prompt.length > 0), 'every decision carried visible prompt text');
+        assert(Object.keys(this.mock.ui).join(',') === 'confirm', 'the mocked host surface offered a text-input path');
+        say(`ASSERT ${assertion} PASS: [${reached.map(prompt => prompt.kind).join(', ')}], each with a full question, and no text input was possible`);
+        continue;
+      }
       switch (assertion) {
         case 'only-coordinator-tokens-differ': {
           const beforeEntry = this.originalConfig.agents.find(agent => agent.coordinator);

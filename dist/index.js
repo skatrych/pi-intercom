@@ -77,11 +77,7 @@ function adoptionContext(captured, waitForIdle) {
             getSessionDir: () => captured.sessionManager.getSessionDir(),
         },
         ui: {
-            // Issue #9: no adoption question is ever handed to the host's `input(title, placeholder)`, whose
-            // installed dialog renders the placeholder nowhere. `adoptionInteraction` renders the complete
-            // prompt as durable visible text with raw-preserving answer capture in one Pi-owned screen, and a
-            // host without a custom surface fails closed as `HOST` instead of asking an invisible question.
-            input: options => adoptionInteraction(captured.ui).input(options),
+            // One decision on the supported scrollable selection surface; never a text-input fallback.
             confirm: options => adoptionInteraction(captured.ui).confirm(options),
         },
         ...(waitForIdle ? { waitForIdle } : {}),

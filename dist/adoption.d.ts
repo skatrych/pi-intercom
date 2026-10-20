@@ -7,8 +7,9 @@ import type { WorkerConnection } from './connections.js';
  * `Intercom.adoptCoordinator`, which the role-local `/intercom-adopt` command invokes with a supported
  * Pi command context. There are no identity, port, path, role, confirmation, or JSON parameters: every
  * authority value comes from this process's launch configuration, the persisted Pi session, this
- * runtime's bound endpoint, the config read made inside the transaction, or an answer typed by the
- * human into this session's own Pi UI.
+ * runtime's bound endpoint, the config read made inside the transaction, or an explicit yes answered
+ * in this session's own Pi UI. Nothing is ever typed: no text answer is requested anywhere in this
+ * flow, and no generated evidence claims otherwise.
  */
 export declare const PROJECTS_HOME_ENV = "PI_INTERCOM_PROJECTS_HOME";
 export declare const DEFAULT_PROJECTS_HOME = "workspaces/projects";
@@ -16,21 +17,24 @@ export declare const ORCHESTRATOR_ROLE = "orchestrator";
 export declare const CLAIM_FILE = "coordinator-claim.md";
 export declare const CONFIG_DIRECTORY = ".pi-intercom";
 export declare const REBRIEF_SOURCE = "handoff.md (open assignments)";
+/**
+ * The canonical ended-coordinator attestation. Issue #12 keeps it as a claim-schema invariant: it is the
+ * stored form of the attestation a yes accepts, never a transcription of typed text. `parseClaim` still
+ * requires it verbatim for `kind: 'adoption'`, so historical records and new ones validate identically.
+ */
 export declare const ENDED_WORDING: (sessionId: string) => string;
 /**
- * A malformed or incomplete bracketed paste is a capture failure, never an answer. The adapter reports
- * it instead of fabricating, normalizing, or auto-submitting a candidate; the domain names the step.
+ * A selection surface that returned something which is neither an offered choice nor a dismissal is a
+ * capture failure, never an answer. The adapter reports it instead of guessing, so an unreadable
+ * decision can never be read as a yes — or as a no.
  */
-export declare class AdoptionInputCaptureFailure extends Error {
-    constructor(message?: string);
+export declare class AdoptionDecisionCaptureFailure extends Error {
+    constructor(message: string);
 }
-/** The captured Pi UI cannot render a durable visible question. Fail closed; never open an invisible input. */
+/** The captured Pi UI cannot render a visible selection dialog. Fail closed; never open a text input. */
 export declare class AdoptionHostUiUnavailable extends Error {
     constructor(message: string);
 }
-/** Named human-gate steps. Every refusal names one of these, so an invisible question cannot be guessed at. */
-export declare const RECORD_STEP = "authorising record";
-export declare const ENDED_STEP = "ended-wording confirmation";
 export declare const DISCONNECTED_WARNING = "A disconnected or unknown endpoint probe is not evidence that a coordinator terminated.";
 /** Generated first-declaration evidence (issue #9): never a typed reference, never an adoption wording. */
 export interface DeclarationEvidence {
@@ -112,15 +116,14 @@ export interface CommandContext {
         getSessionDir(): string | undefined;
     };
     /**
-   * Every decision carries a stable `kind`, so an operator, a test, and the audit trail can tell which
-   * question was answered, declined, left blank, or cancelled. Prompt text is for humans and changes.
-   */
+     * The one human surface this flow has: a selection-style dialog offering exactly two answers. There is
+     * no text-input member, deliberately — issue #12 removed every typed gate, and a workflow that cannot
+     * ask a yes/no on a selection surface stops instead of falling back to a text field.
+     *
+     * Every decision carries a stable `kind`, so an operator, a test, and the audit trail can tell which
+     * question was answered, declined, or left unanswered. Prompt text is for humans and changes.
+     */
     ui: {
-        input(options: {
-            kind: string;
-            prompt: string;
-            placeholder?: string;
-        }): Promise<string | undefined>;
         confirm(options: {
             kind: string;
             prompt: string;
@@ -165,6 +168,24 @@ export interface AdoptionOptions {
     phase?(phase: AdoptionPhase): Promise<void>;
 }
 export type BootState = 'a' | 'b' | 'c' | 'd';
+interface Survey {
+    home: string;
+    cwd: string;
+    boardRoot?: string;
+    boards: string[];
+    state: BootState;
+    scanned?: ScannedConfig;
+    identity: ResolvedIdentity;
+    claimPath: string;
+    /** Worktree bytes, kept for classification only: they never supply authority, identity or hashes. */
+    worktreeRaw?: string;
+    claimRaw?: string;
+    claim?: ClaimRecord;
+    claimCommit?: string;
+    lines: string[];
+    head?: string;
+    paths?: Map<string, string>;
+}
 export interface ResolvedIdentity {
     sessionId: string;
     port: number;
@@ -229,24 +250,23 @@ export declare class AdoptionWorkflow {
     /** State (b) with no record: write-and-continue, but only after the declaration is committed. */
     private declare;
     /**
-     * AC3 collisions, AC4 old-endpoint probe, then the human answers, in that order. Identity and the
-     * ended confirmation are typed into this session's own Pi UI: no parameter, argument, saved default,
-     * or model text can supply them, and no decline produces a write.
+     * AC3 collisions, AC4 old-endpoint probe, then the human answers exactly once. Identity and the target
+     * are backend-selected: no parameter, argument, saved default, or model text can supply them.
+     *
+     * Issue #12: this is one decision, not three. The former preliminary "continue?" question, the typed
+     * authorising record, and the typed exact-ended sentence are gone, because a second question is a
+     * second decision and the human ruled that a single contextual yes is the confirmation. Everything
+     * that question used to ask is now stated before the answer instead: the attestation that the named
+     * coordinator has ended, the disconnected/unknown warning, and the exact replacement being authorized.
+     * Nothing else moved: collisions, the old-endpoint probe, and every later gate still refuse here, in
+     * this order, before any dialog opens.
      */
     private humanAdoptionDecision;
     /**
-     * AC4: the typed authority reference and the exact ended wording, or a named refusal. Issue #9: every
-     * refusal names its step, a failed ended wording repeats the complete expected sentence, and nothing
-     * here can be reached by a first-declaration path. The exact comparison is never normalized.
-     */
-    private askAdoptionAuthority;
-    /** One captured text answer, or a refusal that names the step. A malformed paste is never a candidate answer. */
-    private capture;
-    /**
-     * One yes/no decision, with the same named failure mapping as `capture`. Without it a malformed paste
-     * during a confirmation escapes as an unattributed `HOST` failure, and the operator loses the one thing
-     * ADR 0009-B requires: which step could not be read. A capture failure is never read as "No" either —
-     * declining is a decision, an unreadable answer is not.
+     * One yes/no decision, with one named failure mapping for every step. A refusal from the surface
+     * itself is never silently read as "No": an unavailable selection surface is a named `HOST` stop, and
+     * an answer that is neither offered choice nor a dismissal is a named `CONFIRMATION` stop. Declining
+     * is a decision; an unreadable one is not, and neither is ever a yes.
      */
     private confirmGate;
     /**
@@ -331,20 +351,57 @@ export declare function bootClaimEvidence(input: {
     ready: boolean;
     detail: string;
 }>;
-/** The one generated-evidence template (ADR 0009-A). Bounded: the full board root stays in the claim, the authority record carries its labelled SHA256. */
+/** The one generated-evidence template (ADR 0009-A, issue #12). Bounded: the full board root stays in the claim, the authority record carries its labelled SHA256. */
 export declare function declarationEvidence(boardRoot: string, identity: ResolvedIdentity): DeclarationEvidence;
+/**
+ * The adoption counterpart (issue #12). `record` is an implementation-generated account of the single
+ * captured yes: it names the decision, both identity pairs, and the exact transition it authorized, and
+ * it says plainly that it was generated rather than typed or copied from an external ticket.
+ *
+ * `wording` is the canonical `ENDED_WORDING(target)` unchanged. That is deliberate: the schema binds an
+ * adoption claim to that exact sentence, and the sentence is the stored form of the attestation the yes
+ * accepts — "this human confirmed the named coordinator ended" — not a transcription of anything typed.
+ * Historical claims that already carry it therefore keep validating with no schema change.
+ */
+export declare function adoptionEvidence(input: {
+    boardRoot: string;
+    identity: ResolvedIdentity;
+    target: {
+        sessionId: string;
+        port: number;
+    };
+    transitionId: string;
+    configSha256: string;
+}): {
+    record: string;
+    wording: string;
+};
 export declare function boardInitializePrompt(home: string, identity: ResolvedIdentity): string;
-export declare function firstDeclarationPrompt(home: string, identity: ResolvedIdentity): string;
-export declare function authorityRecordPrompt(home: string, context: string[]): string;
-export declare function endedWordingPrompt(target: {
-    sessionId: string;
-    port: number;
-}, context: string[]): string;
-/** The complete, unabbreviated refusal text for a failed ended-wording answer. Never routed through `reason()`. */
-export declare function endedWordingFailure(target: {
-    sessionId: string;
-    port: number;
-}, detail: string): string;
+export declare function firstDeclarationPrompt(home: string, identity: ResolvedIdentity, scanned?: ScannedConfig): string;
+export declare function adoptionDecisionPrompt(input: {
+    surveyed: Survey;
+    target: {
+        sessionId: string;
+        port: number;
+    };
+    source: string;
+    probe: WorkerConnection;
+    board: {
+        sessionId: string;
+        port: number;
+    };
+    transitionId: string;
+    previewHash: string;
+    unchanged: ClaimLeftEntry[];
+    fenced: ClaimLeftEntry[];
+    renewed: boolean;
+}): string;
+export declare function finalizationPrompt(input: {
+    home: string;
+    identity: ResolvedIdentity;
+    intent: ClaimRecord;
+    evidence: string;
+}): string;
 /**
  * The protected board surface, relative to the canonical projects-home Git root: exactly the root claim
  * file and the board/config namespace, including a foreign directory that obstructs them. Segment-aware:

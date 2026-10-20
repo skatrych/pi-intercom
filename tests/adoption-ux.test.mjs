@@ -1,39 +1,33 @@
-// Issue #9 adoption-UX regressions: first-declaration authorization, question content, named input
-// failures, and the narrow first-declaration Git exception. Test-only; nothing here is shipped and no
-// live board, installed role, or real coordinator is involved. Every case runs the real dist/ workflow
-// against a disposable temporary projects-home repository with ephemeral loopback endpoints.
+// Issue #9 question visibility and issue #12 single-decision adoption UX: first-declaration authorization,
+// question content, named confirmation-surface failures, and the narrow first-declaration Git exception.
+// Test-only; nothing here is shipped and no live board, installed role, or real coordinator is involved.
+// Every case runs the real dist/ workflow against a disposable temporary projects-home repository with
+// ephemeral loopback endpoints. What an operator actually sees is `adoption-ui.test.mjs`'s subject; this
+// file proves which questions the workflow asks, in what order, what it writes for each answer, and what
+// it refuses to write.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { AdoptionInputCaptureFailure, ENDED_WORDING, declarationEvidence, leftUnchanged, parseClaim } from '../dist/adoption.js';
+import { AdoptionDecisionCaptureFailure, AdoptionHostUiUnavailable, ENDED_WORDING, declarationEvidence, leftUnchanged, parseClaim, renderClaim } from '../dist/adoption.js';
 import { patchCoordinatorEntry } from '../dist/config.js';
-import { IDS } from './fixtures/adoption-fixture.mjs';
+import { IDS, mockUi } from './fixtures/adoption-fixture.mjs';
 import { fixture } from './fixtures/adoption-support.mjs';
 
 const DECLARATION_KINDS = ['boardInitialize', 'firstCoordinatorDeclaration'];
 const text = result => result.lines.join('\n');
 
-/** The default script: answer every decision affirmatively. One answer may be replaced per case. */
+/**
+ * The default script: answer each branch's single decision affirmatively; one answer may be replaced per
+ * case. The mock is the shared one, which has no `input` member at all: a workflow that still asked for
+ * typed text would throw here, in every case, rather than only in whichever test looks for it.
+ */
 function answers(overrides = {}) {
   const merged = {
-    boardInitialize: 'confirm', firstCoordinatorDeclaration: 'confirm', adoptionDecision: 'confirm',
-    authorityRecord: 'adoption fixture authorization', endedWording: ENDED_WORDING(IDS.gone),
-    adoptTransition: 'confirm', finalizeTransition: 'confirm',
-    ...overrides,
+    boardInitialize: 'confirm', firstCoordinatorDeclaration: 'confirm', adoptTransition: 'confirm',
+    renewAdoptionDecision: 'confirm', finalizeTransition: 'confirm', ...overrides,
   };
-  const prompts = [];
-  const ui = {
-    input: async options => { prompts.push({ kind: options.kind, prompt: options.prompt }); return merged[options.kind]; },
-    confirm: async options => {
-      prompts.push({ kind: options.kind, prompt: options.prompt });
-      const value = merged[options.kind];
-      if (value === 'confirm') return true;
-      if (value === 'absent' || value === 'decline') return value === 'decline' ? false : undefined;
-      return Boolean(value);
-    },
-  };
-  return { ui, prompts };
+  return mockUi(merged);
 }
 
 /** Every externally visible effect an adoption could produce, captured as one comparable snapshot. */
@@ -78,6 +72,30 @@ const changedPaths = async f => (await f.git(['diff-tree', '--no-commit-id', '--
 const has = (prompts, kind) => prompts.some(prompt => prompt.kind === kind);
 const promptFor = (prompts, kind) => (prompts.find(prompt => prompt.kind === kind) ?? { prompt: '<absent>' }).prompt;
 
+/**
+ * Commit a prepared intent for this session, in the state a crashed adoption actually leaves behind.
+ * `prepared-before` is the committed intent with the old board still published; `prepared-after` is the
+ * same intent with the replacement already published, which is the finalization branch.
+ */
+async function seedPrepared(f, which) {
+  const before = await f.board.read();
+  const boardEntry = (await f.board.parsed()).agents.find(agent => agent.coordinator);
+  const after = patchCoordinatorEntry(before, f.id, f.endpoint.port).after;
+  const intent = {
+    ...(await f.declaration()),
+    phase: 'prepared',
+    coordinator: { sessionId: f.id, port: f.endpoint.port },
+    authority: { kind: 'adoption', record: 'fixture anchored authority', confirmedEndedAt: '2026-10-16T09:00:00.000Z', wording: ENDED_WORDING(IDS.gone) },
+    previous: { sessionId: IDS.gone, port: boardEntry.port, claimDate: null },
+    configBeforeSha256: f.sha256(before),
+    configAfterSha256: f.sha256(after),
+    leftUnchanged: leftUnchanged(await f.board.scan()),
+  };
+  await f.claim.writeAndCommit(intent);
+  if (which === 'prepared-after') await f.board.write(after);
+  return intent;
+}
+
 // ---- AC1: the first board is one visible yes/no -------------------------------------------------
 
 test('AC1 first board: one visible yes/no, no text question, generated schema-valid evidence', async t => {
@@ -116,22 +134,23 @@ test('AC1 first board: one visible yes/no, no text question, generated schema-va
   } finally { await f.dispose(); }
 });
 
-for (const [label, value] of [['declined', 'decline'], ['dismissed', 'absent']]) {
-  test(`AC1 first board ${label}: no board, config, claim, commit, or readiness`, async t => {
-    const f = await fixture({ noBoard: true });
-    try {
-      const scripted = answers({ boardInitialize: value });
-      f.context.ui = scripted.ui;
-      const before = await surface(f);
-      const result = await f.workflow().run(f.context, 'adopt');
-      assert.equal(result.code, 'CANCELLED', text(result));
-      assert.match(text(result), /first-board initialization/);
-      assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['boardInitialize'], 'a declined board asks nothing else');
-      assert.equal(await stat(f.configPath()).then(() => true, () => false), false, 'a declined decision must not create a board');
-      assertNothingChanged(before, await surface(f));
-    } finally { await f.dispose(); }
-  });
-}
+// A dismissal and a No are one outcome at this seam, and deliberately so: the adapter in
+// `adoption-ui.test.mjs` is where a host cancellation becomes `false`, and it proves both routes reach
+// that same safe answer. What the domain must guarantee is that `false` writes nothing.
+test('AC1 first board declined: no board, config, claim, commit, or readiness', async t => {
+  const f = await fixture({ noBoard: true });
+  try {
+    const scripted = answers({ boardInitialize: 'decline' });
+    f.context.ui = scripted.ui;
+    const before = await surface(f);
+    const result = await f.workflow().run(f.context, 'adopt');
+    assert.equal(result.code, 'CANCELLED', text(result));
+    assert.match(text(result), /first-board initialization/);
+    assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['boardInitialize'], 'a declined board asks nothing else');
+    assert.equal(await stat(f.configPath()).then(() => true, () => false), false, 'a declined decision must not create a board');
+    assertNothingChanged(before, await surface(f));
+  } finally { await f.dispose(); }
+});
 
 // ---- AC2: an existing self board declares itself by yes/no --------------------------------------
 
@@ -145,6 +164,11 @@ test('AC2 existing self board with no claim history: explicit declaration, no ty
     const prompt = f.ui.prompts[0].prompt;
     for (const required of [f.home, f.id, String(f.endpoint.port), 'is NOT replaced', 'first declaration, not an adoption']) {
       assert.ok(prompt.includes(required), `the declaration question must show ${required}: ${prompt}`);
+    }
+    assert.ok(prompt.includes(f.sha256(before.board)), 'declaration shows the exact config hash');
+    for (const worker of (await f.board.parsed()).agents.filter(agent => !agent.coordinator)) {
+      assert.ok(prompt.includes(worker.name), 'declaration names each untouched worker');
+      if (worker.closeJob) assert.ok(prompt.includes(`${worker.name}/${worker.closeJob.state}`), 'declaration shows each close-job fence');
     }
     const record = parseClaim(await f.claim.read());
     assert.equal(record.authority.kind, 'first-coordinator declaration');
@@ -190,7 +214,7 @@ for (const [label, prepare, expected] of [
       for (const kind of DECLARATION_KINDS) {
         assert.ok(!has(f.ui.prompts, kind), `${kind} must never be offered where claim history exists`);
       }
-      assert.ok(!has(f.ui.prompts, 'authorityRecord'), 'no text gate is opened on a refused history branch');
+      assert.ok(!has(f.ui.prompts, 'authorityRecord') && !has(f.ui.prompts, 'endedWording'), 'no text gate is opened on a refused history branch');
       assert.equal((await surface(f)).commits, before.commits, 'a refusal never commits');
     } finally { await f.dispose(); }
   });
@@ -198,24 +222,34 @@ for (const [label, prepare, expected] of [
 
 // ---- AC4: the backend-selected target, never a model- or operator-chosen one --------------------
 
-test('AC4 current, board, and claim-record ids all differ: the prompt and the halt name the board entry', async t => {
+test('AC4 current, board, and claim-record ids all differ: the one decision names the board entry, and so does the evidence', async t => {
   const f = await fixture();
   try {
     await f.claim.writeAndCommit(await f.declaration({ sessionId: 'committed-record-coordinator', port: 41666 }));
-    const scripted = answers({ endedWording: ENDED_WORDING('committed-record-coordinator') });
+    // Read the board entry before the run: an accepted adoption replaces it, and the point of this case
+    // is which of the three pairs the backend selected.
+    const boardEntry = (await f.board.parsed()).agents.find(agent => agent.coordinator);
+    const scripted = answers();
     f.context.ui = scripted.ui;
     const before = await surface(f);
     const result = await f.workflow().run(f.context, 'adopt');
-    assert.equal(result.code, 'CONFIRMATION', text(result));
-    const prompt = promptFor(scripted.prompts, 'endedWording');
-    assert.ok(prompt.includes(ENDED_WORDING(IDS.gone)), 'the expected sentence names the configured board coordinator');
+    assert.equal(result.code, 'OK', text(result));
+    assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['adoptTransition'],
+      'one decision is asked, whatever a disagreeing claim record happens to say');
+    const prompt = scripted.prompts[0].prompt;
+    assert.ok(prompt.includes(ENDED_WORDING(IDS.gone)), 'the attestation offered names the configured board coordinator');
+    assert.ok(prompt.includes(String(boardEntry.port)), 'with that coordinator\'s actual port');
     assert.ok(prompt.includes('committed-record-coordinator'), 'a differing claim-record id is shown as separate context');
+    assert.ok(prompt.includes('41666'), 'including its port, so the three pairs are distinguishable');
     assert.ok(!prompt.includes(ENDED_WORDING('committed-record-coordinator')), 'the claim-record id is never the selected target');
     assert.ok(!prompt.includes(ENDED_WORDING(f.id)), 'the current session is never the selected target');
     assert.ok(prompt.includes(f.id) && prompt.includes('This session'), 'the current session is labelled as itself');
-    assert.match(text(result), /ended-wording confirmation/);
-    assert.ok(text(result).includes(ENDED_WORDING(IDS.gone)), 'the refusal repeats the complete expected sentence');
-    assertNothingChanged(before, await surface(f));
+    const record = parseClaim(await f.claim.read());
+    assert.equal(record.previous.sessionId, IDS.gone, 'the committed previous is the backend-selected board entry');
+    assert.equal(record.previous.port, boardEntry.port, 'including its port');
+    assert.equal(record.authority.wording, ENDED_WORDING(IDS.gone), 'and the recorded attestation is the one the yes accepted');
+    assert.ok(!text(result).includes('committed-record-coordinator port'), 'a refusal is not needed to keep the record honest');
+    assert.notEqual((await surface(f)).commits, before.commits, 'the accepted transition did commit');
   } finally { await f.dispose(); }
 });
 
@@ -225,7 +259,7 @@ test('AC4 supported prepared renewal selects its validated previous coordinator'
     const before = await f.board.read();
     const boardEntry = (await f.board.parsed()).agents.find(agent => agent.coordinator);
     const after = patchCoordinatorEntry(before, f.id, f.endpoint.port).after;
-    const scripted = answers({ endedWording: ENDED_WORDING(f.id) });
+    const scripted = answers();
     f.context.ui = scripted.ui;
     const intent = {
       ...(await f.declaration()),
@@ -240,147 +274,248 @@ test('AC4 supported prepared renewal selects its validated previous coordinator'
     await f.claim.writeAndCommit(intent);
     const start = await surface(f);
     const result = await f.workflow().run(f.context, 'adopt');
-    assert.equal(result.code, 'CONFIRMATION', text(result));
-    const prompt = promptFor(scripted.prompts, 'endedWording');
+    assert.equal(result.code, 'OK', text(result));
+    assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['renewAdoptionDecision'], 'renewal is its own one decision');
+    const prompt = scripted.prompts[0].prompt;
     assert.ok(prompt.includes(ENDED_WORDING(IDS.gone)), 'the renewal target is the recorded previous coordinator');
     assert.ok(prompt.includes('committed prepared intent'), 'and the question says where that target came from');
+    assert.ok(prompt.includes(intent.transitionId), 'the question names the transition it is renewing, not a new one');
     assert.ok(!prompt.includes(ENDED_WORDING(f.id)), 'the adopting session is never the termination target');
-    assert.equal((await surface(f)).commits, start.commits);
+    const record = parseClaim(await f.claim.read());
+    assert.equal(record.transitionId, intent.transitionId, 'the same transition, not a second attempt');
+    assert.equal(record.previous.sessionId, IDS.gone, 'still bound to the recorded previous pair');
+    assert.notEqual((await surface(f)).commits, start.commits, 'a renewal refreshes the authority evidence for that existing transition');
   } finally { await f.dispose(); }
 });
 
-// ---- AC5: every input failure names its step and writes nothing ---------------------------------
+// ---- AC5: a refusal or an unreadable decision names its branch and writes nothing -----------------
 
 const FAILURES = [
-  { name: 'record cancelled', answer: { authorityRecord: undefined }, code: 'CANCELLED', step: 'authorising record', stopsAt: 'authorityRecord' },
-  { name: 'record empty', answer: { authorityRecord: '' }, code: 'CONFIRMATION', step: 'authorising record', stopsAt: 'authorityRecord' },
-  { name: 'record whitespace only', answer: { authorityRecord: '   \t  ' }, code: 'CONFIRMATION', step: 'authorising record', stopsAt: 'authorityRecord' },
-  { name: 'record over the schema limit', answer: { authorityRecord: 'r'.repeat(2001) }, code: 'CONFIRMATION', step: 'authorising record', stopsAt: 'authorityRecord' },
-  { name: 'record with an embedded control character', answer: { authorityRecord: 'line one\nline two' }, code: 'CONFIRMATION', step: 'authorising record', stopsAt: 'authorityRecord' },
-  { name: 'record exactly at the schema limit is accepted and continues', answer: { authorityRecord: 'r'.repeat(2000) }, code: 'OK', step: '', stopsAt: 'adoptTransition' },
-  { name: 'ended wording cancelled', answer: { endedWording: undefined }, code: 'CANCELLED', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'ended wording empty', answer: { endedWording: '' }, code: 'CONFIRMATION', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'ended wording whitespace', answer: { endedWording: ' \t' }, code: 'CONFIRMATION', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'ended wording approximate', answer: { endedWording: `I confirm coordinator ${IDS.gone} has ended` }, code: 'CONFIRMATION', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'ended wording names the current session', answer: { endedWording: ENDED_WORDING(IDS.fresh) }, code: 'CONFIRMATION', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'ended wording changes case', answer: { endedWording: ENDED_WORDING(IDS.gone).toUpperCase() }, code: 'CONFIRMATION', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'ended wording adds trailing whitespace', answer: { endedWording: `${ENDED_WORDING(IDS.gone)} ` }, code: 'CONFIRMATION', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'ended wording adds a trailing newline', answer: { endedWording: `${ENDED_WORDING(IDS.gone)}\n` }, code: 'CONFIRMATION', step: 'ended-wording confirmation', stopsAt: 'endedWording' },
-  { name: 'exact transition consent declined', answer: { adoptTransition: 'decline' }, code: 'CANCELLED', step: 'exact transition', stopsAt: 'adoptTransition' },
-  { name: 'exact transition consent dismissed', answer: { adoptTransition: 'absent' }, code: 'CANCELLED', step: 'exact transition', stopsAt: 'adoptTransition' },
+  { name: 'board initialization declined', kind: 'boardInitialize', setup: { noBoard: true }, code: 'CANCELLED', step: 'first-board initialization' },
+  { name: 'first declaration declined', kind: 'firstCoordinatorDeclaration', setup: { self: true }, code: 'CANCELLED', step: 'first-coordinator declaration' },
+  { name: 'adoption declined with no claim on file', kind: 'adoptTransition', setup: {}, code: 'ADOPTION_REQUIRED', step: 'adoptTransition' },
+  { name: 'prepared renewal declined', kind: 'renewAdoptionDecision', setup: 'prepared-before', code: 'CANCELLED', step: 'renewAdoptionDecision' },
+  { name: 'finalization declined', kind: 'finalizeTransition', setup: 'prepared-after', code: 'CANCELLED', step: 'finalizeTransition' },
 ];
 for (const scenario of FAILURES) {
-  test(`AC5 adoption input failure: ${scenario.name}`, async t => {
-    const f = await fixture();
+  test(`AC5 declined: ${scenario.name}`, async t => {
+    const f = await fixture(scenario.setup);
     try {
-      const sentinel = 'SENTINEL-AUTHORITY-CONTENT';
-      const scripted = answers({ authorityRecord: sentinel, ...scenario.answer });
+      if (typeof scenario.setup === 'string') await seedPrepared(f, scenario.setup);
+      const scripted = answers({ [scenario.kind]: 'decline' });
       f.context.ui = scripted.ui;
       const before = await surface(f);
       const result = await f.workflow().run(f.context, 'adopt');
       assert.equal(result.code, scenario.code, text(result));
-      assert.ok(text(result).includes(scenario.step), `the refusal must name the failed step: ${text(result)}`);
-      const reached = scripted.prompts.map(prompt => prompt.kind);
-      assert.equal(reached[reached.length - 1], scenario.stopsAt, `no later step is attempted after ${scenario.stopsAt} fails: ${reached.join(', ')}`);
-      if (scenario.stopsAt === 'endedWording' && scenario.code === 'CONFIRMATION') {
-        assert.ok(text(result).includes(ENDED_WORDING(IDS.gone)), 'an ended-wording refusal prints the complete expected sentence');
-        assert.match(text(result), /disconnected or unknown/i, 'and states that an unreachable endpoint is not termination evidence');
+      assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), [scenario.kind], 'a refusal asks nothing else');
+      const refusal = text(result);
+      if (scenario.step !== scenario.kind) assert.ok(refusal.includes(scenario.step), `the refusal must name the step: ${refusal}`);
+      // The identities the removed preliminary question used to print must survive in the refusal.
+      for (const identity of [f.id, String(f.endpoint.port)]) {
+        assert.ok(refusal.includes(identity), `a declined adoption still reports ${identity}: ${refusal}`);
       }
-      assert.ok(!text(result).includes(sentinel), 'an authorising record is never echoed back');
-      // Every other row is a refusal; this one is the accepted boundary, so it must complete instead.
-      if (scenario.code === 'OK') {
-        assert.equal(f.state.ready, true, 'the accepted boundary case opens readiness');
-        assert.equal(await changedPaths(f), 'coordinator-claim.md');
-      } else assertNothingChanged(before, await surface(f));
+      assertNothingChanged(before, await surface(f));
+      assert.equal(f.state.ready, false, 'a decline never opens action readiness');
     } finally { await f.dispose(); }
   });
 }
 
-test('AC5 a fresh invocation asks every gate again from a blank field', async t => {
+test('AC5 a declined adoption with a committed claim keeps the CLAIM_OTHER context, not a bare cancellation', async t => {
   const f = await fixture();
   try {
-    f.context.ui = answers({ endedWording: 'wrong' }).ui;
-    assert.equal((await f.workflow().run(f.context, 'adopt')).code, 'CONFIRMATION');
+    await f.claim.writeAndCommit(await f.declaration({ sessionId: 'committed-record-coordinator', port: 41666 }));
+    const scripted = answers({ adoptTransition: 'decline' });
+    f.context.ui = scripted.ui;
     const before = await surface(f);
-    const second = answers({ endedWording: 'still wrong' });
-    f.context.ui = second.ui;
     const result = await f.workflow().run(f.context, 'adopt');
-    assert.equal(result.code, 'CONFIRMATION', text(result));
-    assert.deepEqual(second.prompts.map(prompt => prompt.kind), ['adoptionDecision', 'authorityRecord', 'endedWording']);
+    assert.equal(result.code, 'CLAIM_OTHER', text(result));
+    const boardEntry = (await f.board.parsed()).agents.find(agent => agent.coordinator);
+    for (const identity of [f.id, String(f.endpoint.port), IDS.gone, String(boardEntry.port), 'committed-record-coordinator', '41666']) {
+      assert.ok(text(result).includes(identity), `the refusal reports this session, the board entry and the record: ${identity}`);
+    }
     assertNothingChanged(before, await surface(f));
   } finally { await f.dispose(); }
 });
 
-// ---- confirmations whose answer cannot be read name their step (MINOR 1) ---------------------------
-
-/** A host surface whose yes/no cannot be read: the transport framing itself is broken. */
-function brokenConfirm(kindToBreak, answer = 'confirm') {
-  const scripted = answers({ [kindToBreak]: answer });
+/**
+ * The confirmation surface can fail in two distinct ways, and issue #12 keeps them distinct: a host that
+ * cannot render the question at all, and a host whose answer cannot be read. Neither is a No, and neither
+ * is ever a yes.
+ */
+function brokenSurface(kindToBreak, error) {
+  const scripted = answers();
   const ui = {
-    input: options => scripted.ui.input(options),
     confirm: async options => {
       scripted.prompts.push({ kind: options.kind, prompt: options.prompt });
-      if (options.kind !== kindToBreak) return answer === 'confirm';
-      throw new AdoptionInputCaptureFailure('a bracketed paste never completed');
+      if (options.kind !== kindToBreak) return true;
+      throw error;
     },
   };
   return { ui, prompts: scripted.prompts };
 }
 
-for (const [kind, step] of [['boardInitialize', 'first-board initialization'], ['firstCoordinatorDeclaration', 'first-coordinator declaration']]) {
-  test(`a capture failure during the ${kind} decision names that step instead of a generic host error`, async t => {
-    const f = await fixture(kind === 'boardInitialize' ? { noBoard: true } : { self: true });
+for (const [kind, step, prepared] of [
+  ['boardInitialize', 'first-board initialization'], ['firstCoordinatorDeclaration', 'first-coordinator declaration'], ['adoptTransition', 'adoption decision'],
+  ['renewAdoptionDecision', 'adoption decision renewal', 'prepared-before'],
+  ['finalizeTransition', 'finalization', 'prepared-after'], ['finalizeTransition', 'finalization', 'derived-active'],
+]) {
+  async function prepareFailure(f) {
+    if (!prepared) return;
+    const intent = await seedPrepared(f, prepared === 'prepared-before' ? prepared : 'prepared-after');
+    if (prepared === 'derived-active') {
+      const commit = (await f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      await writeFile(f.claimPath(), renderClaim({ ...intent, phase: 'active', intentCommit: commit }));
+    }
+  }
+  test(`AC5 an unreadable ${kind} decision names its step, not a generic host error`, async t => {
+    const f = await fixture(kind === 'boardInitialize' ? { noBoard: true } : kind === 'firstCoordinatorDeclaration' ? { self: true } : {});
     try {
-      const broken = brokenConfirm(kind);
-      f.context.ui = broken.ui;
+      await prepareFailure(f);
+      f.context.ui = brokenSurface(kind, new AdoptionDecisionCaptureFailure('the selection dialog returned "maybe"')).ui;
       const before = await surface(f);
       const result = await f.workflow().run(f.context, 'adopt');
       assert.equal(result.code, 'CONFIRMATION', text(result));
       assert.ok(text(result).includes(step), `the refusal must name the step: ${text(result)}`);
-      assert.ok(/could not be read/i.test(text(result)), 'and say the answer was unreadable');
-      assert.notEqual(result.code, 'HOST', 'never an unattributed host failure');
-      if (kind === 'boardInitialize') {
-        assert.equal(await stat(f.configPath()).then(() => true, () => false), false, 'a declined board creates no board');
-      } else {
-        assert.equal(await stat(f.claimPath()).then(() => true, () => false), false, 'an unreadable declaration decision creates no claim');
-        assert.equal((await surface(f)).commits, before.commits, 'and commits nothing');
-      }
+      assert.match(text(result), /could not be read/i, 'and say the answer was unreadable');
+      assert.match(text(result), /neither a yes nor a No/, 'and refuse to guess a direction for it');
+      assertNothingChanged(before, await surface(f));
       assert.equal(f.state.ready, false, 'action readiness stays closed');
+    } finally { await f.dispose(); }
+  });
+
+  test(`AC5 an unrenderable ${kind} decision is a named HOST refusal with no fallback surface`, async t => {
+    const f = await fixture(kind === 'boardInitialize' ? { noBoard: true } : kind === 'firstCoordinatorDeclaration' ? { self: true } : {});
+    try {
+      await prepareFailure(f);
+      const scripted = brokenSurface(kind, new AdoptionHostUiUnavailable('this Pi UI provides no supported visible selection surface'));
+      f.context.ui = scripted.ui;
+      const before = await surface(f);
+      const result = await f.workflow().run(f.context, 'adopt');
+      assert.equal(result.code, 'HOST', text(result));
+      assert.ok(text(result).includes(step), `the refusal must name the step: ${text(result)}`);
+      assert.match(text(result), /no text input was opened in its place/, 'and say what it did not do');
+      assertNothingChanged(before, await surface(f));
+      if (kind !== 'boardInitialize') assert.equal(await stat(f.configPath()).then(() => true, () => false), true, 'and the host failure wrote no board either');
+      assert.equal((await surface(f)).commits, before.commits);
+      assert.equal(f.state.ready, false);
     } finally { await f.dispose(); }
   });
 }
 
-test('a capture failure during the exact-transition decision names that step', async t => {
+test('AC5 a fresh invocation asks the single decision again; nothing is remembered as consent', async t => {
   const f = await fixture();
   try {
-    const scripted = answers();
-    const ui = {
-      input: options => scripted.ui.input(options),
-      confirm: async options => {
-        scripted.prompts.push({ kind: options.kind, prompt: options.prompt });
-        if (options.kind === 'adoptTransition') throw new AdoptionInputCaptureFailure('a bracketed paste never completed');
-        return true;
-      },
-    };
-    f.context.ui = ui;
+    const first = answers({ adoptTransition: 'decline' });
+    f.context.ui = first.ui;
+    assert.equal((await f.workflow().run(f.context, 'adopt')).code, 'ADOPTION_REQUIRED');
     const before = await surface(f);
+    const second = answers({ adoptTransition: 'decline' });
+    f.context.ui = second.ui;
     const result = await f.workflow().run(f.context, 'adopt');
-    assert.equal(result.code, 'CONFIRMATION', text(result));
-    assert.ok(text(result).includes('exact transition'), text(result));
-    assert.equal((await surface(f)).commits, before.commits, 'no commit is attempted on an unreadable decision');
+    assert.equal(result.code, 'ADOPTION_REQUIRED', text(result));
+    assert.deepEqual(second.prompts.map(prompt => prompt.kind), ['adoptTransition'], 'asked again, exactly once, on the fresh preview');
+    assertNothingChanged(before, await surface(f));
   } finally { await f.dispose(); }
 });
 
-test('AC6 exact wording and valid evidence still complete the adoption', async t => {
+test('AC5 a yes answered on one preview is not consent for a board that changed underneath it', async t => {
+  const f = await fixture();
+  try {
+    const scripted = answers();
+    const inner = scripted.ui.confirm;
+    let drifted;
+    f.context.ui = {
+      confirm: async options => {
+        const answer = await inner(options);
+        // The answer was yes; the board it was given about is then replaced before the transaction.
+        if (options.kind === 'adoptTransition' && drifted === undefined) {
+          const raw = await f.board.read();
+          drifted = raw.replace('"multiplexer": "herdr"', '"multiplexer": "herdr",\n  "driftedWhileOpen": 1');
+          await f.board.write(drifted);
+        }
+        return answer;
+      },
+    };
+    const headBefore = (await f.git(['rev-parse', 'HEAD'])).stdout.trim();
+    const commitsBefore = Number((await f.git(['rev-list', '--count', 'HEAD'])).stdout.trim());
+    const result = await f.workflow().run(f.context, 'adopt');
+    assert.equal(result.code, 'STALE_PREVIEW', text(result));
+    assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['adoptTransition'], 'the stale preview is refused, not re-asked and not re-answered');
+    assert.equal(await f.board.read(), drifted, 'the drifted board is left exactly as the concurrent writer left it');
+    assert.equal((await f.git(['rev-parse', 'HEAD'])).stdout.trim(), headBefore, 'the stale yes committed nothing');
+    assert.equal(Number((await f.git(['rev-list', '--count', 'HEAD'])).stdout.trim()), commitsBefore);
+    assert.equal(await stat(f.claimPath()).then(() => true, () => false), false, 'and wrote no evidence');
+    assert.equal(f.state.ready, false);
+  } finally { await f.dispose(); }
+});
+test('AC6 one yes completes the adoption, and the recorded evidence is truthful about its own origin', async t => {
   const f = await fixture();
   try {
     const scripted = answers();
     f.context.ui = scripted.ui;
     const result = await f.workflow().run(f.context, 'adopt');
     assert.equal(result.code, 'OK', text(result));
-    assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['adoptionDecision', 'authorityRecord', 'endedWording', 'adoptTransition']);
-    assert.equal(parseClaim(await f.claim.read()).authority.wording, ENDED_WORDING(IDS.gone), 'the exact typed sentence is what is recorded');
+    assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['adoptTransition'], 'one decision, in one step');
+    const record = parseClaim(await f.claim.read());
+    assert.equal(record.authority.wording, ENDED_WORDING(IDS.gone), 'the canonical attestation the yes accepted is what is recorded');
+    assert.equal(record.authority.kind, 'adoption');
+    assert.match(record.authority.confirmedEndedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/, 'with a real timestamp');
+    assert.equal(record.previous.sessionId, IDS.gone, 'bound to the backend-selected previous session');
+    assert.ok(scripted.prompts[0].prompt.includes(record.transitionId), 'the transition the question named is the one committed');
+    // AC3: the record must say what actually happened, and nothing that did not.
+    const authority = record.authority.record;
+    assert.match(authority, /^Human answered yes to the single adoption decision/, 'it names the decision it came from');
+    assert.match(authority, /Implementation-generated evidence of that decision, not a typed statement and not an external reference\./, 'and says it was generated');
+    assert.ok(authority.includes(IDS.fresh) && authority.includes(IDS.gone), 'both pairs appear');
+    assert.ok(authority.includes(`config SHA256 `), 'the config hash the answer was given about is recorded with it');
+    assert.ok(authority.includes(record.transitionId), 'the transition id appears');
+    assert.ok(authority.includes(`boardRoot SHA256 ${f.sha256(f.home)}`), 'and the board root as its hash');
+    assert.ok(authority.length <= 2000, 'inside the schema bound');
+    assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(authority), 'no control character in committed evidence');
     assert.equal(f.state.ready, true);
+  } finally { await f.dispose(); }
+});
+
+test('AC6 a first declaration still records no termination and no timestamp', async t => {
+  const f = await fixture({ self: true });
+  try {
+    const result = await f.workflow().run(f.context, 'adopt');
+    assert.equal(result.code, 'DECLARED', text(result));
+    const record = parseClaim(await f.claim.read());
+    assert.equal(record.authority.kind, 'first-coordinator declaration');
+    assert.equal(record.authority.confirmedEndedAt, null, 'nothing ended, so no termination is claimed');
+    assert.ok(!record.authority.wording.includes('I confirm coordinator'), 'a declaration never borrows the adoption attestation');
+    assert.equal(record.previous, null);
+  } finally { await f.dispose(); }
+});
+
+test('AC6 prepared-after finalization performs no replacement and does not rewrite the anchored evidence', async t => {
+  const f = await fixture();
+  try {
+    await seedPrepared(f, 'prepared-after');
+    const before = await f.claim.read();
+    const anchored = parseClaim(before);
+    const scripted = answers();
+    f.context.ui = scripted.ui;
+    const result = await f.workflow().run(f.context, 'adopt');
+    assert.equal(result.code, 'RECOVERED', text(result));
+    assert.deepEqual(scripted.prompts.map(prompt => prompt.kind), ['finalizeTransition'], 'one decision, and it is the finalization one');
+    const prompt = scripted.prompts[0].prompt;
+    assert.ok(prompt.includes(f.home) && prompt.includes(f.id), 'the question still shows the root and this session');
+    assert.match(prompt, /without replacement/, 'and says it authorizes no replacement');
+    assert.ok(prompt.includes(anchored.configAfterSha256) && prompt.includes(anchored.configBeforeSha256), 'finalization shows both relevant config hashes');
+    for (const worker of anchored.leftUnchanged) {
+      assert.ok(prompt.includes(worker.name), 'finalization names each untouched worker');
+      if (worker.closeJob) assert.ok(prompt.includes(`${worker.name}/${worker.closeJob.state}`), 'finalization shows each close-job fence');
+    }
+    assert.ok(prompt.includes('not regenerated from this answer'), 'finalization does not promise newly generated authority');
+    const after = parseClaim(await f.claim.read());
+    assert.equal(after.phase, 'active');
+    assert.equal(after.authority.record, anchored.authority.record, 'the anchored authority record is preserved byte-for-byte');
+    assert.equal(after.authority.wording, anchored.authority.wording, 'and so is the anchored attestation');
+    assert.equal(after.authority.confirmedEndedAt, anchored.authority.confirmedEndedAt, 'with its original timestamp');
+    assert.equal(after.transitionId, anchored.transitionId, 'the same transition, finalized');
+    assert.ok(after.intentCommit, 'citing its intent commit');
   } finally { await f.dispose(); }
 });
 

@@ -1,24 +1,24 @@
 #!/usr/bin/env node
-// Test-only adoption proof runner. NOT a supported operation.
-//
-// One case name from the approved fixtures table, executed against disposable temporary fixtures, with
-// the expected outcome asserted. There are no free-form arguments: identity, ports, paths, confirmation,
-// and outcomes cannot be supplied or overridden.
-//
-// Decision kinds are the stable ones the command itself uses: boardInitialize, adoptTransition,
-// authorityRecord, endedWording, finalizeTransition.
+/**
+ * Test-only adoption proof runner. NOT a supported operation.
+ *
+ * One case name from the approved fixtures table, executed against disposable temporary fixtures, with
+ * the expected outcome asserted. There are no free-form arguments: identity, ports, paths, confirmation,
+ * and outcomes cannot be supplied or overridden.
+ *
+ * Decision kinds are the stable ones the command itself uses, one per human-touching branch
+ * (issue #12): boardInitialize, firstCoordinatorDeclaration, adoptTransition, renewAdoptionDecision,
+ * finalizeTransition. Nothing is typed anywhere: an answer is a yes or a no, keyed by kind.
+ */
 
 import { runCase } from './adoption-cases.mjs';
 
-const WORDING = '{old}';
-/** The accepted path: every decision answered affirmatively, wording typed exactly. */
+/** The accepted path: every branch's single decision answered yes. */
 const YES = () => ({
   boardInitialize: 'confirm',
   firstCoordinatorDeclaration: 'confirm',
-  adoptionDecision: 'confirm',
   adoptTransition: 'confirm',
-  authorityRecord: 'confirm',
-  endedWording: { kind: 'prompt', value: WORDING },
+  renewAdoptionDecision: 'confirm',
   finalizeTransition: 'confirm',
 });
 /** Refuse one decision while answering the rest, so each no-write exit is isolated. */
@@ -27,8 +27,8 @@ const decline = (...kinds) => {
   for (const kind of kinds) answers[kind] = 'decline';
   return answers;
 };
-/** Answer every decision but type the ended confirmation this way ('{old}' expands to the exact wording). */
-const typed = value => ({ ...YES(), endedWording: { kind: 'prompt', value } });
+/** The one decision of a branch is answered by a surface that cannot render, or cannot be read. */
+const surfaceFails = how => ({ ...YES(), adoptTransition: { throws: how } });
 
 const CASES = {
   // ---- AC1: count and classification. A second board matters when the upward walk from cwd reaches it.
@@ -39,18 +39,19 @@ const CASES = {
   'count-symlink': { own: 'coordinator', claim: 'matching', symlinkEscape: true, run: 'status', expect: { code: 'BOARD_PATH', exit: 1 } },
   'outside-home': { own: 'fresh', cwdOutside: true, expect: { code: 'BOARD_PATH', exit: 1 } },
   'no-board-child': { own: 'fresh', noBoard: true, cwdChild: true, expect: { code: 'NO_BOARD', exit: 1 } },
-  'no-board-root-declined': { own: 'fresh', noBoard: true, answers: decline('boardInitialize'), expect: { code: 'CANCELLED', exit: 1 } },
+  'no-board-root-declined': { own: 'fresh', noBoard: true, answers: decline('boardInitialize'), expect: { code: 'CANCELLED', exit: 1 }, assert: ['decisions:boardInitialize'] },
   'no-board-root-confirmed': {
     own: 'fresh', noBoard: true, answers: YES(), expect: { code: 'DECLARED', exit: 0 },
+    assert: ['decisions:boardInitialize'],
     note: 'a fresh board for an anonymous session has no predecessor, so AC2 stays impossible and AC3/AC4 are not applicable: no identity comparison, no collision probe, no confirmation. A created board is never a takeover and registered workers are never promoted.',
   },
 
   // ---- AC2: the five claim-gate outcomes.
-  'claim-absent-self': { own: 'coordinator', claim: 'none', answers: YES(), expect: { code: 'DECLARED', exit: 0 } },
-  'claim-active-self': { own: 'coordinator', claim: 'matching', expect: { code: 'CLAIM_OK', exit: 0 } },
-  'claim-other-declined': { own: 'fresh', claim: 'matching', answers: decline('adoptionDecision'), expect: { code: 'CLAIM_OTHER', exit: 1 } },
-  'claim-absent-anonymous': { own: 'fresh', claim: 'none', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ', 'roster-recorded', 'zero-worker-requests'] },
-  'claim-malformed': { own: 'fresh', claim: 'malformed', answers: YES(), expect: { code: 'RECORD', exit: 1 } },
+  'claim-absent-self': { own: 'coordinator', claim: 'none', answers: YES(), expect: { code: 'DECLARED', exit: 0 }, assert: ['decisions:firstCoordinatorDeclaration'] },
+  'claim-active-self': { own: 'coordinator', claim: 'matching', expect: { code: 'CLAIM_OK', exit: 0 }, assert: ['decisions:'] },
+  'claim-other-declined': { own: 'fresh', claim: 'matching', answers: decline('adoptTransition'), expect: { code: 'CLAIM_OTHER', exit: 1 }, assert: ['board-unchanged', 'decisions:adoptTransition'] },
+  'claim-absent-anonymous': { own: 'fresh', claim: 'none', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ', 'roster-recorded', 'zero-worker-requests', 'decisions:adoptTransition'] },
+  'claim-malformed': { own: 'fresh', claim: 'malformed', answers: YES(), expect: { code: 'RECORD', exit: 1 }, assert: ['decisions:'] },
   'claim-uncommitted': { own: 'coordinator', claim: 'matching-uncommitted', expect: { code: 'RECORD', exit: 1 } },
   // A committed record that does not name this session's pair is the record-other branch: it stops and
   // reports all three pairs, whether it disagrees on session, on port, or on both.
@@ -58,35 +59,32 @@ const CASES = {
   'claim-port-disagree': { own: 'coordinator', claim: 'port-disagree', expect: { code: 'CLAIM_OTHER', exit: 1 }, assert: ['board-unchanged'] },
   'claim-root-disagree': { own: 'coordinator', claim: 'root-disagree', expect: { code: 'CLAIM_MISMATCH', exit: 1 }, assert: ['board-unchanged'] },
 
-  // ---- AC3/AC4: identity, collisions, probe, wording, interaction.
-  'fresh-anonymous': { own: 'fresh', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ', 'roster-recorded', 'zero-worker-requests', 'no-coordinator-tool-needed'] },
-  'registered-worker': { own: 'worker', answers: YES(), expect: { code: 'SESSION_COLLISION', exit: 1 }, assert: ['board-unchanged'] },
-  'port-collision': { own: 'fresh', ports: own => ({ workerTwo: own }), answers: YES(), expect: { code: 'PORT_COLLISION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
+  // ---- AC3/AC4: identity, collisions, probe, and the one decision surface.
+  'fresh-anonymous': { own: 'fresh', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['only-coordinator-tokens-differ', 'roster-recorded', 'zero-worker-requests', 'no-coordinator-tool-needed', 'decisions:adoptTransition'] },
+  'registered-worker': { own: 'worker', answers: YES(), expect: { code: 'SESSION_COLLISION', exit: 1 }, assert: ['board-unchanged', 'decisions:'] },
+  'port-collision': { own: 'fresh', ports: own => ({ workerTwo: own }), answers: YES(), expect: { code: 'PORT_COLLISION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed', 'decisions:'] },
   'session-unpersisted': { own: 'fresh', session: 'unpersisted', expect: { code: 'SESSION_UNPERSISTED', exit: 1 } },
   'wrong-header': { own: 'fresh', session: 'wrong-header', expect: { code: 'IDENTITY', exit: 1 } },
   'store-missing-id': { own: 'fresh', session: 'store-missing', expect: { code: 'IDENTITY', exit: 1 } },
   'custom-session-dir': { own: 'fresh', session: 'custom-dir', answers: YES(), expect: { code: 'OK', exit: 0 } },
   'new-health-mismatch': { own: 'fresh', ownHealth: 'mismatch', expect: { code: 'IDENTITY', exit: 1 } },
-  'old-connected': { own: 'fresh', oldEndpoint: 'matching', expect: { code: 'OLD_CONNECTED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'old-refused': { own: 'fresh', oldEndpoint: 'refused', answers: YES(), expect: { code: 'OK', exit: 0 } },
-  'old-unknown': { own: 'fresh', oldEndpoint: 'malformed', answers: YES(), expect: { code: 'OK', exit: 0 } },
-  'old-connected-after-dialog': { own: 'fresh', oldEndpoint: 'after-dialog', reconnect: true, answers: YES(), expect: { code: 'OLD_CONNECTED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'confirm-blank': { own: 'fresh', answers: typed(''), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'confirm-wrong-id': { own: 'fresh', answers: typed('the previous coordinator has stopped'), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'confirm-cancel': { own: 'fresh', answers: typed(undefined), expect: { code: 'CANCELLED', exit: 1 } },
-  // An explicit false is distinguishable from an absent answer: it arrives as an answer that is not the
-  // required wording, so it is refused as a confirmation failure rather than treated as a cancellation.
-  'confirm-false': { own: 'fresh', answers: typed(false), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  // A refused argument is the surface being unavailable, which the exit-code table gives as 2.
-  'confirm-final-false': { own: 'fresh', answers: decline('adoptTransition'), expect: { code: 'CANCELLED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
+  'old-connected': { own: 'fresh', oldEndpoint: 'matching', expect: { code: 'OLD_CONNECTED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed', 'decisions:'] },
+  'old-refused': { own: 'fresh', oldEndpoint: 'refused', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['decisions:adoptTransition'] },
+  'old-unknown': { own: 'fresh', oldEndpoint: 'malformed', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['decisions:adoptTransition'] },
+  'old-connected-after-dialog': { own: 'fresh', oldEndpoint: 'after-dialog', reconnect: true, answers: YES(), expect: { code: 'OLD_CONNECTED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed', 'decisions:adoptTransition'] },
+  // Issue #12 removed the typed gates, so their validation failures are gone with their inputs. What
+  // remains of the confirmation surface is a selection that either renders or does not, and an answer
+  // that is either readable or not. Neither may be read as consent.
+  'confirm-host-unavailable': { own: 'fresh', answers: surfaceFails('host'), expect: { code: 'HOST', exit: 2 }, assert: ['board-unchanged', 'intent-not-committed', 'decisions:adoptTransition'] },
+  'confirm-capture-failure': { own: 'fresh', answers: surfaceFails('capture'), expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed', 'decisions:adoptTransition'] },
+  // A declined single decision keeps the code and the identities the removed preliminary question used
+  // to print: an operator who declines still needs the record, both pairs, and the target.
+  'adopt-declined': { own: 'fresh', claim: 'none', answers: decline('adoptTransition'), expect: { code: 'ADOPTION_REQUIRED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed', 'decisions:adoptTransition'] },
   'confirm-forged-args': { own: 'fresh', forgedArguments: true, answers: YES(), expect: { code: 'USAGE', exit: 2 }, assert: ['board-unchanged'] },
-  'authority-blank': { own: 'fresh', answers: { ...YES(), authorityRecord: '' }, expect: { code: 'CONFIRMATION', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'authority-cancel': { own: 'fresh', answers: { ...YES(), authorityRecord: undefined }, expect: { code: 'CANCELLED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
-  'adopt-declined': { own: 'fresh', answers: decline('adoptionDecision'), expect: { code: 'ADOPTION_REQUIRED', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
   'no-ui': { own: 'fresh', noUi: true, expect: { code: 'MODE', exit: 1 } },
-  'untrusted': { own: 'fresh', untrusted: true, answers: YES(), expect: { code: 'TRUST', exit: 1 } },
-  'busy-host': { own: 'fresh', busy: true, answers: YES(), expect: { code: 'BUSY', exit: 1 } },
-  'foreign-launch-role': { own: 'fresh', role: 'developer', answers: YES(), expect: { code: 'AUTH', exit: 1 }, assert: ['board-unchanged'] },
+  'untrusted': { own: 'fresh', untrusted: true, answers: YES(), expect: { code: 'TRUST', exit: 1 }, assert: ['decisions:'] },
+  'busy-host': { own: 'fresh', busy: true, answers: YES(), expect: { code: 'BUSY', exit: 1 }, assert: ['decisions:'] },
+  'foreign-launch-role': { own: 'fresh', role: 'developer', answers: YES(), expect: { code: 'AUTH', exit: 1 }, assert: ['board-unchanged', 'decisions:'] },
 
   // ---- Stale input: anything that changes while decisions are open.
   'roster-changed': { own: 'fresh', during: 'roster', answers: YES(), expect: { code: 'STALE_PREVIEW', exit: 1 }, assert: ['board-unchanged', 'intent-not-committed'] },
@@ -134,15 +132,15 @@ const CASES = {
   'dirty-active-intent-changed': { own: 'fresh', preparedSwap: true, dirty: 'intent', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
   'dirty-active-config-changed': { own: 'fresh', preparedSwap: true, dirty: 'config', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
   'dirty-active-other-session': { own: 'fresh', preparedSwap: true, dirty: 'session', expect: { code: 'RECOVERY_REQUIRED', exit: 1 } },
-  'prepared-old': { own: 'fresh', claim: 'prepared-kept', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['exactly-one-swap', 'refreshed-intent', 'one-transition-id'] },
-  'prepared-new': { own: 'fresh', claim: 'prepared-swapped', answers: YES(), expect: { code: 'RECOVERED', exit: 0 }, assert: ['no-second-swap'] },
+  'prepared-old': { own: 'fresh', claim: 'prepared-kept', answers: YES(), expect: { code: 'OK', exit: 0 }, assert: ['exactly-one-swap', 'refreshed-intent', 'one-transition-id', 'decisions:renewAdoptionDecision'] },
+  'prepared-new': { own: 'fresh', claim: 'prepared-swapped', answers: YES(), expect: { code: 'RECOVERED', exit: 0 }, assert: ['no-second-swap', 'decisions:finalizeTransition'] },
   'active-new': { own: 'fresh', answers: YES(), reinvoke: true, expect: { phase1: { code: 'OK', exit: 0 }, phase2: { code: 'CLAIM_OK', exit: 0 } }, assert: ['exactly-one-swap', 'no-second-swap'] },
   'mixed-hashes': { own: 'fresh', claim: 'mixed', answers: YES(), expect: { code: 'RECOVERY_REQUIRED', exit: 1 }, assert: ['board-unchanged'] },
-  'dirty-active-cancel': { own: 'fresh', preparedSwap: true, dirty: 'active', answers: decline('finalizeTransition'), expect: { code: 'CANCELLED', exit: 1 } },
+  'dirty-active-cancel': { own: 'fresh', preparedSwap: true, dirty: 'active', answers: decline('finalizeTransition'), expect: { code: 'CANCELLED', exit: 1 }, assert: ['decisions:finalizeTransition'] },
   'clean-advance': {
     own: 'fresh', preparedSwap: true, answers: YES(), expect: { code: 'RECOVERED', exit: 0 },
-    assert: ['exactly-one-swap', 'no-second-swap'],
-    note: 'own prepared evidence is accepted without a new confirmation; the transition commits and promotion is reported.',
+    assert: ['exactly-one-swap', 'no-second-swap', 'decisions:finalizeTransition'],
+    note: 'one decision, on the exactly-derived active bytes: the transition commits and promotion is reported, with no second replacement.',
   },
   'promotion-failed': {
     own: 'fresh', preparedSwap: true, promote: 'fail', reinvoke: true, retryPromotion: true, answers: YES(),
@@ -197,6 +195,19 @@ const CASES = {
  */
 const NOT_PROVEN = [
 ];
+
+// Display-proof mode: `--questions` prints the complete question each branch would show, with every
+// answer forced to no. It authorizes nothing and asserts nothing; scripts/adoption-dialog-host-check.mjs
+// feeds the printed text to the real host dialog component.
+if (process.argv[2] === '--questions') {
+  const targets = ['no-board-root-confirmed', 'claim-absent-self', 'claim-absent-anonymous', 'fresh-anonymous', 'prepared-old', 'prepared-new', 'clean-advance'];
+  for (const target of targets) await runCase(`${target}-questions`, { ...CASES[target], answers: decline(...targetAnswers(target)), questions: true });
+  process.exit(0);
+}
+function targetAnswers(name) {
+  return { 'no-board-root-confirmed': ['boardInitialize'], 'claim-absent-self': ['firstCoordinatorDeclaration'],
+    'claim-absent-anonymous': ['adoptTransition'], 'fresh-anonymous': ['adoptTransition'], 'prepared-old': ['renewAdoptionDecision'], 'prepared-new': ['finalizeTransition'], 'clean-advance': ['finalizeTransition'] }[name];
+}
 
 const name = process.argv[2];
 if (!name || !Object.hasOwn(CASES, name)) {
