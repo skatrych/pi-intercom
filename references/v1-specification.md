@@ -19,13 +19,13 @@ This is the consolidated **target design**, authoritative over conflicting wordi
 
 Location: `<coordinator-root>/.pi-intercom/config.json`.
 
-- Root-isolation revision (0.8.0): select only the config in the session working directory. Never search ancestors or infer a Git/home root. `--intercom-root` is a same-directory assertion: its canonical path must equal cwd before its config is read. It cannot authorize reading a parent config.
+- Root-isolation revision (0.8.0, relaxed for subfolder workspaces): select only the config in the session working directory. Never search ancestors or infer a Git/home root. `--intercom-root` is an explicit board root: its canonical path must equal cwd or be one of its ancestors before its config is read. It cannot authorize a root outside that lineage.
 - Without an explicit workspace root, when the exact local config is genuinely absent, become coordinator and create it under the current working directory. Explicit workspace mode requires an existing valid config and never creates a replacement coordinator. Do not infer a Git or solution root.
 - Initial creation is atomic: only one session targeting the same path becomes coordinator. Other contenders wait for usable config and register as workers.
 - Invalid or unreadable config is an error, not absence. Leave it untouched.
 - The configuration is checked into source control. It includes session IDs and ports; do not split these into a separate runtime configuration.
 - Only coordinator extension code may write it. Workers read only. No attempt to restrict ordinary Pi shell/file tools.
-- Saved worker directories remain root-relative. Shared-roster worker create/resume requires the coordinator root itself; descendant launches are rejected before side effects. Old descendant entries/history are retained, not silently relocated.
+- Saved worker directories remain root-relative. Shared-roster worker create/resume accepts the coordinator root or a descendant of it; a path that resolves outside the root is rejected before side effects. Old descendant entries/history are retained, not silently relocated.
 - Entries survive process closure. Saved Pi session paths are not stored; resume uses session ID and project directory.
 
 Required configuration information:

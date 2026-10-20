@@ -47,10 +47,15 @@ export function launchers(options: LauncherOptions) {
     if (platform !== 'win32' && platform !== 'linux') fail('launchers support Windows and Linux only');
     const paths = platform === 'win32' ? path.win32 : path.posix;
     if (typeof request.workspaceRoot !== 'string' || !request.workspaceRoot.trim() || request.workspaceRoot.includes('\0') || !paths.isAbsolute(request.workspaceRoot)) fail('worker launch requires an explicit absolute workspace root');
-    // Runtime performs authoritative realpath equality before reading config.
-    // Defend direct launcher calls too, without filesystem access or cwd rewrites.
+    // Lexical containment only: this defends direct launcher calls without filesystem access or cwd
+    // rewrites, and being lexical it cannot see symlinks. It is not the symlink defense. The authoritative
+    // admission is filesystem-bound: `directory()` and `ConfigStore.workspace()` realpath both the root and
+    // the target before anything is read or written, and ConfigStore re-pins that canonical root on every
+    // later access. A link swapped in after this check is that boundary's refusal, not this one's.
     const samePath = (value: string) => platform === 'win32' ? paths.resolve(value).toLowerCase() : paths.resolve(value);
-    if (typeof request.cwd !== 'string' || !paths.isAbsolute(request.cwd) || samePath(request.workspaceRoot) !== samePath(request.cwd)) fail('worker workspace root must equal its working directory; parent workspace access is not allowed');
+    if (typeof request.cwd !== 'string' || !paths.isAbsolute(request.cwd)) fail('worker launch requires an absolute working directory');
+    const relative = paths.relative(samePath(request.workspaceRoot), samePath(request.cwd));
+    if (relative === '..' || relative.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative)) fail('worker workspace root must be its working directory or one of its ancestors; unrelated workspace access is not allowed');
     if (request.role !== undefined) {
       if (!logicalRole(request.role)) fail('invalid role');
       if (platform === 'win32') fail('Role-aware worker launch is not supported on Windows. No worker was launched.');
