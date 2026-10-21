@@ -56,12 +56,17 @@ test('launcher requires explicit absolute root before session lookup or process 
     await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: 'D:/p', workspaceRoot, sessionId: 'saved' }), /explicit absolute workspace root/);
   }
 });
-test('launcher rejects parent and unrelated roots before session lookup or spawn', async () => {
+test('launcher allows ancestor roots and refuses unrelated ones before session lookup or spawn', async () => {
   const launcher = launchers({ ...options, sessionExists: async () => assert.fail('no lookup'), run: async () => assert.fail('no launch') });
-  for (const workspaceRoot of ['D:/', 'D:/parent', 'D:/unrelated']) {
-    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: 'D:/parent/child', workspaceRoot, sessionId: 'saved' }), /root must equal its working directory/);
+  // Reaching the session lookup proves root admission passed: the board root may be the cwd or its ancestor.
+  for (const workspaceRoot of ['D:/', 'D:/parent']) {
+    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: 'D:/parent/child', workspaceRoot, sessionId: 'saved' }), /no lookup/);
   }
-  await assert.rejects(launcher.launch({ multiplexer: 'none', cwd: '\\\\server\\share\\child', workspaceRoot: '\\\\server\\share', sessionId: 'saved' }), /root must equal its working directory/);
+  for (const workspaceRoot of ['D:/unrelated', 'C:/parent']) {
+    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: 'D:/parent/child', workspaceRoot, sessionId: 'saved' }), /workspace root must be its working directory or one of its ancestors/);
+  }
+  await assert.rejects(launcher.launch({ multiplexer: 'none', cwd: '\\\\server\\share\\child', workspaceRoot: '\\\\server\\share', sessionId: 'saved' }), /no lookup/);
+  await assert.rejects(launcher.launch({ multiplexer: 'none', cwd: '\\\\server\\share\\child', workspaceRoot: '\\\\server\\other', sessionId: 'saved' }), /workspace root must be its working directory or one of its ancestors/);
 });
 test('Windows launcher allows platform-equivalent same cwd roots', async () => {
   const launcher = launchers({ ...options, run: async () => JSON.stringify({ result: { tab: { tab_id: 't' }, root_pane: { pane_id: 'p' } } }) });

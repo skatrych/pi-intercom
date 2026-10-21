@@ -75,7 +75,7 @@ export interface RuntimeOptions {
   /** Test seam; production defaults to 120 seconds, values above that are capped. */
   closeTimeoutMs?: number;
   reminderClock?: ReminderClock;
-  /** Explicit launcher-provided root must equal canonical cwd; no parent-root exception. */
+  /** Explicit launcher-provided board root: the canonical session cwd or one of its ancestors. */
   workspaceRoot?: string;
   /** Test seam for the operator environment. Production reads process.env once per runtime start. */
   reminderMinutesEnv?: () => string | undefined;
@@ -261,10 +261,11 @@ export class Intercom {
         this.authorityEnabled = true;
         countedRoot = root; countedBoard = boards.length === 1;
       }
-      // Upstream 0.8.0: an explicit --intercom-root must canonically equal the session cwd; a parent
-      // root is never honored. Fork Orchestrator launches carry no such flag, so the counted
-      // projects-home board below is the only way a session binds an ancestor board, and it is still
-      // pinned and revalidated by the checks underneath exactly like a session-local root.
+      // An explicit --intercom-root is admitted only when it canonically equals the session cwd or one
+      // of its ancestors (ConfigStore.workspace), which is how a subfolder worker reaches the board roster.
+      // Fork Orchestrator launches carry no such flag, so the counted projects-home board below is the
+      // only way a session binds an ancestor board, and it is still pinned and revalidated by the checks
+      // underneath exactly like a session-local root.
       const discovered = this.options.workspaceRoot !== undefined
         ? await ConfigStore.workspace(this.host.cwd, this.options.workspaceRoot)
         : countedRoot
@@ -832,7 +833,6 @@ export class Intercom {
     if (operation === 'create_worker') {
       const relative = await directory(this.store.root, (args.projectDirectory as string | undefined) ?? '.');
       assertCurrent();
-      if (relative !== '.') fail('worker working directory must equal the config root; subdirectory launches would read a forbidden parent config');
       const role = requestedRole(args.role);
       armReminder();
       const launched = await this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), workspaceRoot: this.store.root, ...(role ? { role } : {}) }, assertValid);
@@ -859,7 +859,6 @@ export class Intercom {
       if (this.resumeFences.has(target.sessionId)) fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');
       const relative = await directory(this.store.root, target.projectDirectory);
       assertValid();
-      if (relative !== '.') fail('worker working directory must equal the config root; subdirectory resumes would read a forbidden parent config');
       const cwd = path.resolve(this.store.root, relative);
       // Directory validation is read-only; recheck admission after that await.
       if (this.resumeFences.has(target.sessionId)) fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');

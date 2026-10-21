@@ -72,7 +72,7 @@ test('adapter without root flag ignores ancestor config and inherited root env',
   assert.equal(await readFile(store.file, 'utf8'), before);
   assert.match((await a.prompt()).systemPrompt, /Identity: Coordinator/);
 });
-test('explicit CLI root equal to cwd survives replacement but never widens changed cwd', supportedHost, async t => {
+test('explicit CLI root equal to cwd survives replacement; a descendant cwd binds the same board', supportedHost, async t => {
   const a = await adapter(t), registrations = [];
   const coordinator = await listen(undefined, async message => { registrations.push(message); });
   t.after(() => coordinator.close());
@@ -83,25 +83,27 @@ test('explicit CLI root equal to cwd survives replacement but never widens chang
   a.setId('replacement-worker'); await a.start();
   assert.equal(registrations.at(-1).from, 'replacement-worker');
   const child = path.join(a.root, "worker O'Brien"); await mkdir(child);
+  // The subfolder session binds the ancestor board it was launched with; it never creates its own.
   a.ctx.cwd = child; await a.start();
-  await assert.rejects(a.invoke('list'), /not initialized/);
-  assert.ok(a.notices.some(notice => notice.level === 'error'));
+  await assert.rejects(a.invoke('list'), /no coordinator privileges/);
+  assert.equal(a.notices.filter(notice => notice.level === 'error').length, 0);
   await assert.rejects(access(path.join(child, '.pi-intercom')), /ENOENT/);
 });
-test('explicit parent root rejects before reading valid parent config or creating resources', supportedHost, async t => {
+test('explicit ancestor root is admitted: the ancestor board is read and no child config is created', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
   await store.initialize('parent-coordinator', 12345);
   const before = await readFile(store.file, 'utf8');
   const child = path.join(a.root, 'child'); await mkdir(child);
   a.ctx.cwd = child; a.setRootFlag(a.root);
-  const originalRead = ConfigStore.prototype.read, originalListen = Server.prototype.listen;
-  let reads = 0, listens = 0;
+  const originalRead = ConfigStore.prototype.read;
+  let reads = 0;
   ConfigStore.prototype.read = async function() { reads++; return originalRead.call(this); };
-  Server.prototype.listen = function() { listens++; assert.fail('no listener for parent root'); };
   try { await a.start(); }
-  finally { ConfigStore.prototype.read = originalRead; Server.prototype.listen = originalListen; }
-  assert.equal(reads, 0); assert.equal(listens, 0);
-  await assert.rejects(a.invoke('list'), /not initialized/);
+  finally { ConfigStore.prototype.read = originalRead; }
+  assert.ok(reads > 0, 'the ancestor board is the session config');
+  assert.equal(a.notices.filter(notice => notice.level === 'error').length, 0);
+  // Admitted as a worker: no coordinator authority, and nothing is written to the child directory.
+  await assert.rejects(a.invoke('list'), /no coordinator privileges/);
   assert.equal(await readFile(store.file, 'utf8'), before);
   await assert.rejects(access(path.join(child, '.pi-intercom')), /ENOENT/);
 });

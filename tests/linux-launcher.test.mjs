@@ -48,11 +48,37 @@ test('Linux launch ignores inherited root and requires an explicit absolute root
     await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot }), /explicit absolute workspace root/);
   }
 });
-test('Linux rejects parent or unrelated explicit roots before lookup or spawn', async () => {
+test('Linux admits an ancestor board root and refuses sibling or unrelated roots before lookup or spawn', async () => {
   const launcher = launchers({ ...options, sessionExists: async () => assert.fail('no lookup'), run: async () => assert.fail('no launch') });
-  for (const workspaceRoot of ['/tmp', '/', '/unrelated']) {
-    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp/child', workspaceRoot, sessionId: 'saved' }), /root must equal its working directory/);
+  // Reaching the session lookup proves root admission passed: the board root may be the cwd or its ancestor.
+  for (const workspaceRoot of ['/tmp', '/']) {
+    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp/child', workspaceRoot, sessionId: 'saved' }), /no lookup/);
   }
+  for (const workspaceRoot of ['/unrelated', '/tmp-sibling']) {
+    await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: '/tmp/child', workspaceRoot, sessionId: 'saved' }), /workspace root must be its working directory or one of its ancestors/);
+  }
+  await assert.rejects(launcher.launch({ multiplexer: 'herdr', cwd: 'relative/child', workspaceRoot: '/tmp' }), /absolute working directory/);
+});
+
+test('Linux Herdr launches a subfolder worker against its ancestor board root', { skip: process.platform !== 'linux' }, async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'intercom-linux-sub-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // The board root and the worker cwd differ, and both keep shell metacharacters literally.
+  const board = path.join(root, "board O'Brien $HOME;`echo bad`");
+  const cwd = path.join(board, '.worktrees', 'issue-26');
+  await mkdir(cwd, { recursive: true });
+  await writeFile(path.join(root, 'pi'), '#!/bin/sh\nprintf "%s\\n" "$PWD" "$@"\n', { mode: 0o700 });
+  const calls = [];
+  const launcher = launchers({ ...options, run: async (file, args) => { calls.push({ file, args }); return created; } });
+  const sessionId = "session'$HOME;`echo bad`";
+  const result = await launcher.launch({ multiplexer: 'herdr', cwd, workspaceRoot: board, sessionId });
+  assert.deepEqual(calls[0], { file: 'herdr', args: ['tab', 'create', '--workspace', 'workspace', '--cwd', cwd, '--label', 'Intercom (anonymous)', '--no-focus'] });
+  assert.deepEqual(calls[1].args.slice(0, 3), ['pane', 'run', 'pane']);
+  assert.match(calls[1].args[3], /exec pi /);
+  assert.equal(result.commandSubmitted, true);
+  // Real shell parsing: the subfolder cwd, the ancestor board root and the resume ID all survive verbatim.
+  const { stdout } = await promisify(execFile)('/bin/sh', ['-c', calls[1].args[3]], { env: { ...process.env, PATH: `${root}:${process.env.PATH}` } });
+  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, '-e', options.extension, '--intercom-root', board, '--session', sessionId]);
 });
 test('Linux role launch wraps Pi with a quoted pi-role and keeps normal arguments and session lookup', { skip: process.platform !== 'linux' }, async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-linux-role-'));

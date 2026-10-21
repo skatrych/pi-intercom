@@ -794,9 +794,8 @@ for (const site of ['probe', 'directory']) for (const interruption of ['malforme
   const runtime = await f.startRuntime({ launch: async () => { launches++; return { commandSubmitted: true }; }, probe: async () => { await gate.wait(); return { state: 'disconnected' }; } });
   runtime.options.probe = f.probeWorker; // adoption keeps real probes; only the later resume awaits are held
   assert.equal((await runtime.adoptCoordinator(f.context, 'adopt')).ok, true);
-  // Upstream 0.8.0 refuses to relaunch a saved subdirectory worker against the parent roster, so this
-  // resume proof uses a root-level registration; both await sites remain reachable.
-  await runtime.store.update(f.id, c => { c.agents.find(a => a.name === 'Builder').projectDirectory = '.'; });
+  // The fixture registers Builder in a saved subfolder (`app`), which resume_worker now relaunches as
+  // itself against the parent roster; both await sites remain reachable on that path.
   if (site === 'probe') runtime.options.probe = async () => { await gate.wait(); return { state: 'disconnected' }; };
   else {
     runtime.options.probe = async () => ({ state: 'disconnected' });

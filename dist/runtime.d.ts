@@ -41,7 +41,7 @@ export interface RuntimeOptions {
     /** Test seam; production defaults to 120 seconds, values above that are capped. */
     closeTimeoutMs?: number;
     reminderClock?: ReminderClock;
-    /** Explicit launcher-provided root must equal canonical cwd; no parent-root exception. */
+    /** Explicit launcher-provided board root: the canonical session cwd or one of its ancestors. */
     workspaceRoot?: string;
     /** Test seam for the operator environment. Production reads process.env once per runtime start. */
     reminderMinutesEnv?: () => string | undefined;

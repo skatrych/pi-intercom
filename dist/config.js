@@ -654,8 +654,12 @@ export class ConfigStore {
         if (!(await stat(root)).isDirectory())
             fail('workspaceRoot is not a directory');
         const current = await realpath(cwd);
-        if (path.relative(root, current) !== '')
-            fail('workspaceRoot must equal the session working directory; parent configs are forbidden');
+        // Same root-or-descendant relation `directory()` enforces, read in the other direction: the board
+        // root may be the session cwd or one of its ancestors. Every other relation (the cwd is above the
+        // root, a sibling, or on another volume) stays fail-closed.
+        const relative = path.relative(root, current);
+        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+            fail('workspaceRoot must be the session working directory or one of its ancestors; unrelated configs are forbidden');
         const store = new ConfigStore(root);
         await store.read(); // Explicit worker mode must never create a replacement coordinator.
         return store;

@@ -62,23 +62,51 @@ test('local config is used; malformed local config rejects without ancestor fall
   assert.equal(await readFile(local.file, 'utf8'), '{malformed local');
 });
 
-test('explicit parent roots reject before any config read, even with valid or malformed parent/local configs', async t => {
+test('explicit ancestor root is admitted: it binds the ancestor board and never the child config', async t => {
   const f = await fixture(t), parent = new ConfigStore(f.root);
   await parent.initialize('coordinator', 12345);
-  await mkdir(path.join(f.child, '.pi-intercom')); await writeFile(path.join(f.child, '.pi-intercom/config.json'), '{nested unrelated');
-  for (const malformed of [false, true]) {
-    if (malformed) await writeFile(parent.file, '{malformed parent');
-    const before = await readFile(parent.file, 'utf8');
-    const read = ConfigStore.prototype.read;
-    let configReads = 0;
-    ConfigStore.prototype.read = async function () { configReads++; return read.call(this); };
-    const { instance, events } = runtime(t, f.child, { workspaceRoot: f.root }, 'worker');
-    try { await assert.rejects(instance.start(), /must equal.*parent configs are forbidden/); }
-    finally { ConfigStore.prototype.read = read; }
-    assert.equal(configReads, 0); noResources(events);
-    assert.equal(await readFile(parent.file, 'utf8'), before);
-    assert.equal(await readFile(path.join(f.child, '.pi-intercom/config.json'), 'utf8'), '{nested unrelated');
-  }
+  await parent.configure('coordinator', { sessionId: 'worker', name: 'Worker', description: 'Scoped work', port: 23456, projectDirectory: 'nested/worker' });
+  const childMetadata = path.join(f.child, '.pi-intercom');
+  await mkdir(childMetadata); await writeFile(path.join(childMetadata, 'config.json'), '{nested unrelated');
+  const before = await readFile(parent.file, 'utf8');
+  const { instance, events } = runtime(t, f.child, { workspaceRoot: f.root }, 'worker');
+  await instance.start();
+  assert.equal(instance.store.root, await realpath(f.root));
+  assert.equal((await instance.state()).me.name, 'Worker');
+  assert.deepEqual(events.stores, [await realpath(f.root)]); assert.deepEqual(events.observers, [await realpath(f.root)]);
+  assert.deepEqual(events.listens, [23456]); assert.equal(events.sends[0].port, 12345); assert.equal(events.sends[0].message.kind, 'status');
+  assert.equal(await readFile(parent.file, 'utf8'), before);
+  assert.equal(await readFile(path.join(childMetadata, 'config.json'), 'utf8'), '{nested unrelated');
+  assert.deepEqual(await readdir(childMetadata), ['config.json']);
+});
+
+test('explicit ancestor board that is malformed rejects before any listener, write or child fallback', async t => {
+  const f = await fixture(t), parent = new ConfigStore(f.root);
+  await parent.initialize('coordinator', 12345);
+  await writeFile(parent.file, '{malformed parent');
+  const childMetadata = path.join(f.child, '.pi-intercom');
+  await mkdir(childMetadata); await writeFile(path.join(childMetadata, 'config.json'), '{nested unrelated');
+  const { instance, events } = runtime(t, f.child, { workspaceRoot: f.root }, 'worker');
+  await assert.rejects(instance.start());
+  noResources(events);
+  assert.equal(await readFile(parent.file, 'utf8'), '{malformed parent');
+  assert.equal(await readFile(path.join(childMetadata, 'config.json'), 'utf8'), '{nested unrelated');
+  assert.deepEqual(await readdir(childMetadata), ['config.json']);
+});
+
+test('explicit unrelated root still rejects before any config read, startup resource or write', async t => {
+  const f = await fixture(t), outside = new ConfigStore(f.outside);
+  await outside.initialize('outside-coordinator', 12345);
+  const before = await readFile(outside.file, 'utf8');
+  await new ConfigStore(f.child).initialize('local', 23456); // Must not become a fallback.
+  const read = ConfigStore.prototype.read;
+  let configReads = 0;
+  ConfigStore.prototype.read = async function () { configReads++; return read.call(this); };
+  const { instance, events } = runtime(t, f.child, { workspaceRoot: f.outside }, 'worker');
+  try { await assert.rejects(instance.start(), /one of its ancestors/); }
+  finally { ConfigStore.prototype.read = read; }
+  assert.equal(configReads, 0); noResources(events);
+  assert.equal(await readFile(outside.file, 'utf8'), before);
 });
 
 test('explicit same-cwd worker uses only its local root config', async t => {
@@ -132,7 +160,7 @@ test('explicit cwd symlink/junction outside root rejects; canonical root aliases
   const f = await fixture(t); await new ConfigStore(f.root).initialize('coordinator', 12345);
   const escape = path.join(f.root, 'escape');
   await symlink(f.outside, escape, process.platform === 'win32' ? 'junction' : 'dir');
-  const bad = runtime(t, escape, { workspaceRoot: f.root }); await assert.rejects(bad.instance.start(), /must equal/); noResources(bad.events);
+  const bad = runtime(t, escape, { workspaceRoot: f.root }); await assert.rejects(bad.instance.start(), /one of its ancestors/); noResources(bad.events);
   const alias = path.join(f.base, 'alias'); await symlink(f.root, alias, process.platform === 'win32' ? 'junction' : 'dir');
   assert.equal((await ConfigStore.workspace(f.root, alias)).root, await realpath(f.root));
   const internal = path.join(f.outside, 'state'); await mkdir(internal);
@@ -246,30 +274,49 @@ test('a transaction release never removes a same-token lock redirected outside t
   assert.ok(existsSync(path.join(outsideLock, 'owner.json')), 'still untouched after the refused write');
 });
 
-test('custom store cannot redirect validated root; create/resume only launch same-cwd workers', async t => {
+test('custom store cannot redirect validated root; create/resume launch root and descendant workers', async t => {
   const f = await fixture(t); await new ConfigStore(f.root).initialize('local', 12345);
   const bad = runtime(t, f.root, { store: () => new ConfigStore(f.outside) });
   await assert.rejects(bad.instance.start(), /retain validated session root/);
   assert.deepEqual(bad.events.observers, []); assert.deepEqual(bad.events.listens, []);
+  await symlink(f.outside, path.join(f.root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
   let probes = 0;
   const good = runtime(t, f.root, { probe: async () => { probes++; return { state: 'disconnected', checkedAt: null, reason: 'refused', sessionId: 'w' }; } });
   await good.instance.start();
-  await assert.rejects(good.instance.tool('create_worker', { projectDirectory: 'nested/worker' }), /must equal.*forbidden parent config/);
-  assert.equal(good.events.launches.length, 0);
-  await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'nested/worker' });
-  await good.instance.tool('stop_reminders', {});
-  const before = await good.instance.store.read();
-  await assert.rejects(good.instance.tool('resume_worker', { to: 'Worker', confirmClosed: true }), /must equal.*forbidden parent config/);
-  assert.equal(probes, 0); assert.equal(good.events.launches.length, 0);
-  assert.equal(good.instance.resumeFences.size, 0); assert.equal(good.instance.reminders.cancel, undefined);
-  assert.deepEqual(await good.instance.store.read(), before);
-  assert.equal((await good.instance.tool('list', {})).agents.find(a => a.sessionId === 'w').projectDirectory, 'nested/worker');
+  // Descendant launches are admitted: the board root stays the workspace root, cwd moves below it.
   await good.instance.tool('create_worker', { projectDirectory: '.' });
   assert.equal(good.events.launches[0].workspaceRoot, await realpath(f.root));
   assert.equal(good.events.launches[0].cwd, await realpath(f.root));
-  await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: '.' });
+  await good.instance.tool('create_worker', { projectDirectory: 'nested/worker' });
+  assert.equal(good.events.launches[1].workspaceRoot, await realpath(f.root));
+  assert.equal(good.events.launches[1].cwd, path.join(await realpath(f.root), 'nested', 'worker'));
+  // Anything that resolves outside the root is still refused, before any launch or reminder arming.
+  await assert.rejects(good.instance.tool('create_worker', { projectDirectory: '../workspace-other' }), /descendant/);
+  await assert.rejects(good.instance.tool('create_worker', { projectDirectory: 'escape' }), /descendant/);
+  await assert.rejects(good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'escape' }), /descendant/);
+  assert.equal(good.events.launches.length, 2);
+  await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'nested/worker' });
+  await good.instance.tool('stop_reminders', {});
+  const before = await good.instance.store.read();
+  assert.equal(good.instance.reminders.cancel, undefined);
+  assert.deepEqual(await good.instance.store.read(), before);
+  assert.equal((await good.instance.tool('list', {})).agents.find(a => a.sessionId === 'w').projectDirectory, 'nested/worker');
+  // A saved directory that has become an escaping link is refused before the fence, the probe or a launch.
+  await good.instance.store.update('local', c => { c.agents.find(a => a.name === 'Worker').projectDirectory = 'escape'; });
+  await assert.rejects(good.instance.tool('resume_worker', { to: 'Worker', confirmClosed: true }), /descendant/);
+  assert.equal(probes, 0); assert.equal(good.events.launches.length, 2);
+  assert.equal(good.instance.resumeFences.size, 0);
+  assert.equal((await good.instance.store.read()).agents.find(a => a.name === 'Worker').projectDirectory, 'escape');
+  // The saved descendant is resumed as itself, under the same board root.
+  await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'nested/worker' });
   await good.instance.tool('resume_worker', { to: 'Worker', confirmClosed: true });
   assert.equal(probes, 1);
-  assert.equal(good.events.launches[1].workspaceRoot, await realpath(f.root));
-  assert.equal(good.events.launches[1].cwd, await realpath(f.root));
+  assert.equal(good.events.launches[2].workspaceRoot, await realpath(f.root));
+  assert.equal(good.events.launches[2].cwd, path.join(await realpath(f.root), 'nested', 'worker'));
+  // A root registration keeps launching at the root.
+  await good.instance.tool('configure_worker', { sessionId: 'v', name: 'Rooted', description: 'Work', port: 23457, projectDirectory: '.' });
+  await good.instance.tool('resume_worker', { to: 'Rooted', confirmClosed: true });
+  assert.equal(probes, 2);
+  assert.equal(good.events.launches[3].workspaceRoot, await realpath(f.root));
+  assert.equal(good.events.launches[3].cwd, await realpath(f.root));
 });
