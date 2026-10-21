@@ -12,8 +12,8 @@
   "bugs": {
     "url": "https://github.com/mbundgaard/pi-intercom/issues"
   },
-  "version": "0.9.0",
-  "description": "A coordinator-led workspace for Pi. Delegate to workers with separate contexts, evaluate their reports, and keep the main conversation focused—with the team visible alongside it.",
+  "version": "0.9.1",
+  "description": "A coordinator-led workspace for Pi. Delegate to workers with separate contexts, evaluate their reports, and keep the main conversation focused\u2014with the team visible alongside it.",
   "type": "module",
   "keywords": [
     "pi-package"
