@@ -45,6 +45,20 @@ empty/malformed extra boards, is the **board-isolation gate, not traceability**.
 or wrong board, or an outside/aliased root; do not discover above projects home or create a
 private child board. Drop the claim path and unrelated-file namespace scans from adoption.
 
+### Cheap identity and port checks
+
+1. A session id already configured as another entry refuses; adoption never promotes/rebinds it.
+2. Keep the existing bounded loopback identity probe of this runtime's bound port. It must answer
+   for this native session id; a live different coordinator/identity at that port, or an
+   unverifiable own endpoint, refuses. Successful binding plus this check establishes port use
+   without persisted headers or session-store evidence. Configured-entry port collisions also refuse.
+3. The configured **old** pair is separately probed before the question and under the lock.
+   If that coordinator still answers, refuse replacement. Only this old-endpoint check permits
+   disconnected/unknown to proceed to the human's yes; the new endpoint must verify itself.
+
+Recheck these cheap guards with the config/identity snapshot under the lock before publication.
+No probe or disconnected observation certifies process termination.
+
 ## Branches and failures
 
 | Current config state | Behavior |

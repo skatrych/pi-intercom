@@ -23,7 +23,7 @@ claim edits, no new probes and no live retest. Implementation is a subsequent as
 | `assertGitSafe`, `blockers`, `statusEntries`, `unresolvedOperation`, `protectedSurface`, `inspectBoardNamespace`, Git policy/helpers and `reconcile` Git precheck | Delete; remove the recovery flow itself. No protected-file dirty exception or whole-board unknown-file allowlist |
 | `survey`, `pathSnapshot`, `assertPaths`, `assertSnapshot` | Retain config/path/board-count and live runtime identity checks only. Remove HEAD/newest-claim/claim-worktree bindings and claim-path type checks. Git-only or obsolete-claim changes cannot stale a preview |
 | `decide`, `bootstrap`, `declare`, `humanAdoptionDecision`, `transaction`, `reconcile`, prompt builders and phase seams | Collapse to initialization, already-current/load-only, collision/refusal, or replacement. Delete declaration, prepared intent, renewal, finalization and generated-record phases/prompts/results |
-| `resolveIdentity`, `AdoptionOptions`, `src/index.ts` adoption wiring | Use captured native session id and bound endpoint, revalidated against the same current runtime/context. Remove adoption's persisted-header/session-file/per-cwd `SessionManager.list` requirement, self-health evidence probe and ordinary-turn-to-persist preamble. Do not remove session APIs still needed by worker resume |
+| `resolveIdentity`, `AdoptionOptions`, `src/index.ts` adoption wiring | Use captured native session id and bound endpoint, revalidated against the same current runtime/context. Remove adoption's persisted-header/session-file/per-cwd `SessionManager.list` requirement and ordinary-turn-to-persist preamble; retain the existing bounded bound-port identity probe as a cheap port-in-use check. Do not remove session APIs still needed by worker resume |
 | `src/config.ts:update`, `ConfigGuard` | Remove dynamic adoption-proof imports, legacy-absence discovery and claim-specific admission/final-publication guard phases. Retain locked current-coordinator permission, root/lock ownership, caller/lifecycle guards, config validation and final publication checks described below |
 | `src/runtime.ts` authority state and wiring | Remove `readyClaimBytes`, `bootEvidenceReady`, claim readiness state, `authorityEpoch`, `actionEpoch`/`assertActionEpoch`, `callbackEpoch`, claim-related `configGuard` phases, and `assertActionAuthority`/`assertActionReady`/`openActionEpoch` authority machinery. Replace their permission effects with ordinary current-config checks, not renamed proof epochs |
 | `src/adoption-ui.ts`, `src/index.ts` bridge | Retain captured-context routing and the existing No-first native selection. Shorten question/effect text; no evidence UI, new widget, input field or alternate entry path |
@@ -39,8 +39,10 @@ Keep current safe config/lock/temp path checks, not a directory-wide artifact sc
 
 1. Check existing launch-role, interactive/trusted captured context, idle/concurrent-request and
    runtime lifecycle validity. Take id from this runtime/native session context, port from its
-   actually bound endpoint, never arguments or a session-history search. Endpoint binding failure
-   stops. An unconfigured Orchestrator may adopt directly: no registration/configure/reload
+   actually bound endpoint, never arguments or a session-history search. Binding failure stops;
+   keep the existing bounded probe of that port and require this native session identity. A live
+   different coordinator/identity or unverifiable own endpoint refuses. An unconfigured
+   Orchestrator may adopt directly: no registration/configure/reload
    prerequisite. Ordinary workers' registration protocol is not redesigned.
 2. Count boards, read strict config and freeze its raw bytes plus old/new pair for this invocation.
    No board at projects home gets one initialization question; child/no-board stops. An already
@@ -53,7 +55,8 @@ Keep current safe config/lock/temp path checks, not a directory-wide artifact sc
    yes authorizes replacement only. No typed/ended attestation or persisted answer.
 4. On yes, acquire the existing all-writer transaction lock. Re-read strict config and compare
    the original raw bytes, current identity/endpoint and path/board-count snapshot. Recheck
-   session/port collisions and probe old pair again. Recheck after the probe's await. On drift,
+   session/port collisions and bound-port identity, and probe old pair again. Recheck after the
+   probe's await. On drift,
    stop with stale preview; do not merge concurrent roster updates or ask again in this run.
 5. Call existing `replaceCoordinatorEntry` for the lossless two-token patch and guarded atomic
    publish. Keep the shared process queue + filesystem lock across recheck/probe/swap; all
@@ -127,7 +130,7 @@ update the count after removing obsolete cases and duplicate evidence phases.
 
 | Existing surface | What shrinks / what stays |
 |---|---|
-| `tests/adoption.test.mjs`, `fixtures/adoption-runner.mjs`, `adoption-cases.mjs`, `adoption-fixture.mjs`, `adoption-support.mjs` | Remove claim builders, commit hooks, evidence fields/assertions, prepared/renew/finalize variants and record-only faults. Keep direct fresh-session success, role/context/idle checks, collisions, old probe/reconnect, config formats/duplicate keys, two-token preservation, jobs/history untouched, lock failures and publish/promotion failures. Unpersisted/wrong-header/store-missing-id become successful native-identity cases, not refusals |
+| `tests/adoption.test.mjs`, `fixtures/adoption-runner.mjs`, `adoption-cases.mjs`, `adoption-fixture.mjs`, `adoption-support.mjs` | Remove claim builders, commit hooks, evidence fields/assertions, prepared/renew/finalize variants and record-only faults. Keep direct fresh-session success, role/context/idle checks, collisions, old probe/reconnect, config formats/duplicate keys, two-token preservation, jobs/history untouched, lock failures and publish/promotion failures. Unpersisted/wrong-header/store-missing-id become successful native-identity cases, not refusals. Keep `new-health-mismatch` as a cheap bound-port/foreign-identity refusal |
 | `tests/adoption-contract.test.mjs` | Replace claim-gate damage with obsolete-claim irrelevance and current-config mismatch/corruption controls. Delete failed-active-commit recovery, UUID/hash/timestamp evidence and claim-symlink-refusal expectations. Keep path drift, nested-board mutex, outer queue, queued old update, promotion load-only retry and concurrent log preservation |
 | `tests/adoption-ux.test.mjs` AC1–AC6 | First-board still one question, no generated evidence. Existing self entry no longer asks declaration. Different old claim id has no display/authority role. Remove evidence-origin/ended wording/prepared renewal/finalization cases. Keep visible old/new config pairs, one question, No/dismiss/capture/host failures, fresh invocation, stale yes and live-old precheck |
 | `tests/adoption-ux.test.mjs` AC7–AC9 | Replace strict adoption/recovery and staged/tracked/protected/unresolved refusal/diagnostic cases with positive zero-Git influence cases. Remove Git path-category diagnostics/schema-extreme evidence tests. Keep actual config-byte drift and actual unsafe config/board paths as independent negatives |
@@ -153,7 +156,8 @@ in this matrix was run for this docs change.
   byte-identical. Non-obstructing extra board artifacts are not an allowlist refusal. Legacy
   claim variation alone, including changes while UI is open, never changes the result or bytes.
 - Negative controls without a repository: actual config drift/corruption, session/port collision,
-  reconnecting old endpoint, unsafe/changed root/config/lock, second/wrong/empty board and changed
+  live different identity at the new port, unverifiable own port, reconnecting old endpoint,
+  unsafe/changed root/config/lock, second/wrong/empty board and changed
   native session/endpoint. Refuse before replacement; no second question in the invocation.
 - At temp close, retry, send/launch observation, queued report before-save/after-save and reminder/
   handoff callback boundaries, replace the actual config pair. Old process cannot perform the
