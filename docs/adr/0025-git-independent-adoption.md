@@ -33,10 +33,10 @@ separate action, not an analysis prerequisite or proof of AC3.
 
 ## Authority and provenance
 
-The [complete issue #25](https://github.com/skatrych/pi-intercom/issues/25) body and **all 11
+The [complete issue #25](https://github.com/skatrych/pi-intercom/issues/25) body and **all 10
 comments returned by the paginated API** were read on 2026-10-21, through
 [lease comment 6324633161](https://github.com/skatrych/pi-intercom/issues/25#issuecomment-6324633161).
-The human ruling is unambiguous:
+The issue body is separate, not an eleventh comment. The human ruling is unambiguous:
 
 > Git tree cleanliness has ZERO influence on adoption: no clean-worktree halt, no dirty refusal
 > — not for untracked installs, not for anything else.
@@ -118,7 +118,8 @@ and existing all-writer config lock. It is board data, not a Git repository; tra
 it is not a prerequisite. Do not edit `.gitignore` or move human files to enable adoption.
 A fresh board starts in a new config schema (proposed version 2) with a fixed authority storage
 id/format/genesis binding. A migrated board records that same binding. Unsupported versions
-must refuse. The exact schema and bounded sizes need review in the first implementation patch.
+must refuse. The exact schema and the concrete capacity/cost contract below need review in the
+first implementation patch; neither is an approved implementation decision.
 
 Bootstrap must also have a recoverable ordering: durably publish a bootstrap-prepared ledger
 intent binding the exact to-be-created config before publishing that config, then publish active
@@ -153,7 +154,13 @@ A later human archival action is not a readiness gate and is not designed here.
 This must be specified/tested as a persistence protocol, not “write JSON and trust it”:
 
 1. Under the existing shared lock, re-read exact preview/head/config, canonical no-follow paths,
-   role/trust/session/endpoint/epoch and collisions; re-probe the selected old endpoint.
+   role/trust/session/endpoint/epoch and collisions; re-probe the selected old endpoint. Before
+   relying on any newly created persistent directory, sync that directory and its entry in its
+   parent: create `.pi-intercom`, sync it and projects home; create `authority`, sync it and
+   `.pi-intercom`; do the same for any required descendant storage directories. Establish these
+   barriers from the already-existing canonical projects home downwards. Syncing contents of a
+   child is not a substitute for durably publishing the child's name in its parent. Never create
+   or repair the projects home itself as an adoption side effect.
 2. Write one canonical object to an exclusively created mode-0600 temp; fully write, sync and
    close; verify digest/bytes/schema. Publish to its immutable name with a no-replace operation,
    then durably sync its directory. An existing name is usable only if its bytes match exactly.
@@ -161,10 +168,38 @@ This must be specified/tested as a persistence protocol, not “write JSON and t
    Write/sync/close a new head temp, perform guarded atomic replace and sync its directory.
    Only a fully verified, durably published head constitutes a ledger commit. Re-read proof
    and config before proceeding. There is no project-Git hook to bypass.
-4. Preserve the current config token-patch/publication guards. Prepared ledger commit precedes
-   coordinator replacement; active ledger commit follows it; local promotion and a final fresh
-   proof precede opening readiness. Ordinary config writes retain admission and final-rename
-   authority proofs under the same lock, including every platform retry.
+4. A **durable prepared head precedes every config publication it authorizes**. For config
+   initialization, fully write/sync/close the temp, perform guarded no-replace `link` to
+   `config.json`, then sync `.pi-intercom` to durably publish that name. For a format upgrade or
+   coordinator replacement, fully write/sync/close the config temp, perform guarded atomic
+   `rename`, then sync `.pi-intercom` **after that successful rename**. If migration publishes an
+   upgraded-old-pair config and then a new-pair config, each publication has its own parent-sync
+   barrier. Directory-creation barriers in step 1 also apply to bootstrap. The base's existing
+   `initialize`/`publish` methods do not supply these parent-sync barriers; preserving their
+   guards alone is insufficient. Use this durable-publication primitive for ordinary config
+   writes too, retaining admission/final-rename authority proofs and every platform retry guard.
+5. Only after the expected config bytes, file sync and **config parent-directory sync** all
+   succeed may an active object/head be published and synced using steps 2–3. Recheck paths,
+   pair, epoch and fresh evidence; then promote locally and open readiness. Neither an active
+   head nor success/readiness may overtake any required config or ancestor-directory barrier.
+
+Failure after a required directory `mkdir` or config `link`/`rename`, but before its required
+sync, leaves a visible entry whose durability is **outcome-unknown**. Stop with the exact last operation/barrier and persisted
+phase; readiness stays closed, no active head is published, no automatic retry/rollback/cleanup
+is authorized. A failure before submitting publication is distinguishable from publication
+succeeded-but-sync-failed; neither is reported as durable success. A pending prepared record
+can therefore coexist after restart with absent, before, intermediate or after config bytes.
+Explicit same-command recovery classifies those exact bytes under the lock, re-establishes
+required ancestor entries and syncs the selected config file and parent before completing an
+active head. Missing config is recoverable by initialization only for an anchored bootstrap;
+non-bootstrap config loss is an integrity stop, not permission to reconstruct it. Visibility/readback alone never proves the missing barrier succeeded. If active
+head publication itself was submitted before its sync failed, authority remains outcome-unknown
+and closed pending explicit proof/recovery; no second pair replacement is inferred. Before
+opening a local readiness epoch at boot or promotion, acquire the shared lock and establish
+config, ledger-file and directory barriers for the exact selected evidence again; another
+reader cannot infer a prior sync succeeded just from a visible active head. This barrier pass
+publishes no new content and adds no question; status remains classification-only/read-only.
+Final effects continue fresh evidence checks against that locally admitted head/epoch.
 
 An object visible without a corresponding published head is **not** authority. Unrecognized
 ledger-record candidates, partial publications, a corrupt/missing head, gaps/forks, or a head
@@ -175,9 +210,11 @@ interrupted publication can be classified for explicit same-command recovery; no
 head repair, deletion or replay.
 Temps/objects left after uncertainty stay available for diagnosis and cannot approve action.
 Synchronizing a file alone does not establish directory-entry durability. Filesystem/platform
-support for no-replace publication, directory sync, rename and the crash model is an explicit
-implementation gate; an unsupported durability primitive stops as storage unavailable, not
-success. Do not claim Windows/power-loss proof from a mocked rename or Linux process-kill test.
+support for no-replace publication, config `link`/`rename`, **all config/ledger parent and newly
+created ancestor-directory syncs**, and the crash model is an explicit implementation gate.
+Unsupported primitives stop as storage unavailable, not success; late errors also report which
+visible entries have durability unknown. Do not claim Windows/power-loss proof from a mocked
+rename or Linux process-kill test.
 
 Fresh proofs check published head, exact object bytes/digests, linked prepared/prior records,
 board root/storage binding and current coordinator pair on **every existing effect boundary**;
@@ -185,6 +222,46 @@ no cached “ready” bit, mtime or once-observed hash substitutes for that proo
 that current config bytes always equal the historical adoption hash after ordinary authorized
 roster updates: exact before/after hashes bind the transition/recovery, while live authority
 checks preserve the existing pair/local-promotion semantics.
+
+### Bounded history and cost — proposed supported envelope
+
+Retain full linked-record validation and a reserved-record-name census, but bound the lifetime
+store rather than introduce checkpoints, cached proof delegation or pruning machinery. The
+census detects surviving newer objects/forks/orphans despite head rewind; linked-byte validation
+prevents a malformed/missing predecessor from being silently treated as an older approval. This
+is a conservative all-linked-history integrity contract, **not** something AC3 alone requires,
+nor a claim that newest-active/prepared-only proof is impossible. Its added lifetime cost must
+be accepted and measured before implementation rollout, not inferred from removing Git.
+
+Proposed supported limits: **256 reserved record objects including pending/orphan candidates,
+64 KiB per object, 4 MiB aggregate object bytes, 4 KiB head**. Calculate the operation's complete
+worst-case append budget before the question and recheck under the lock: two objects for ordinary
+adoption/bootstrap/renewal, up to three for import plus its selected operation, one for finalization
+(or reuse its exact already-published immutable candidate). After yes, the normal prepared
+intent implicitly reserves its deterministically derived active-completion room; no separate
+reservation object/field or pre-consent write is needed. No still writes nothing.
+Failed attempts do not permit hidden extra objects. The schema/append table must stay within
+these reservations or return to review.
+At capacity, a valid active board still supports status, write-free promotion and ordinary
+coordinator actions; **new append-requiring operations** stop before effects as explicit capacity
+exhaustion. Prepared-after active completion retains its reserved room. A prepared-before
+renewal needs a fresh two-object budget because it refreshes prepared authority; repeated
+crashes/renewals can exhaust finite capacity and must take the same human capacity route,
+not reuse an old yes or silently skip renewal. Oversized legacy import or ledger evidence is
+not truncated or called absent. Report used/limit/needed capacity and route
+to the human for a reviewed higher-limit release or different reviewed recovery policy; no
+supported automatic deletion, reset, archive-as-authority or reverse migration exists here.
+The count permits at most 128 ordinary two-object transitions including bootstrap (fewer with
+imports/orphans); that finite operating lifetime is an explicit human capacity decision.
+
+Proof work is capped at one bounded census, 256 object reads/validations and 4 MiB object input
+per proof (plus bounded head/config reads), with no recursion into project or unrelated files.
+Require first-read and warm evidence at 2 and 256 objects and both byte/count limits, on each
+supported platform: proposed per-proof p95 ≤25 ms, p99 ≤50 ms, no observed sample >100 ms;
+complete status/update/report paths must also show added authority-check p95 ≤200 ms and p99
+≤400 ms at their actual guard counts. The plan specifies sampling, comparison and refusal
+routes. These are **unmeasured proposed acceptance budgets**, not performance claims. Exceeding
+a gate blocks rollout for review; never skip validation or silently raise limits to obtain green.
 
 This remains a cooperating local-filesystem contract, not a distributed or hostile-same-user
 fence. Hash links and a head detect corruption, missing referenced records and unilateral head
@@ -287,7 +364,10 @@ of this ADR must not be described as proof that this legacy availability conflic
 
 At swactory merge `a65c16c`, `roles/orchestrator/AGENTS.role.md` says “declaration must be committed”
 and “invalid/prepared/dirty evidence ... stop action.” Its adoption skill step 2/5/6 and the fork's
-README/reference describe Git commits/history. A reviewed, human-authorized instruction/source
+README/reference describe Git commits/history. Swactory `docs/artifact-atlas.md` §§1–2 also names
+the root claim as the tenure artifact and its tooling-owned path-scoped commits; include that
+living lookup surface in the prospective alignment inventory, preserving historical ADR
+provenance rather than rewriting history. A reviewed, human-authorized instruction/source
 change must distinguish **invalid authoritative ledger bytes** from **Git dirt** and use durable
 ledger evidence/ids. This ADR contains proposed semantics, not an edit of live instructions,
 claims or config. Keep worker lease cleanliness/handover/closure policy unchanged: that is
