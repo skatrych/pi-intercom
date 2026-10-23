@@ -275,6 +275,10 @@ $env:PI_INTERCOM_REMINDER_MINUTES = "2"; pi
 - Scope is the coordinator Pi process environment only. This option has **no `settings.json` support and no project/global precedence**: Pi 0.84.4 documents no extension-key settings API, so Intercom does not read Pi settings for it. Worker processes and shared workspace configuration are unaffected, and nothing watches or re-reads the value while a runtime runs.
 - Startup, Pi `/reload`, and session replacement each read it again for the new runtime; a `/reload` only re-reads the environment that process already has. A shell `export` executed as a child tool cannot change the already-running coordinator, so restart Pi with the new inherited environment to change an operator-provided interval. The new runtime still starts disarmed.
 
+## Non-pi workers (experimental)
+
+[`packages/intercom-bridge`](packages/intercom-bridge/README.md) runs Cursor Agent CLI or Google Antigravity CLI (`agy`) as an ordinary board worker over the unchanged wire protocol. The extension itself is unchanged.
+
 ## Config and wire contracts
 
 Shared, source-controlled file: `<root>/.pi-intercom/config.json`. Do not ignore it or split IDs/ports into runtime config. Example **schema only** (not automatically installed placeholder data):
