@@ -2,7 +2,7 @@
 
 Runs **Cursor Agent CLI** (`cursor-agent`) or **Google Antigravity CLI** (`agy`) as a worker on a
 pi-intercom board, using the unchanged V1 wire protocol. Design:
-[proposed solution](../../docs/issues/non-pi-agent-bridge-proposed-solution.md).
+[proposed solution](../../docs/issues/34-proposed-solution.md).
 
 ```bash
 npm run build && npx tsc -p packages/intercom-bridge     # from the repo root
@@ -20,3 +20,6 @@ Options: `--bin <path>`, `--turn-timeout <s>` (default 1800), `--state-dir <dir>
 `~/.pi-intercom-bridge`, or `PI_INTERCOM_BRIDGE_STATE`). The CLI must already be logged in
 (`cursor-agent login` / `agy`). Tests use a fake CLI: `npm run test:bridge` at the root.
 Real smoke run: `node packages/intercom-bridge/scripts/smoke.mjs cursor`.
+Live Pi coordinator run (tmux, OpenRouter key file read into the pi process env only):
+`OPENROUTER_KEY_FILE=<file> node packages/intercom-bridge/scripts/live-pi-smoke.mjs <model> <log>`.
+Sanitized logs are in [`smoke/`](smoke/).
