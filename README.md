@@ -294,6 +294,10 @@ $env:PI_INTERCOM_REMINDER_FILE = "C:\absolute\path\reminder.txt"; pi
 - **Failure:** a selected value that is invalid, unreadable, oversize, or not acceptable text disables **reminder delivery only** for that runtime, and emits this single fixed notice: `Intercom reminder configuration invalid; reminders unavailable until corrected and runtime reloaded.` Intercom never silently falls back to the default text, reuses earlier text, retries on a timer, or passes an error to the model. Messaging, adoption, readiness and read-only status keep working. Correct the file or selector, then reload the coordinator or restart Pi.
 - **Privacy and trust:** the path, raw environment value, file contents, raw filesystem error and private reasoning are never logged or shown in the notice. The configured text is sent to the model as ordinary user input on each delivery, so it must contain no secrets. It is trusted local prompt input, not a sandbox: whoever can replace the selected file controls the text. Standalone `pi` users choose it directly; the selector grants no reminder, workflow or tool authority.
 
+## Non-pi workers (experimental)
+
+[`packages/intercom-bridge`](packages/intercom-bridge/README.md) runs Cursor Agent CLI or Google Antigravity CLI (`agy`) as an ordinary board worker over the unchanged wire protocol. The extension itself is unchanged.
+
 ## Config and wire contracts
 
 Shared, source-controlled file: `<root>/.pi-intercom/config.json`. Do not ignore it or split IDs/ports into runtime config. Example **schema only** (not automatically installed placeholder data):
