@@ -56,7 +56,8 @@
     "test:adoption-dialog": "node scripts/adoption-dialog-host-check.mjs",
     "test:host": "node --test tests/pi-cancellation-probe.test.mjs",
     "test:package": "node --test tests/packaged-monitor.test.mjs",
-    "check:package": "npm run build && npm pack --dry-run --ignore-scripts && npm run test:package"
+    "check:package": "npm run build && npm pack --dry-run --ignore-scripts && npm run test:package",
+    "test:bridge": "npm run build && tsc -p packages/intercom-bridge && node --test packages/intercom-bridge/tests/adapters.test.mjs packages/intercom-bridge/tests/bridge.test.mjs"
   },
   "dependencies": {
     "pi-intercom-tui": "npm:@earendil-works/pi-tui@0.84.4"

@@ -1,0 +1,15 @@
+{
+  "name": "@comput/pi-intercom-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runs non-pi coding agent CLIs (Cursor Agent, Google Antigravity) as workers on a pi-intercom board over the unchanged V1 wire protocol.",
+  "type": "module",
+  "bin": { "pi-intercom-bridge": "dist/cli.js" },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', {recursive:true, force:true})\" && tsc -p .",
+    "test": "npm run build && node --test tests/adapters.test.mjs tests/bridge.test.mjs"
+  },
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.9.3" }
+}
