@@ -147,3 +147,20 @@ test('CLI process: SIGTERM aborts the running turn, reports blocked, and exits 0
   assert.equal(code, 0);
   await until(() => ctx.messages.find(m => m.includes('Report: blocked') && m.includes('bridge shutting down')), 'shutdown report');
 });
+
+test('CLI spawn: reports a started detached worker, and fails loudly when the worker dies at startup', { skip }, async t => {
+  const ctx = await board(t);
+  const cli = path.join(here, '..', 'dist', 'cli.js');
+  const run = args => new Promise(resolve => { const c = spawn(process.execPath, [cli, ...args]); let out = '', err = ''; c.stdout.on('data', d => { out += d; }); c.stderr.on('data', d => { err += d; }); c.on('exit', code => resolve({ code, out, err })); });
+  const ok = await run(['spawn', '--agent', 'cursor', '--root', ctx.root, '--bin', FAKE, '--state-dir', path.join(ctx.root, 'state')]);
+  assert.equal(ok.code, 0);
+  const info = JSON.parse(ok.out);
+  assert.ok(info.port > 0 && info.pid > 0);
+  await until(() => ctx.messages.find(m => m.includes(info.sessionId)), 'spawned registration');
+  process.kill(info.pid, 'SIGTERM');
+  const empty = await mkdtemp(path.join(tmpdir(), 'intercom-bridge-noboard-'));
+  t.after(() => rm(empty, { recursive: true, force: true }));
+  const bad = await run(['spawn', '--agent', 'cursor', '--root', empty, '--state-dir', path.join(empty, 'state')]);
+  assert.notEqual(bad.code, 0);
+  assert.match(bad.err, /exited during startup[\s\S]*board config unreadable/);
+});

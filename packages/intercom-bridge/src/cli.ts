@@ -4,7 +4,7 @@
  * pi-intercom-bridge spawn --agent cursor|agy [options]   detached worker; prints {sessionId,pid,log} JSON
  */
 import { spawn } from 'node:child_process';
-import { mkdirSync, openSync } from 'node:fs';
+import { mkdirSync, openSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -41,9 +41,24 @@ async function main(argv: string[]) {
     const fd = openSync(log, 'a');
     const rest = argv.slice(1).filter((a, i, all) => a !== '--session' && all[i - 1] !== '--session' && !a.startsWith('--session='));
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'run', ...rest, '--session', sessionId, '--root', root, '--state-dir', stateDir],
-      { detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
-    child.unref();
-    process.stdout.write(JSON.stringify({ sessionId, pid: child.pid, log }) + '\n');
+      { detached: true, stdio: ['ignore', 'pipe', fd], windowsHide: true });
+    // Report only a worker that actually started: wait for its start line, or surface an early exit.
+    const started = await new Promise<{ port: number } | Error>(resolve => {
+      let out = '';
+      const timer = setTimeout(() => resolve(new Error('worker did not report startup within 15 s')), 15_000);
+      child.stdout!.setEncoding('utf8');
+      child.stdout!.on('data', (chunk: string) => {
+        out += chunk; const line = out.split('\n')[0];
+        if (out.includes('\n')) { clearTimeout(timer); try { resolve(JSON.parse(line)); } catch { resolve(new Error(`unexpected worker output: ${line.slice(0, 200)}`)); } }
+      });
+      child.once('exit', code => { clearTimeout(timer); resolve(new Error(`worker exited during startup (code ${code})`)); });
+    });
+    child.stdout!.destroy(); child.unref();
+    if (started instanceof Error) {
+      const tail = readFileSync(log, 'utf8').trim().split('\n').slice(-3).join('\n');
+      throw new Error(`${started.message}; see ${log}${tail ? `\n${tail}` : ''}`);
+    }
+    process.stdout.write(JSON.stringify({ sessionId, pid: child.pid, port: started.port, log }) + '\n');
     return;
   }
   const bridge = new Bridge({ adapter: agent, root, cwd: values.cwd && path.resolve(values.cwd), sessionId: values.session, bin: values.bin,

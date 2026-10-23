@@ -1,6 +1,6 @@
 /**
  * Per-CLI adapters: how to invoke one headless turn and how to read its NDJSON output.
- * Flags are taken from the vendors' CLI references (see docs/issues/non-pi-agent-bridge-*.md).
+ * Flags are taken from the vendors' CLI references (see docs/issues/34-*.md).
  */
 export interface TurnOptions {
   prompt: string;
