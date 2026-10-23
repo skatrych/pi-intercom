@@ -1,8 +1,9 @@
-# Issue #25: Minimal adoption removal plan
+# #25 — Implementation Plan
 
 ## Decision and scope
 
-Implement [ADR 0025](0025-git-independent-adoption.md): **the coordinator config entry is the
+Implement the [Proposed Solution](25-proposed-solution.md) and
+[ADR 0025](../adr/0025-git-independent-adoption.md): **the coordinator config entry is the
 whole authority; adoption replaces its `sessionId` and `port` after one native yes/no.** Remove
 Git/claim/proof machinery without adding another persistence layer, registration or migration.
 The human's [simple-and-stupid ruling](https://github.com/skatrych/pi-intercom/issues/25#issuecomment-6325707173)
@@ -11,7 +12,42 @@ supersedes the earlier ledger design and its review-correction tasks.
 Status: **docs-only, awaiting mandatory independent review of the exact delivered SHA**.
 Source locators are at `main@c6e414f22e09c7a9b50f1331eddd31b0f0e35d66`; recheck against the
 implementation base before coding. This PR authorizes no runtime, board, installed-policy or
-claim edits, no new probes and no live retest. Implementation is a subsequent assignment.
+claim edits, no new probes and no live retest. Implementation is a subsequent assignment after
+independent review and human design approval/merge. Earlier approval covers the old snapshot,
+not this presentation revision.
+
+## Operational contract
+
+Keep the sole human entry path: role-local `/intercom-adopt` → `Intercom.adoptCoordinator`.
+No model tool, HTTP writer, second command, caller-provided identity/port or confirmation flag.
+Capture the native session id and actually bound port; verify that port with the existing bounded
+loopback identity probe. No adoption registration, persisted-session proof, session-store listing
+or evidence record. Show the projects-home board, configured old
+pair, actual new pair and replacement effect in the existing native No-first question.
+No/Esc/dismiss changes nothing. No typed wording, termination attestation, UUID, recorded answer,
+prepared-intent, renewal or finalization question.
+
+| Current config state | Behavior |
+|---|---|
+| No board, cwd is projects home | One initialization yes/no; existing atomic no-replace config creation, then load responsibility; no declaration record |
+| No board in a child cwd | Stop; do not create a board |
+| Coordinator pair already equals this runtime pair | Already authorized by config; no declaration/question/write; load responsibility if needed |
+| Same session id but different endpoint port | Identity mismatch; do not silently rebind it |
+| This session id is a configured worker | Session collision; no worker promotion/removal/rebind |
+| Different coordinator, fresh unconfigured session and unused port | One adoption yes/no, locked recheck/probe, one atomic pair replacement |
+| Invalid/unreadable config, unsafe path, foreign lock or stale preview | Stop; no repair, lock stealing or stale-answer reuse |
+
+`countBoards` counts `.pi-intercom` directories from cwd to projects home, including empty or
+malformed extra boards. It is board isolation, not traceability. Refuse second/wrong boards or
+outside/aliased roots; never discover above projects home, create a private child board, or scan
+unrelated files as an adoption namespace policy. Existing role/trust/interactive-context,
+lifecycle, canonical path and strict-config checks remain prerequisites.
+
+Publication changes only `sessionId` and `port`: preserve coordinator name/description and all
+other config bytes, workers and jobs. Loading responsibility in place must not restart/reload
+workers, send work, clear reports, rewrite jobs or start a model turn. Status is read-only:
+report current config/identity and whether local responsibility is loaded, never classify claims,
+promote, ask a question or write.
 
 ## 1. Remove, do not replace with a subsystem
 
@@ -94,9 +130,11 @@ worker-to-worker delivery/health stays usable and does not acquire coordinator-o
 Do not extend the config lock over worker launch/send as a new global transaction; the bounded
 old-endpoint re-probe inside the adoption transaction remains required.
 
-The contract is cooperating local processes: final current-config checks reject revoked authority,
-not an impossible guarantee of recalling an OS action already submitted or detecting coherent
-config rollback. No new epoch/proof fence is introduced to cover that limitation.
+The contract is cooperating local processes: once the pair changes, the former coordinator
+cannot initiate further coordinator effects even if still running. Final current-config checks
+cannot recall an already-submitted composite OS action or detect coherent config rollback;
+no cancellation, transactional network fence or hostile-same-user protection is claimed.
+No new epoch/proof fence is introduced to cover that limitation.
 
 ## 3. Failure and old-file behavior
 
@@ -106,7 +144,7 @@ config rollback. No new epoch/proof fence is introduced to cover that limitation
 | Foreign/abandoned/unreadable lock | `LOCKED`; no timeout/pid-based stealing or automatic repair |
 | Invalid/unreadable/duplicate-key config or unsafe root/config/lock path | Config/path refusal; no implicit initialization/normalization |
 | Temp/write/sync/close or definite pre-publication failure | No adoption success; current config remains authoritative. Clean only this call's owned temp |
-| Atomic publish submitted, outcome uncertain | Report uncertainty, not rollback or zero effects. Stop; a later explicit invocation reads current config before deciding |
+| Atomic publish submitted, outcome uncertain | Report uncertainty, not rollback or zero effects. Stop; a later explicit invocation reads current config: old pair needs a new adoption decision, matching pair loads only, a different pair needs a new preview. Infer no stored consent |
 | Publish succeeded, session changed or promotion failed | Report config replacement separately from local failure/pending promotion. Do not revert. Matching pair retry loads only, with zero questions and zero config writes |
 | Replacement occurred during a queued report/callback/reminder | Current-config permission refuses later effects. If report was already saved, preserve it and report stored-but-not-notified, no false delivery success/replay |
 | Process interruption | Config is old or new complete JSON; a leftover lock still stops. After separate lock-owner resolution, old pair needs a fresh decision, matching pair loads only. No prepared/active recovery state |
@@ -119,7 +157,10 @@ foreign/malformed/uncommitted bytes, missing file, symlink/directory and unreada
 No Git read is needed to classify old boards; the current config is enough. Leave the file
 untouched by default. Optional one-time human deletion is a separately requested cleanup, not a
 migration step, command prerequisite, second question or auto-unlink. Never follow a legacy
-symlink or stage/commit its deletion. No runtime/import compatibility adapter remains.
+symlink or stage/commit its deletion. No runtime/import compatibility adapter remains. Remove
+claim schema/attestation fields and all their readers/writers. The withdrawn ledger, linked history,
+durability barriers, capacity budgets, record census and proof benchmarks are not deferred
+implementation tasks; the retained ancestor board count is unrelated to that discarded census.
 
 ## 4. Test rewrite inventory
 
@@ -152,6 +193,7 @@ in this matrix was run for this docs change.
   ancestor/linked repo, no repo, absent/failing Git executable and injected `GIT_*`. Same current
   config/runtime/answer gives same branch, question count and result. Production Git invocation
   count is zero (async and sync child-process spies); no Git-marker inspection either.
+  No stage/reset/commit, hooks, ignore edits or Git repair instructions.
 - Snapshot fixture index/refs/metadata and unrelated files outside production code; all remain
   byte-identical. Non-obstructing extra board artifacts are not an allowlist refusal. Legacy
   claim variation alone, including changes while UI is open, never changes the result or bytes.
@@ -182,10 +224,14 @@ coordinator-adoption skill; ADR0005/0009-C/0012 claim/evidence/Git references;
 `docs/artifact-atlas.md` coordinator-claim/tenure/path-scoped commits description; projects-home
 claim file and instructions requiring it. Record obsolete status/optional human deletion without
 rewriting historical ADR provenance. Do not edit those sources, installed copies or live claim
-in this two-doc PR. Worker lease cleanliness and lifecycle policies stay unchanged.
+in this docs-only PR. Worker lease cleanliness and lifecycle policies stay unchanged.
 
-This delivery commits/pushes only `docs/adr/0025-git-independent-adoption.md` and this plan on
-`feature/25-git-independence-plan`; PR28 remains the single vehicle. Check relative links,
-`git diff --check`, docs-only diff and clean tree/index after commit. Handoff exact SHA/diff stat
-and validation limits to Coordinator, then wait for mandatory independent review dispatch.
+This delivery changes only `docs/issues/25-proposed-solution.md`, this plan, and the concise
+`docs/adr/0025-git-independent-adoption.md`; the former ADR-directory plan moves here with
+references updated. Keep `feature/25-git-independence-plan` and PR28 as the single vehicle;
+preserve the same-issue lease base without rebasing. Check relative links, `git diff --check`,
+docs-only diff and clean tree/index after commit. Handoff exact SHA/diff stat and validation
+limits in an issue comment naming Coordinator as next sole write owner; Coordinator pushes
+and dispatches mandatory independent review. No PR creation is expected; if one is needed,
+the exact body must first pass projects-home `scripts/pr-body-guard.sh`.
 Runtime/test/build validation and AC3 acceptance remain outstanding.
