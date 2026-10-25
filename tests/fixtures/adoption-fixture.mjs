@@ -10,10 +10,11 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const dist = async name => import(path.join(ROOT, 'dist', name));
+// Dynamic import needs a URL, not an absolute path: Windows drive letters are not URL schemes.
+const dist = async name => import(pathToFileURL(path.join(ROOT, 'dist', name)).href);
 
 export const IDS = { gone: 'gone-coordinator', fresh: 'fresh-orchestrator', workerOne: 'worker-one', workerTwo: 'worker-two', other: 'another-session' };
 /** A role tree of the shape `pi-role` uses, so the canonical launch-role check has something real. */
