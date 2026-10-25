@@ -10,8 +10,9 @@ and exact saved pane association authorize owner transfer. No adoption history i
 
 This follows [PR28's selected design at `8e46bdbc`](https://github.com/skatrych/pi-intercom/tree/8e46bdbcdb1ddfdc7511f63c2fa61bb2542312a5/docs).
 Planning can proceed now; implementation follows PR28 integration and the normal review/
-human approval gates. **Cross-pane/tab AC1 coverage still needs the explicit scope decision
-below.** This proposal neither narrows the issue nor authorizes caller rebinding.
+human approval gates. **B2 broad-AC1 coverage remains blocking pending Captain's placement/
+association decision.** This round corrects F2's immutable legacy-marker identity and proposes
+complete placement coverage; it neither narrows AC1 nor authorizes caller rebinding.
 
 ## Details
 
@@ -36,9 +37,12 @@ claims, Git reads, authority epochs, succession ledger or termination attestatio
 Source at `main@23bc10fa959f179811cc43415921a2a144d40e10`:
 `src/monitor-launcher.ts:ensureMonitorPane` uses session-keyed records, a workspace
 list and same-tab checks. `src/index.ts:ensureCoordinatorMonitor` supplies readiness
-and registered-worker prerequisites. The baseline behaviors and proposed changes are:
+and registered-worker prerequisites. In this table, workspace means a **Herdr UI container**,
+not a canonical filesystem project/board root or Git worktree. All rows assume the same
+verified canonical board root; a different root is always outside this proposal.
+The baseline behaviors and authorized alignment are:
 
-| Successor location | Baseline with predecessor's generic-label monitor | Proposed behavior |
+| Successor location | Baseline with predecessor's generic-label monitor | Authorized alignment (not full AC1) |
 |---|---|---|
 | Same caller pane/tab/workspace | Cannot load predecessor record; generic label refuses | Verified root-local completed record transfers owner; one unchanged monitor |
 | Different pane, same tab | Generic label refuses; same-session saved caller mismatch also refuses | Root record detects caller mismatch; explicit inspection refusal, no duplicate |
@@ -50,23 +54,26 @@ marker filter also misses that foreign marker; the plan discovers all marker var
 A reused same-session record can also reach replacement when its pane is outside the
 workspace-filtered list. Exact lookup distinguishes moved from absent in either case.
 
-The reported incident kept the same caller association, so the first row resolves it.
-The issue's AC1 is broader: retaining safe refusals in other rows is **not evidence that
-all AC1 passes**. Two precise options require Coordinator/human routing before an
-implementation-ready baseline:
+The reported fixture keeps its caller association; broad AC1 does not. Refusals in the
+other rows leave a real coverage gap, as [independent B2](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6402577463)
+confirms. The **unaccepted recommendation** in plan §4 covers all four rows by retaining
+one monitor in its **original tab and Herdr workspace**, updating only owner/managing-caller
+metadata after exact checks. A remote successor does not get another local display or an
+automatic focus/tab switch. The monitor already reads the explicit board `--root`, so
+changing the coordinator's UI location does not require changing the monitor command.
 
-1. Explicitly amend AC1 to same-caller-pane succession with unchanged monitor/workspace/
-   tab association, retain cross-pane/tab refusals, and track relocation separately.
-2. Keep broad AC1 and authorize a separate guarded caller-relocation design, including
-   how to verify old/new caller identities and whether a different-tab successor reuses
-   a remote display or relocates it. That changes the association contract; inventory
-   alone cannot prove an old caller's runtime ended or grant pane cleanup authority.
+Keep original monitor/location provenance separate from the mutable managing caller;
+retain v1 as the source of its immutable legacy-marker session, including after B/C owner
+transfers. Plan §4 defines the proposed schema, original/prior/current caller identity
+checks, v1 missing-tab limits, adapter evidence and tests. Proposed AC2 would verify both
+associations, not require monitor and manager to share a tab/workspace: unexpected movement
+of recorded panes still refuses; only an expressly authorized new manager changes.
 
-Existing AC1 does not limit succession to one pane: the present proposal has a real
-coverage gap. Recommend option 2's smallest extension: update ownership/caller metadata,
-reuse the same display in the same or original remote tab, and verify old/current caller
-and monitor identities as specified in plan §4. Neither option is selected here; the issue
-body is unchanged. No monitor movement or retire-and-recreate fallback is authorized.
+This does **not** amend AC2 or select display placement. Captain's decision is pending:
+original-location remote reuse is the smallest recommendation; a requirement to place a
+display beside every successor would need another safely controlled placement contract.
+Until selection, B2 blocks a complete implementation baseline. No AC1 scope amendment,
+metadata reassociation, pane movement/close/restart or cleanup is authorized.
 
 ### Diagnostics and limits
 

@@ -44,7 +44,10 @@ caller/workspace/pane through exact inventory and establish tab from both live p
 Import only one unambiguous completed live candidate after §2/§3 checks. Leave v1 unchanged;
 v2's `legacySource` identifies the one corroborating record, not a second candidate.
 Require that source to remain a safe completed v1 with the same caller/workspace/pane/
-stage tuple and valid filename/session relation. Missing or inconsistent source refuses.
+stage tuple and valid filename/session relation. Its original `sessionId` is immutable:
+when an imported pane retains `Intercom monitor [A]`, compare against that v1 session A,
+never the mutable v2 owner B/C. Read it from retained v1; add no marker/history ledger.
+Missing or inconsistent source refuses.
 Do not hash arbitrary bytes: field validation/association, not byte provenance, protects
 this cooperating-local-filesystem migration. Other live records conflict; completed
 records with positively absent panes remain historical, not selectable by age. Locks/
@@ -96,9 +99,11 @@ the record/lock. Test injected runners against these limits without sleeping/liv
 
 Classify **all** conflicts before reuse/import: every generic/session-bearing label in the
 current tab, all root-record candidates irrespective of tab, caller-as-monitor, moved or
-competing saved identities. A recorded monitor must retain the generic or recorded-owner
-legacy marker; mismatched/missing marker refuses, not automatic rename. Foreign labels
-discover conflicts, never confer ownership.
+competing saved identities. A recorded monitor must retain the generic label, or, for an
+imported v1, the immutable source-session legacy marker (§1). A marker-only migration with
+no v1 must finish its existing rename; an uncertain rename remains fenced. Mismatched/
+missing markers refuse, not automatic rename. Foreign labels discover conflicts, never
+confer ownership.
 Do not select the newest record or ignore another caller's root record to launch anew.
 
 | State after complete inventory and fresh permission | Result |
@@ -127,51 +132,92 @@ never auto-unlink a fence, retry, roll back, retire or clean up. Crash after suc
 publication but before lock release still requires inspection. Revalidation cannot recall
 submitted OS work or make Herdr association checks atomic against external pane changes.
 
-## 4. AC1 gap and unaccepted metadata-relocation option
+## 4. B2: complete-coverage recommendation — unaccepted
 
-The solution's source-supported matrix is mandatory coverage, not optional clarification.
-Same-pane handover satisfies the reported fixture; different-pane succession remains a
-coverage gap against broad AC1. Do not represent its safe refusal as full AC1 completion.
-The smallest recommended extension is **ownership metadata relocation only**, not moving,
-closing or restarting a monitor. It needs explicit approval of the changed association
-contract (and AC2 interpretation); it is **not part of the authorized algorithm above**:
+Same-pane handover resolves the reported fixture; different-pane/tab/workspace refusal
+still leaves broad AC1 unmet. [Independent B2](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6402577463)
+blocks complete implementation approval. **Everything below is a proposed extension,
+not a change to the authorized §3 table or operative AC1/AC2.** Captain's placement decision
+is pending. Recommend one display in its original location across all successor locations;
+only owner/managing-caller metadata changes, with no pane command or automatic cleanup.
 
-- Require §2's current exact config pair/root/responsibility and the exact current caller
-  from this runtime's `pane current --current` plus `pane get`. Never accept a caller ID
-  argument or bind an unrelated root. Reject current caller equal to monitor.
-- Resolve one completed predecessor root record (or unambiguous completed v1); validate
-  its recorded owner session, original caller, monitor, workspace and original tab. Query
-  both old caller and monitor exactly. The monitor must still match its recorded location
-  and marker, not have moved. Any extra candidate/lock/partial state refuses.
-- For the old caller: explicit not-found can establish it is gone; if present, require its
-  original workspace/tab and verifiable Pi session identity matching the saved predecessor
-  owner, not merely a label. Existing `src/pane-close.ts:verifyPane` queries `pane get`,
-  requires `agent === 'pi'`, `agent_session.source === 'herdr:pi'`, `kind === 'path'`, then
-  canonicalizes that path; `verifySessionHeader` safely opens a regular no-follow file and
-  checks its first header's session ID. That provider is Linux-only: the recommendation
-  needs injected/real supported-host adapter evidence before claiming Windows coverage.
-  Reuse this bounded read-only pattern only where supported; no session-history listing.
-  A header alone proves neither live process ownership nor termination; even this mapping
-  is not hostile repurposing protection. Missing/mismatched data refuses, never means “old
-  coordinator ended.” Current config, not endpoint silence/title/header, revokes authority.
-- Same-tab new caller: update owner/caller metadata after fresh exact checks, retain the
-  original monitor. Different-tab new caller: reuse the **remote display in its original
-  tab**, with no new monitor in the successor tab. Store current `callerTab` separately
-  from monitor `tab`; each later check verifies both rather than requiring their equality.
-  Cross-workspace relocation stays refused unless separately authorized. No need to scan
-  session history, persist a succession chain or authenticate old config ports.
-- Atomically publish new owner/caller/current-caller-tab after revalidation across awaits;
-  preserve monitor identity/location/stage and legacy source. Migration validation must
-  compare legacy evidence against the original association, not the rebound caller: the
-  extension would need one immutable imported association tuple, **not a growing history**.
-  Tests must cover interruption, repeated remote reuse and repurposed/missing old caller.
+### Feasibility and association meaning
 
-This is a concrete recommendation for independent review, not authority to add those
-fields/checks now. Alternative: explicitly amend AC1 to unchanged same-pane association
-and separately track relocation. An undocumented scope cut, or automatic cleanup/rebinding
-based only on “old caller no longer coordinator,” is not acceptable. If different-tab AC1
-also requires the display to appear beside the successor, metadata-only reuse is insufficient;
-that separate placement/destructive-operation choice needs human direction.
+Herdr `workspace_id` is a UI container, not a filesystem board root or Git worktree.
+`monitor-launcher.ts` runs the display with `--root options.root`; `monitor.ts:createMonitor`
+reads snapshots from that root, not its tab/workspace or the coordinator's pane. Thus a
+successor in another **Herdr** workspace can manage the same root display without changing
+its command. Another canonical project/board root never qualifies. PR28 root/cwd/board-
+isolation guards still determine runtime access; Herdr placement does not widen it.
+
+`pane get <exact-id>` has no workspace filter in `src/pane-close.ts`; the launcher already
+uses `pane list --workspace <id>`. These are concrete API shapes for exact old/new lookups
+and inventories in both containers, not proof of installed-host cross-workspace support.
+Its close provider additionally enforces same-workspace policy for destructive worker
+closure: do not weaken/reuse that close permission for monitor metadata. Require adapter
+coverage for exact remote lookup/inventory/structured absence on supported hosts; inability
+refuses safely and blocks that host's coverage claim, not permission to create locally.
+
+Proposed AC2 meaning: verify **two explicit associations**, never relax matching to a label:
+(1) immutable monitor/root/original-location provenance; (2) the current managing runtime/
+caller at its own recorded location. Intentional successor caller changes are distinct from
+an existing recorded pane moving. Unexpected monitor or prior managing-caller movement,
+foreign-root/session mapping, conflicts or missing evidence still refuse. Root config grants
+current authority; neither a header/title nor endpoint silence proves termination.
+
+### Proposed schema and operation
+
+1. Keep v2 `caller/workspace/tab` as the original launch/import association and `pane` as
+   the monitor. Add optional `manager: {caller, workspace, tab}` only for an intentionally
+   different managing caller; absent means the original association. `ownerSessionId`
+   names that manager's session. Keep exactly one current manager, no owner history.
+   This preserves legacy-source tuple validation and F2's immutable v1 marker session
+   without a second imported snapshot. Historical original caller is provenance, not a
+   current live-manager requirement after reassociation; the monitor must remain at its
+   original workspace/tab. Store this semantic distinction explicitly in the selected
+   final schema/docs before coding; unknown shapes remain invalid.
+2. Under the existing root lock and §2 permission/budget, get this runtime's actual caller
+   with `pane current --current` and exact `pane get`; require returned IDs/workspace/tab
+   agreement and caller != monitor. Resolve one completed same-root predecessor, current
+   owner session, effective prior manager and exact monitor. Inventory current and saved
+   monitor/manager workspaces (deduplicate); all candidates/fences must be accounted for.
+3. Exact monitor lookup must match its saved pane/workspace/tab and generic or immutable
+   source marker. Same effective caller/location permits ordinary same-pane succession;
+   do not demand the *old* session still inhabit the pane now occupied by this successor.
+   For a different caller, query the prior manager: explicit not-found suffices for v2;
+   if present require saved location and Pi session mapping to the recorded prior owner.
+   A moved, repurposed or unidentifiable prior manager refuses, not automatic adoption.
+4. Mapping source: `pane-close.ts:verifyPane` requires `agent === 'pi'`,
+   `agent_session.source === 'herdr:pi'`, `kind === 'path'` and a canonical session path;
+   `verifySessionHeader` uses no-follow regular-file access and a bounded first-header ID
+   check. Its full close verifier additionally checks foreground PID/start. Reuse only
+   the bounded read-only association pattern, not its close path or a session-history scan.
+   Header/path mapping is not a live process/termination proof or hostile-repurposing
+   defense. The existing provider is Linux-only; Windows mapping needs actual adapter
+   evidence before coverage is claimed. Missing/unsupported data refuses.
+5. For v1 import, the original live caller/monitor must still establish their common
+   original workspace/tab (v1 stores no tab); check source owner mapping if caller differs
+   from successor. An absent v1 caller cannot supply that missing association and refuses
+   as insufficient AC2 evidence, not an AC1 success. For valid v1, retain source, populate
+   original tuple/tab, and set the current manager separately. For v2 an absent old manager
+   is allowed because the completed record already saved its association. Neither path
+   infers root binding from a Herdr workspace or accepts a generic-only pane.
+6. Revalidate exact prior/new/monitor associations, root/config/load and fences before one
+   atomic owner/manager publication; permission checks bracket all awaits. Keep original
+   tuple/pane/stage/legacy source unchanged. Same-tab, different-tab and different-workspace
+   successors all reuse this original display: no focus/tab switch, split/move/swap/rename/
+   run/close. Repeated checks validate the current manager and immutable monitor, with no
+   rewrite. Another successor verifies the last manager, not an accumulated chain. On a
+   separately permitted confirmed-absence replacement, launch once beside the current
+   caller and reset original tuple/manager/source for that new pane; never while uncertain.
+
+Success must name **both** manager and display workspace/tab/pane, explicitly “display
+retained in original location; process readiness not checked.” Nothing automatically
+appears beside a remote successor. This is the smallest full-AC1 placement recommendation
+for verifiably associated monitors. If Captain requires beside-successor placement, it
+is not met by metadata-only reuse; a separate safely controlled placement contract is
+needed. No scope amendment, AC2 rewrite, pane relocation or caller rebinding is selected
+by this analysis; independent review and Captain's decision precede a final integrated plan.
 
 ## 5. Sequence, validation and review dispositions
 
@@ -192,11 +238,12 @@ Record before/after ownership bytes, inventory and command traces, not only mess
 | Coverage | Required assertions |
 |---|---|
 | AC1 supported path | Registered worker, v1 then v2 predecessor, current successor config pair + loaded responsibility, unchanged association: one successor-owned original pane, v1 preserved, no split/run/close; repeat after multiple replacements without any claim/history |
-| AC1 gap | Different-pane same-tab, different-tab and different-workspace fixtures prove baseline reachability/refusal differences and proposed no-duplicate refusals; not marked AC1 passing until §4 resolved |
+| B2 proposal, pending selection | Valid completed v1/v2: same caller, different pane/same tab, different tab and different Herdr workspace **for the same root** each retain one original display; publish only owner/manager metadata, then repeat and transfer again. v1 with absent caller/missing tab evidence refuses. No full-AC1 pass claim before selection/implementation |
+| Proposed AC2 controls | Changed actual canonical root, moved original monitor/prior manager, wrong Pi session mapping, current/monitor caller collision, competing marker in either workspace, unsupported exact lookup/absence or changed source refuse. One absent original caller after a completed v2 reassociation is historical, not permission to skip current-manager checks |
 | AC2 | Wrong session **or bound port**, unloaded responsibility, replaced runtime/root, malformed config, foreign root/record/marker, wrong caller/workspace/tab, moved exact pane, caller marker, multiple candidates, changed/missing legacy source: refuse without ownership/pane mutation |
 | AC3 | Every pending stage, old lock without record, root lock, temp, publication/release uncertainty, crash boundaries, read error/budget exhaustion, split timeout before/after simulated mutation, permission loss before/after each await/publication retry: fence survives reload/new successor; concurrent sessions at most one winner |
 | AC4–5 | Repeated recognized v2 has no rewrite/rename/run/split/close; exact absence permits one launch, moved/unknown does not. Known-unowned/no-split and genuinely uncertain split diagnostics differ; readiness never inferred |
-| Regression/F1 | Creation/reuse/legacy marker, geometry/focus, missing build, Linux/Windows quoting, no workers/first worker/saved disconnected worker, non-Herdr, messaging/worker guards, adoption/promotion pane-effect-free; v2 before matching-pair load/first startup; exact artifact ignores, monitor lock still fences, config/monitor path refusals preserved |
+| Regression/F1/F2 | Retain creation/reuse/geometry/focus/build/quoting/empty-roster/non-Herdr/worker/adoption regressions and F1 ignores/startup/load/path tests. Import valid observed v1 `[A]` under B → repeat → C transfer → repeat: accept immutable A marker, v1 byte-identical, no rename/run/split/close; wrong `[B]`/`[C]` or changed/missing source refuses |
 
 This round validates docs/links/whitespace only, not behavior (including the historical
 8/8 baseline). No build/runtime test, probe, install or board/pane write. Retire/reload old
@@ -212,6 +259,7 @@ same-user record/pane forgery. No distributed/process-provenance/cancellation gu
 | Petro [drift review](https://github.com/skatrych/pi-intercom/pull/31#pullrequestreview-5630892995), [claim-free inline](https://github.com/skatrych/pi-intercom/pull/31#discussion_r4361483318) | Addressed: no claim-free cross-session refusal; same rule for every current coordinator. ADR top headings match current Architect rules and PR28 exact dependency: Decision Statement / Short Summary / Details |
 | Independent [B1](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6362731506) and [Captain routing](https://github.com/skatrych/pi-intercom/issues/13#issuecomment-6402437740) | Authority choice settled by Captain; incompatible proof contract removed. Fresh independent review still required; §4 remains a separate coverage choice |
 | Independent [F1](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6344223490), [accepted carry](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6344246768) | Retained and adapted explicitly in §1/§5: artifact/lock ignores and load/startup regression; obsolete adoption allowlist/declaration removed by PR28, not revived; path/foreign-root safety retained |
+| Independent [F2/B2](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6402577463), [routing/handover](https://github.com/skatrych/pi-intercom/issues/13#issuecomment-6402585516) | F2 corrected in §1/§3/test matrix using retained immutable v1 session. B2 remains blocking/unselected: §4 now proposes all Herdr placements for one canonical root, explicit remote-display semantics and AC2 association meaning; not authority to implement/rebind or silently narrow AC1 |
 
 Deliver exactly these three docs; no fixtures/submodules. Hand back pushed SHA/clean tree/
 index to Coordinator on issue13 for mandatory independent review. No implementation, install,
