@@ -45,7 +45,7 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
       '--pack-destination', temporary], repository, 60000).stdout);
     assert.equal(packed.length, 1);
     const paths = packed[0].files.map(file => file.path.replaceAll('\\', '/'));
-    for (const required of ['dist/monitor.js', 'dist/monitor-view.js']) {
+    for (const required of ['dist/monitor.js', 'dist/monitor-view.js', 'dist/reminder-content.js', 'src/reminder-content.ts']) {
       assert.ok(paths.includes(required), `Tarball missing ${required}; build before running this test`);
     }
     for (const entry of paths) {
@@ -81,6 +81,18 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
       assert.equal(typeof view.renderMonitor, 'function');
       assert.ok(view.renderMonitor(undefined, 100, 5).at(-1).includes('Intercom v' + require('./package.json').version));
       assert.equal(monitor.parseMonitorRoot(['--root', process.cwd()]), process.cwd());
+      // The packaged reminder loader is self-contained (no host peers) and resolves the selector exactly.
+      const reminders = await import(pathToFileURL(path.join(installed, 'dist/reminder-content.js')).href);
+      const builtin = await reminders.loadReminderContent(undefined);
+      assert.equal(builtin.ok, true);
+      assert.equal(builtin.content.source, 'builtin');
+      const selected = path.join(process.cwd(), 'packaged reminder.txt');
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(selected, '  packaged text\\n');
+      const loaded = await reminders.loadReminderContent(selected);
+      assert.equal(loaded.ok, true);
+      assert.equal(loaded.content.text, '  packaged text\\n');
+      assert.equal(loaded.content.source, 'file');
     `], temporary, 30000);
 
     const cli = run(process.execPath, [path.join(temporary,
