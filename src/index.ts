@@ -79,9 +79,8 @@ function adoptionContext(captured: ExtensionContext, waitForIdle?: () => Promise
     isProjectTrusted: () => captured.isProjectTrusted(),
     isIdle: () => captured.isIdle(),
     sessionManager: {
+      // Captured native session only. Adoption never reads a session file, header, or session-store list.
       getSessionId: () => captured.sessionManager.getSessionId(),
-      getSessionFile: () => captured.sessionManager.getSessionFile(),
-      getSessionDir: () => captured.sessionManager.getSessionDir(),
     },
     ui: {
       // One decision on the supported scrollable selection surface; never a text-input fallback.
@@ -111,7 +110,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   let monitorTask: { runtime: Intercom; generation: number; dirty: boolean; promise: Promise<void> } | undefined;
   async function ensureCoordinatorMonitor(current: Intercom, ctx: ExtensionContext, started: number): Promise<void> {
     const isCurrent = () => started === generation && runtime === current;
-    if (!isCurrent() || !current.coordinatorActionReady()) return;
+    if (!isCurrent() || !await current.coordinatorActionReady()) return;
     if (monitorTask?.runtime === current && monitorTask.generation === started) {
       monitorTask.dirty = true;
       return monitorTask.promise;
@@ -119,11 +118,11 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     const check = async () => {
       try {
         const { config, me, id } = await current.state();
-        if (!isCurrent() || !current.coordinatorActionReady() || !me?.coordinator || !config.agents.some(agent => !agent.coordinator)) return;
+        if (!isCurrent() || !await current.coordinatorActionReady() || !me?.coordinator || !config.agents.some(agent => !agent.coordinator)) return;
         const monitor = await ensureMonitorPane({
           root: current.store.root, sessionId: id,
           script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
-          assertCurrent: () => { if (!isCurrent() || !current.coordinatorActionReady()) throw new Error('Coordinator session changed or adoption not ready'); },
+          assertCurrent: () => { if (!isCurrent()) throw new Error('Coordinator session changed'); },
         });
         if (isCurrent()) ctx.ui.notify(`Intercom status monitor: ${monitor.outcome}${monitor.pane ? ` (${monitor.pane})` : ''}`, 'info');
       } catch (error) {
@@ -163,12 +162,6 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       notify: text => ctx.ui.notify(text, 'info'),
     }, {
       launch: launcher.launch, store: root => new PiConfigStore(root), workspaceRoot,
-      adoption: {
-        // The actual session directory, including `--session-dir`, never a guessed default and never the
-        // most-recent session file. Pi's own list is the machine source for the sessionId.
-        listSessions: async (cwd, sessionDir) => (await SessionManager.list(cwd, sessionDir ?? resumeSessionDirectory(cwd)))
-          .map(session => ({ id: session.id, path: session.path })),
-      },
       closeProvider: createCloseProvider({
         sessionId: () => context!.sessionManager.getSessionId(),
         sessionFile: () => context!.sessionManager.getSessionFile(),
@@ -182,7 +175,8 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     // anonymous session: adoption and read-only status are exactly what those sessions need. The offer
     // closure reads the current runtime at emit time and re-checks this generation at invoke time.
     offerAdoptionBackend();
-    if (!current.coordinatorActionReady()) return; // held authority does not run boot cleanup/monitor checks
+    // A held startup (no verified exact pair yet) runs no boot cleanup or monitor checks.
+    if (!await current.coordinatorActionReady()) return;
     try {
       if ((await current.state()).me?.coordinator) {
         try { await current.retireDashboardMetadata(); }
@@ -283,7 +277,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     });
     const me = state?.me;
     const loaded = runtime.responsibility;
-    return { systemPrompt: event.systemPrompt + '\n\nPiIntercom: communicates; Pi decides orchestration. Responsibility is not a work assignment. Do not implement unrelated work from findings. After assigned work, report as instructed and wait; do not autonomously exit. Progress questions require reporting and continuing unless explicitly redirected. stop_worker remains disabled due to the host cancellation blocker. close_worker is a separate Linux Herdr background handoff-and-pane-close workflow: do not self-exit, remove registration, force kill or infer completion from job acceptance.\n' + (!state ? 'No board is initialized: coordinator action is held. An ordinary non-coordinating turn may persist this Pi session; the human then uses /intercom-adopt status for the explicit projects-home bootstrap decision. Do not create a private board or edit claim/config state.' : me && loaded ? `Identity: ${loaded.name} (${me.sessionId}). Responsibility: ${loaded.description}.` : 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.') };
+    return { systemPrompt: event.systemPrompt + '\n\nPiIntercom: communicates; Pi decides orchestration. Responsibility is not a work assignment. Do not implement unrelated work from findings. After assigned work, report as instructed and wait; do not autonomously exit. Progress questions require reporting and continuing unless explicitly redirected. stop_worker remains disabled due to the host cancellation blocker. close_worker is a separate Linux Herdr background handoff-and-pane-close workflow: do not self-exit, remove registration, force kill or infer completion from job acceptance.\n' + (!state ? 'No board is initialized for this session: coordinator effects are held. Startup at the projects home creates the first board without any command or question; a child directory never receives a private board. Do not create a board by hand or edit config state.' : me && loaded ? `Identity: ${loaded.name} (${me.sessionId}). Responsibility: ${loaded.description}.` : 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.') };
   });
   for (const [operation, description, parameters] of tools) {
     pi.registerTool({

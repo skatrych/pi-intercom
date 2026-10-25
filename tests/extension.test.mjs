@@ -61,7 +61,7 @@ const supportedHost = { skip: !['win32', 'linux'].includes(process.platform) ? '
 
 test('adapter without root flag ignores ancestor config and inherited root env', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
-  await store.initialize('parent-coordinator', 12345);
+  await store.initialize({ sessionId: 'parent-coordinator', port: 12345 });
   const before = await readFile(store.file, 'utf8');
   const child = path.join(a.root, 'independent-child'); await mkdir(child);
   const oldEnv = process.env.PI_INTERCOM_ROOT;
@@ -76,7 +76,7 @@ test('explicit CLI root equal to cwd survives replacement; a descendant cwd bind
   const a = await adapter(t), registrations = [];
   const coordinator = await listen(undefined, async message => { registrations.push(message); });
   t.after(() => coordinator.close());
-  await new ConfigStore(a.root).initialize('workspace-coordinator', coordinator.port);
+  await new ConfigStore(a.root).initialize({ sessionId: 'workspace-coordinator', port: coordinator.port });
   a.setRootFlag(a.root); a.setId('same-root-worker'); await a.start();
   assert.equal(registrations[0].from, 'same-root-worker');
   assert.match((await a.prompt()).systemPrompt, /Anonymous\/unloaded worker/);
@@ -91,7 +91,7 @@ test('explicit CLI root equal to cwd survives replacement; a descendant cwd bind
 });
 test('explicit ancestor root is admitted: the ancestor board is read and no child config is created', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
-  await store.initialize('parent-coordinator', 12345);
+  await store.initialize({ sessionId: 'parent-coordinator', port: 12345 });
   const before = await readFile(store.file, 'utf8');
   const child = path.join(a.root, 'child'); await mkdir(child);
   a.ctx.cwd = child; a.setRootFlag(a.root);
@@ -136,8 +136,8 @@ test('empty roster skips monitor; first registered worker requests it without pr
 
 test('startup with a saved disconnected worker still requests monitor without renaming coordinator', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
-  await store.initialize('adapter-coordinator', 12345);
-  await store.configure('adapter-coordinator', {sessionId:'offline-worker',name:'Offline',description:'Retained worker',port:12346,projectDirectory:'.'});
+  await store.initialize({ sessionId: 'adapter-coordinator', port: 12345 });
+  await store.configure({ sessionId: 'adapter-coordinator', port: 12345 }, {sessionId:'offline-worker',name:'Offline',description:'Retained worker',port:12346,projectDirectory:'.'});
   await a.start();
   assert.ok(a.notices.some(n => /not inside Herdr/.test(n.text)));
   assert.deepEqual(a.names, []);
@@ -320,12 +320,12 @@ test('adapter anonymous configure/reload loads responsibility without a work tur
   const a = await adapter(t), registrations = [];
   const coordinator = await listen(undefined, async message => { registrations.push(message); });
   t.after(() => coordinator.close());
-  const store = new ConfigStore(a.root); await store.initialize('other-coordinator', coordinator.port);
+  const store = new ConfigStore(a.root); await store.initialize({ sessionId: 'other-coordinator', port: coordinator.port });
   a.setId('adapter-worker'); await a.start();
   assert.equal(registrations.length, 1); assert.equal(registrations[0].kind, 'registration');
   assert.match((await a.prompt()).systemPrompt, /Anonymous\/unloaded worker/);
   const workerPort = registrations[0].payload.port;
-  await store.configure('other-coordinator', { sessionId: 'adapter-worker', name: 'Quality', port: workerPort,
+  await store.configure({ sessionId: 'other-coordinator', port: coordinator.port }, { sessionId: 'adapter-worker', name: 'Quality', port: workerPort,
     projectDirectory: '.', description: 'Only review explicitly assigned work' });
   assert.match((await a.prompt()).systemPrompt, /Anonymous\/unloaded worker/);
   const control = { version: 1, kind: 'reload', from: 'other-coordinator', to: 'adapter-worker', payload: {} };
@@ -370,12 +370,12 @@ test('coordinator startup opens only the messaging listener and activity hooks s
 
 test('failed legacy metadata migration leaves messaging usable', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
-  await store.initialize('adapter-coordinator', 12345);
+  await store.initialize({ sessionId: 'adapter-coordinator', port: 12345 });
   const legacy = await store.read(); legacy.agents[0].dashboardPort = 34568;
   await writeFile(store.file, JSON.stringify(legacy));
   const originalUpdate = ConfigStore.prototype.update;
-  ConfigStore.prototype.update = function(id, mutate, guard) {
-    return originalUpdate.call(this, id, async config => {
+  ConfigStore.prototype.update = function(caller, mutate, guard) {
+    return originalUpdate.call(this, caller, async config => {
       const hadLegacy = config.agents.some(agent => agent.dashboardPort !== undefined);
       await mutate(config);
       if (hadLegacy && !config.agents.some(agent => agent.dashboardPort !== undefined)) throw new Error('injected migration failure');
@@ -390,7 +390,7 @@ test('failed legacy metadata migration leaves messaging usable', supportedHost, 
 
 test('coordinator startup removes legacy dashboardPort without exposing a browser URL', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
-  await store.initialize('adapter-coordinator', 12345);
+  await store.initialize({ sessionId: 'adapter-coordinator', port: 12345 });
   const legacy = await store.read(); legacy.agents[0].dashboardPort = 34568;
   await writeFile(store.file, JSON.stringify(legacy));
   await a.start();
@@ -403,20 +403,20 @@ test('coordinator startup removes legacy dashboardPort without exposing a browse
 
 test('shutdown during pending legacy migration fences the write and new monitor setup', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root), bound = [];
-  // Force the supported occupied-port fallback deterministically. Counting bind
-  // attempts as listeners previously made this test flaky when 12345 was busy.
-  const occupied = new Server();
-  await new Promise((resolve, reject) => { occupied.once('error', reject); occupied.listen(0, '127.0.0.1', resolve); });
-  t.after(() => new Promise(resolve => occupied.close(resolve)));
-  await store.initialize('adapter-coordinator', occupied.address().port);
+  // A free saved port means startup binds its configured port and no boot port recovery is involved: this
+  // test targets the legacy dashboard migration fence, not the P3 recovery path.
+  const reservation = await listen(undefined, async () => {});
+  const savedPort = reservation.port;
+  await reservation.close();
+  await store.initialize({ sessionId: 'adapter-coordinator', port: savedPort });
   const legacy = await store.read(); legacy.agents[0].dashboardPort = 34568;
   await writeFile(store.file, JSON.stringify(legacy));
   const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
   let entered, release;
   const pendingWrite = new Promise(resolve => { entered = resolve; });
   const gate = new Promise(resolve => { release = resolve; });
-  ConfigStore.prototype.update = function(id, mutate, guard) {
-    return originalUpdate.call(this, id, async config => {
+  ConfigStore.prototype.update = function(caller, mutate, guard) {
+    return originalUpdate.call(this, caller, async config => {
       const hadLegacy = config.agents.some(agent => agent.dashboardPort !== undefined);
       await mutate(config);
       if (hadLegacy && !config.agents.some(agent => agent.dashboardPort !== undefined)) { entered(); await gate; }

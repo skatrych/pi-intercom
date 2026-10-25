@@ -19,12 +19,14 @@ async function until(check) {
 
 async function setup(t, extra = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-roles-'));
-  await new ConfigStore(root).initialize('c', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'c', port: 12345 });
   let nextPort = 31000;
   const endpoints = new Map(), all = [], launches = [], events = [];
   const options = {
-    listen: async (_port, accept) => {
-      const port = nextPort++; endpoints.set(port, accept);
+    // The fake listener honors a preferred saved port exactly like transport.listen: a configured
+    // coordinator then starts on its own saved port and needs no boot recovery in these fixtures.
+    listen: async (preferred, accept) => {
+      const port = preferred ?? nextPort++; endpoints.set(port, accept);
       return { port, close: async () => { endpoints.delete(port); } };
     },
     send: async (port, message) => {

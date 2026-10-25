@@ -1,3 +1,5 @@
+> **Superseded by [ADR 0025](0025-git-independent-adoption.md):** adoption, initialization, boot and coordinator effects make no Git calls and read no Git markers as authority; the legacy claim file is ignored. This file is retained as historical provenance.
+
 # ADR 0009-C: Ignore only unrelated untracked dirt for first declarations
 
 ## Decision statement

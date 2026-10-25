@@ -44,12 +44,13 @@ const PRODUCTION_ENV = Symbol('production process.env reader');
 
 async function harness(t, readEnv) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-reminder-config-'));
-  await new ConfigStore(root).initialize('c', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'c', port: 12345 });
   const clock = recordingClock(), messages = [], endpoints = new Map();
   let port = 30000, busy = false;
   const transport = {
     reminderClock: clock,
-    listen: async (_preferred, accept) => { const p = port++; endpoints.set(p, accept); return { port: p, close: async () => { endpoints.delete(p); } }; },
+    // The fake listener honors a preferred saved port exactly like transport.listen.
+    listen: async (preferred, accept) => { const p = preferred ?? port++; endpoints.set(p, accept); return { port: p, close: async () => { endpoints.delete(p); } }; },
     send: async (p, message) => { const accept = endpoints.get(p); if (!accept) throw new Error('offline'); await accept(message); },
     launch: async () => ({ submitted: true }),
     probe: async () => [],

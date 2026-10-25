@@ -107,7 +107,7 @@ test('coordinator maintenance prunes only closed writers by age/quota, never act
 test('runtime shutdown closes transport first, bounds a hung observer, and shares repeated close', async t => {
   const root = await fixture(t);
   // Even with a mocked listener, startup must never discover/report to an ancestor host.
-  await new ConfigStore(root).initialize('coordinator', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'coordinator', port: 12345 });
   let endpointClosed = false, observerCloses = 0;
   const runtime = new Intercom({ cwd: root, sessionId: () => 'coordinator', busy: () => false,
     deliver: () => {}, setName: async () => {}, notify: () => {} }, {

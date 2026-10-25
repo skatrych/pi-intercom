@@ -114,7 +114,7 @@ for (const [label, interval] of INTERVALS) {
 
 async function fixture(t, interval = DEFAULT_REMINDER_INTERVAL_MS) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-reminders-'));
-  await new ConfigStore(root).initialize('c', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'c', port: 12345 });
   const clock = fakeClock(interval), messages = [], sent = [], endpoints = new Map();
   let port = 30000, busy = false;
   const options = {
@@ -122,7 +122,8 @@ async function fixture(t, interval = DEFAULT_REMINDER_INTERVAL_MS) {
     // The default path leaves the operator environment unset; an override is
     // supplied through the narrow runtime seam so no test touches process.env.
     reminderMinutesEnv: () => (interval === DEFAULT_REMINDER_INTERVAL_MS ? undefined : String(interval / 60000)),
-    listen: async (_preferred, accept) => { const p = port++; endpoints.set(p, accept); return { port: p, close: async () => { endpoints.delete(p); } }; },
+    // The fake listener honors a preferred saved port exactly like transport.listen.
+    listen: async (preferred, accept) => { const p = preferred ?? port++; endpoints.set(p, accept); return { port: p, close: async () => { endpoints.delete(p); } }; },
     send: async (p, message) => { sent.push(message); const accept = endpoints.get(p); if (!accept) throw new Error('offline'); await accept(message); },
     launch: async () => { assert.equal(clock.pending.size, 1, 'arm before launch'); throw new Error('launch outcome uncertain'); },
     probe: async () => { assert.equal(clock.pending.size, 1, 'arm before probe'); throw new Error('probe failed'); },

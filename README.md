@@ -110,7 +110,9 @@ Created/resumed workers receive `--intercom-root /absolute/board/root` explicitl
 
 **Subfolder workspaces:** A worker in a subfolder of the board root reads that board's roster through the explicit root it was launched with; its own directory never needs a config. A saved `projectDirectory` is resumed as itself. A saved directory that has since become a link escaping the root stays refused. An independent session started in a subfolder without `--intercom-root` still uses only its own local config; ancestor files are left untouched.
 
-Ordinary non-Orchestrator startup uses only that local config; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before reading any config: second/wrong/unsafe boards stop, and no-board startup is held for a deliberate root bootstrap decision rather than silently creating a child board. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators. Coordinator actions and boot side effects are held until committed matching claim evidence and local responsibility are ready.
+Ordinary non-Orchestrator startup uses only that local config; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before reading any config: second/wrong/unsafe boards stop with the offending paths and the expected root named, and a child directory with no board is held rather than silently given a private board. At the projects home itself a missing config is a **zero-question first-board initialization**: the atomic no-replace writer creates the board and responsibility loads, with no command, claim, or confirmation. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators.
+
+**Coordinator authority is the board config entry (`sessionId` + `port`).** Every coordinator effect re-reads that exact pair, and every config writer re-proves it at locked admission and at each publication attempt, so a replaced coordinator cannot keep acting from a cached flag. There is no claim file, commit evidence, Git state, or authority epoch in the decision. All writers serialize on a permanent regular `.pi-intercom/config.lock` through the pinned `fs-native-extensions` provider: exclusive non-waiting kernel locks (Linux `F_OFD_SETLK`, macOS `flock`, Windows `LockFileEx`) that the kernel releases when the holder closes or dies, so a crashed holder needs no stale-lock cleanup. Contention and unsupported platforms refuse; nothing is stolen and there is no weaker fallback. A pre-0.9 lock **directory** is refused with offline-upgrade guidance and left untouched. Upgrade every process sharing a board before using it; older writers do not honor this lock.
 
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
 
@@ -122,10 +124,11 @@ new coordinator on their next message—no worker restart or extension reload is
 
 **Availability:** `/intercom-adopt` requires the separately installed
 [Orchestrator role integration](references/coordinator-adoption.md#availability-and-prerequisites);
-installing this package alone does not add the command. Use a fresh, persisted Orchestrator session
-in a trusted project under the shared projects home, with an idle interactive Pi UI. The projects
-home must be a Git repository with a clean index/worktree. Upgrade every process that writes board
-config to this version before taking over; older writers do not honor its lock.
+installing this package alone does not add the command. Use a fresh Orchestrator session
+in a trusted project at the shared projects home, with an idle interactive Pi UI. Git state is
+irrelevant: a dirty, staged, conflicted, absent or failing Git has no influence, and a legacy
+`coordinator-claim.md` is ignored in every state (never read, rewritten, or deleted). Upgrade every
+process that writes board config to this version before taking over; older writers do not honor its lock.
 
 After ending the old coordinator, enter these commands in the **new Pi session**:
 
@@ -134,26 +137,34 @@ After ending the old coordinator, enter these commands in the **new Pi session**
 /intercom-adopt
 ```
 
-Status shows the board and both identities without changing anything. The second command asks **one
-yes/no question per admissible human-touching invocation**, using native selection controls and a paged
-context viewport (PgUp/PgDn, Home/End), and shows the whole context in it:
-the board root, every identity pair with the port each came from, the transition id, the config hash,
-what the yes authorizes, and the sentence it will record as your attestation that the old session ended.
-Nothing is typed anywhere in the flow. No is preselected, so a reflexive Enter declines; Escape declines
-the same way. A first coordinator on a board with no claim history needs the same single yes/no; the
-authority evidence it records is generated by the implementation and says so. Success records the
-transition in `coordinator-claim.md` and makes this running session the coordinator, without sending
-workers any work. A registered worker cannot be promoted.
+Status shows the board, both identity pairs and whether local responsibility is loaded, without
+changing anything. The second command asks **exactly one native No-first yes/no** for replacing an
+existing board's coordinator, using native selection controls and a paged context viewport
+(PgUp/PgDn, Home/End). It shows the board root, the configured old pair, this session's actually bound
+port, that only the two coordinator values change while every other parsed value (name, description,
+workers, jobs, handoffs, array order, tolerated unknown fields) is preserved, and that a disconnected
+or unknown old endpoint is not proof of termination. Nothing is typed anywhere in the flow and no
+attestation wording is recorded. No is preselected, so a reflexive Enter declines; Escape dismisses the
+same way. Success atomically replaces only those two parsed values and loads responsibility in place,
+without sending workers any work, reloading them, or starting a model turn. A registered worker cannot
+be promoted, removed, or rebound. An already-matching pair loads only, with no question and no write.
 
-A reachable old coordinator always blocks adoption. An unreachable endpoint **does not prove the
-session ended**; the single question states that, and your yes records the attestation.
-Failed or timed-out requests can have an
-unknown outcome: inspect status before retrying. The same command can finalize an interrupted
-transition or retry loading responsibility, but cannot recover prepared evidence belonging to a
-different session; that case needs human escalation. Stale locks also need human maintenance, not
-automatic removal. Do not edit board JSON to bypass a stop.
+A reachable old coordinator always blocks adoption. The question authorizes the replacement only.
+A replaced coordinator cannot perform later coordinator effects because the exact pair is re-read at
+each boundary; an already-submitted network action cannot be recalled. Failed or timed-out requests can
+have an unknown outcome: inspect status before retrying. A successful replacement whose local load
+failed is reported as *config replaced, local promotion pending*; a matching invocation loads only.
+Contention or a legacy lock directory needs human maintenance, never automatic removal or lock stealing.
+Do not edit board JSON to bypass a stop.
 
-See [recovery and the other limits](references/coordinator-adoption.md#recovery).
+**Boot-only port recovery:** a configured coordinator whose saved port was taken binds an OS-selected
+fallback and, at startup only, publishes that verified bound port under the same lock before any other
+coordinator effect (handoff recovery, observer maintenance, reminders, registration, tools). It
+refuses when its own endpoint cannot be verified or when the saved pair still answers; disconnected or
+unknown is not termination evidence. A `/intercom-adopt` command never repairs a same-id/different-port
+mismatch: restart this session, or free the saved port and restart.
+
+See the [adoption reference](references/coordinator-adoption.md) for refusals, recovery and limits.
 
 ## Explicit workflow
 

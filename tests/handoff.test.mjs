@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
 import { ConfigStore, validateConfig } from '../dist/config.js';
-import { envelope, send } from '../dist/transport.js';
+import { envelope, listen, send } from '../dist/transport.js';
 import { HandoffWorkflow } from '../dist/handoff.js';
 
 const identity = { workspaceId: 'space', paneId: 'pane', terminalId: 'terminal', sessionId: 'w', sessionFile: '/private/session.jsonl', pid: 123, processStart: '456' };
@@ -21,7 +21,12 @@ async function until(check) {
 }
 async function fixture(t, options = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-handoff-'));
-  await new ConfigStore(root).initialize('c', 12345);
+  // Reserve a free ephemeral port first: the configured port then equals the port the runtime binds,
+  // so this fixture never depends on boot port recovery (which is covered by its own dedicated tests).
+  const reservation = await listen(undefined, async () => {});
+  const savedPort = reservation.port;
+  await reservation.close();
+  await new ConfigStore(root).initialize({ sessionId: 'c', port: savedPort });
   const wire = [], deliveries = [], closes = [], inspections = [];
   const updates = [], publicationListeners = new Set(), pendingWaits = new Set();
   let lastPublishedJob = null, lastReadState = null, firstUpdateFailure = null, busy = false;

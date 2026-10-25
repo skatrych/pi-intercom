@@ -1,3 +1,5 @@
+> **Superseded by [ADR 0025](0025-git-independent-adoption.md):** coordinator authority is the board config entry; first-board creation is automatic runtime startup, and no declaration, claim record or Git evidence exists. This file is retained as historical provenance.
+
 # ADR 0009-A: First-declaration authorization is an explicit local UI decision
 
 > **Partly superseded (2026-10-19, issue #12).** Paragraphs requiring the exact ended sentence to be

@@ -51,7 +51,7 @@
     "prepare": "node scripts/prepare.mjs",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/core.test.mjs tests/root-isolation.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/linux-launcher.test.mjs tests/roles.test.mjs tests/activity.test.mjs tests/reports.test.mjs tests/worker-status.test.mjs tests/connections.test.mjs tests/reminders.test.mjs tests/reminder-config.test.mjs tests/handoff.test.mjs tests/pane-close.test.mjs tests/version.test.mjs tests/monitor.test.mjs tests/monitor-view.test.mjs tests/monitor-launcher.test.mjs tests/extension.test.mjs tests/runtime-http.test.mjs tests/resume-storage.test.mjs tests/observability.test.mjs tests/snapshot.test.mjs tests/snapshot-security.test.mjs tests/observability-integration.test.mjs tests/adoption.test.mjs tests/adoption-contract.test.mjs tests/adoption-bridge.test.mjs tests/adoption-runtime-extra.test.mjs tests/adoption-review-regressions.test.mjs tests/adoption-ux.test.mjs tests/adoption-ui.test.mjs",
+    "test": "npm run build && node --test tests/core.test.mjs tests/native-lock.test.mjs tests/root-isolation.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/linux-launcher.test.mjs tests/roles.test.mjs tests/activity.test.mjs tests/reports.test.mjs tests/worker-status.test.mjs tests/connections.test.mjs tests/reminders.test.mjs tests/reminder-config.test.mjs tests/handoff.test.mjs tests/pane-close.test.mjs tests/version.test.mjs tests/monitor.test.mjs tests/monitor-view.test.mjs tests/monitor-launcher.test.mjs tests/extension.test.mjs tests/runtime-http.test.mjs tests/resume-storage.test.mjs tests/observability.test.mjs tests/snapshot.test.mjs tests/snapshot-security.test.mjs tests/observability-integration.test.mjs tests/adoption.test.mjs tests/adoption-contract.test.mjs tests/adoption-bridge.test.mjs tests/adoption-runtime-extra.test.mjs tests/adoption-review-regressions.test.mjs tests/adoption-ux.test.mjs tests/adoption-ui.test.mjs",
     "test:adoption-host": "node --test tests/adoption-host.test.mjs",
     "test:adoption-dialog": "node scripts/adoption-dialog-host-check.mjs",
     "test:host": "node --test tests/pi-cancellation-probe.test.mjs",
@@ -59,6 +59,7 @@
     "check:package": "npm run build && npm pack --dry-run --ignore-scripts && npm run test:package"
   },
   "dependencies": {
+    "fs-native-extensions": "1.5.2",
     "pi-intercom-tui": "npm:@earendil-works/pi-tui@0.84.4"
   }
 }
