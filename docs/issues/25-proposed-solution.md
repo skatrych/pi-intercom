@@ -5,15 +5,19 @@
 Make adoption a config-entry replacement, not an evidence ceremony. The board config's
 coordinator `sessionId` and `port` are the authority. An eligible fresh Orchestrator session
 sees the board, old/new pairs and replacement effect, answers **one native No-first yes/no**,
-and atomically replaces only those two tokens. An already matching session loads responsibility
-without a question or write. **When no config exists at the safe projects-home root, runtime
-startup simply creates the first board and loads responsibility: no adoption command or question.**
+and atomically changes only those two parsed values. JSON formatting may normalize; all other
+parsed values survive. All writers share a crash-released native OS lock, not compare/rename CAS.
+An already matching session loads responsibility without a question or write. A configured
+same-session startup may recover its verified fallback port before any other coordinator effect.
+**When no config exists at the safe projects-home root, runtime startup simply creates the first
+board and loads responsibility: no adoption command or question.**
 
 Remove all Git and claim/evidence dependencies; do not replace them with a ledger, registration,
 migration or authority epochs. Keep cheap identity/collision checks, old-endpoint precheck and
 locked re-probe, board isolation and current-config permission checks. This preserves the
 human's [minimal-design ruling](https://github.com/skatrych/pi-intercom/issues/25#issuecomment-6325707173)
-and the accepted single-confirmation UX. [ADR 0025](../adr/0025-git-independent-adoption.md)
+and the accepted single-confirmation UX. Captain's [P1/P2/P3 ruling](https://github.com/skatrych/pi-intercom/issues/25#issuecomment-6402229840)
+selects the revised serialization, preservation and boot-recovery contracts below. [ADR 0025](../adr/0025-git-independent-adoption.md)
 records the lasting authority decision; the separate [Implementation Plan](25-implementation-plan.md)
 contains operational branches, source changes and validation.
 
@@ -35,11 +39,13 @@ lifecycle, canonical projects-home/root/config-path and strict config checks.
    Disconnected/unknown is not termination evidence; the question authorizes replacement only.
 3. Ask once, showing root and old/new pairs. No typed wording, ended attestation, evidence,
    cleanup question or saved answer. No/Esc/dismiss changes nothing.
-4. Under the existing all-writer lock, revalidate raw config, identity/endpoint, paths, board count
+4. Under the crash-released all-writer lock, revalidate raw config, identity/endpoint, paths, board count
    and collisions; repeat own/old endpoint checks and recheck after awaits. Any drift stops:
    no merge, stale-answer reuse, re-preview or second question in the invocation.
-5. Publish the existing lossless two-token patch; preserve name/description, all other bytes,
-   workers and jobs. Load responsibility in place without worker actions or a model turn.
+5. Parse the complete JSON, change coordinator id/port, validate and serialize it. Preserve
+   name/description, workers, jobs, array order and every tolerated unknown parsed value.
+   Duplicate keys and unsafe roundtrips refuse; no byte-span patcher remains. Publish atomically
+   and load responsibility in place without worker actions or a model turn.
 
 ### First-board creation and root safety
 
@@ -67,19 +73,42 @@ The old coordinator cannot overwrite adoption or initiate later coordinator effe
 fall through as worker traffic. Keep lifecycle/root validity, responsibility requirements and
 worker/target/job guards; ordinary worker behavior is unchanged.
 
-The selected exact-pair rule also refuses a configured coordinator after `EADDRINUSE` changes
-its bound port. Today's session-id-only boot `port_update` will not repair that mismatch once
-claim gates are removed: this is a known recovery limitation, not authorization to un-fence it.
-Recover by safely freeing the saved port and restarting, or use an eligible fresh session's
-normal adoption; no in-tool same-session rebind is provided. The plan proposes a narrow
-boot-only exception for human choice, not implementation.
+### Boot-only same-session port recovery
 
-A foreign or abandoned lock stops for separate owner investigation, never age/pid-based stealing.
-Its diagnostic must name the lock path and available owner details; after establishing no holder
-or in-flight publication remains, human maintenance may clear the abandoned lock and retry.
-Petro's compare-then-rename suggestion is not atomic CAS and cannot replace serialization: two
-writers can both compare the same old bytes before overwriting each other. Crash-released
-serialization and parse/serialize preservation are explicit proposals in the plan, not adopted.
+At canonical Orchestrator startup only, if the configured coordinator id equals this native session but its saved port
+is different, verify the actually bound endpoint, then acquire the shared writer lock. Re-read
+and freeze config; require the same coordinator id/old port, no other entry using the new port,
+and valid root/lifecycle/board paths. Probe the saved old pair: a matching live endpoint refuses.
+After every await and before publication/retry, recheck config, identity, paths and collisions.
+Publish only the port change through the same semantic writer. No question or saved consent.
+Keep all other coordinator effects closed until publication is verified, the current pair matches
+exactly and responsibility is loaded. In particular, do not run handoff recovery, observer
+maintenance, reminders, registration/config callbacks or tool/send effects before this boundary.
+The minimal bound health endpoint remains available; ordinary worker behavior is unchanged.
+
+This is not permission to un-fence today's whole startup branch: it does recovery/maintenance
+before updating the port. Command-time same-id/different-port still refuses and requests restart;
+a failed/stale boot does not retry a mutation automatically. Disconnected/unknown old endpoints
+still cannot establish termination. As approved in P3, automatic boot recovery accepts the risk
+of an unreachable duplicate running the same session id; it does not solve duplicate launch.
+
+### Crash-released serialization
+
+Use exact-pinned `fs-native-extensions@1.5.2` through a thin ConfigStore adapter: native exclusive
+nonwaiting `tryLock` on a stable regular `.pi-intercom/config.lock` file, retained process queue/
+nesting, and unlock/close in `finally`. Every config writer and initializer uses it through final
+publication/retries; never lock the replaceable config inode itself. The guard file is never
+unlinked, replaced or treated as held merely because it exists. A crashed holder releases the
+kernel lock without manual stale-lock cleanup (Linux last-reference and Windows delayed-cleanup
+caveats apply). Unavailable/contended native acquisition refuses and permits a fresh later attempt,
+not lock stealing. Provider/load/unsupported-filesystem errors refuse writes without a weaker fallback.
+
+The plan pins provider/API/source evidence, Linux/macOS/Windows constraints and required isolated
+platform tests. No native binary was installed or executed for this design. Existing directory-
+based legacy locks need offline all-process upgrade maintenance; never delete/convert one during
+adoption or infer death from a PID/age. That is a one-time upgrade constraint, not the new normal
+crash-recovery path. Compare-then-rename is not CAS: two writers can check the same bytes and then
+overwrite each other. Atomic publication still needs serialization.
 
 Pre-publish failure is not adoption success. An uncertain publication is reported as uncertain, without
 rollback/replay. Successful publication with failed local loading is **config replaced, local
@@ -97,8 +126,8 @@ actual config corruption or changed bytes still matter. No Git repair, ignore ed
 
 Ignore legacy `coordinator-claim.md` in every state, including prepared, malformed, missing or
 symlinked. Do not read, classify, follow, recover, rewrite or delete it. Config alone selects the
-branch after separate lock-owner resolution. Optional human cleanup is separately requested,
-not a migration or adoption prerequisite. The withdrawn ledger's durability/capacity/census/proof
+branch after normal lock acquisition (or separate legacy-lock upgrade maintenance). Optional human
+claim cleanup is separately requested, not a migration or adoption prerequisite. The withdrawn ledger's durability/capacity/census/proof
 tasks are not carried forward. Worker lease clean-tree and handover rules are unrelated.
 
 ### Delivery and acceptance limits
@@ -121,5 +150,6 @@ The installer-dirties-Git symptom becomes irrelevant to adoption once Git has ze
 this does not waive worker lease cleanliness. Upgrade every process sharing the board before
 using the new adoption model (documented operator prerequisite, not a new version handshake).
 Docs approval is not implementation, installation or issue-wide acceptance. The plan records
-all current review-comment dispositions and the precise optional human choices; none is implied
-accepted by taking comments into work.
+all review-comment dispositions and the concrete P1/P2/P3 selections. Those selections authorize
+this planning revision, not implementation. Provider packaging/platform support remains a required
+implementation gate; failure returns to Architect/human rather than a Developer lock redesign.
