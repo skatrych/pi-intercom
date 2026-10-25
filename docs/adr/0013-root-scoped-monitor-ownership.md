@@ -1,50 +1,41 @@
 # ADR 0013 — Root-scoped monitor ownership survives coordinator succession
 
+Status: Proposed. Authority: [PR28 / ADR0025 at `8e46bdbc`](https://github.com/skatrych/pi-intercom/blob/8e46bdbcdb1ddfdc7511f63c2fa61bb2542312a5/docs/adr/0025-git-independent-adoption.md).
+
 ## Decision Statement
 
 Keep monitor ownership and its mutation lock at the canonical board root, independent
-of the coordinator session ID. Transfer ownership of an existing monitor only when
-committed adoption evidence proves succession and saved pane identities match the
-current caller/monitor association. Do not retire or restart panes during handover.
+of coordinator session ID. A current config coordinator pair with loaded local
+responsibility may take over the display-only monitor after exact saved pane association
+checks. Transfer ownership metadata, not panes or processes. No succession history is read.
 
 ## Short Summary
 
-A board can outlive its coordinator. A monitor displays that board, while the
-coordinator session is its current authorized owner, not its persistence key.
-Launch uncertainty belongs to the board and must outlive changes of owner.
-
-Status: Proposed. Related: [coordinator adoption](../../references/coordinator-adoption.md).
+A board outlives its coordinator. Its recognized monitor and unresolved launch uncertainty
+must survive that change. Config supplies current authority; the root-local record and
+Herdr identity checks establish which monitor belongs to that board.
 
 ## Details
 
-- One root-scoped record names the owner session, caller, monitor, workspace, tab
-  and launch stage. A root-scoped exclusive lock serializes cooperating monitor
-  writers across sessions. Legacy ownership evidence is preserved during migration;
-  unresolved legacy locks and partial operations still fence all new mutations.
-- Handover requires a current authorized coordinator and a verified completed
-  adoption path from the recorded owner to that coordinator, for the same root.
-  Committed claims prove succession; root-local ownership and current Herdr inventory
-  prove pane association. Neither proof replaces the other.
-- Missing evidence, conflicting identities, moved panes and uncertain mutations
-  refuse without pane changes. Ownership publication is atomic. An interrupted or
-  uncertain publication remains fenced, not permission to launch a replacement.
-- Recognition preserves an existing pane without command injection. Neither pane
-  existence nor command submission establishes monitor-process readiness.
+### Context, alternatives and rationale
 
-### Alternatives and rationale
-
-Session-keyed records alone lose both ownership and uncertainty at succession.
-Claiming a generic label invents authority. Warning suppression leaves the ownership
-problem unresolved. Controlled retirement would add a destructive operation and
-uncertain-closure recovery without improving this display-only handover. A verified
-root-scoped handover retains the existing identity-based reuse model without them.
+Session-keyed state loses ownership and uncertainty at succession. Generic labels and
+warning suppression cannot establish ownership. Retirement adds destructive operations
+without improving a display-only handover. One root record and exclusive monitor lock
+retain association and uncertainty across sessions, with atomic ownership publication.
+This durable monitor fence is distinct from the config writer's crash-released lock.
 
 ### Consequences
 
-Persistence migration and adoption-proof integration are required. Some legacy or
-ambiguous states still need inspection; there is no automatic orphan cleanup.
-Adoption itself remains pane-effect-free and does not change its consent protocol.
-The lock is a cooperating local-filesystem contract, not protection from old writers
-that do not implement it or malicious same-user changes. Deployment must not leave
-an older monitor writer running concurrently. Handover does not prove a process is
-alive or that a person has not repurposed an otherwise identically labelled pane.
+Migrate completed legacy ownership conservatively; unresolved locks, partial launches,
+unsafe paths, moved/conflicting panes and insufficient identity data remain inspection
+cases. Revalidate current config permission and association across awaits and at effects;
+reuse never injects a command or proves process readiness. No claim/Git/proof integration
+or new authority subsystem is required. Adoption/promotion remain pane-effect-free.
+
+The default association contract keeps the saved caller/monitor/workspace/tab unchanged.
+Caller relocation is a separate unaccepted contract change described in the issue plan,
+not permission to move/close panes or silently reduce acceptance coverage. The filesystem
+protocol assumes cooperating upgraded local writers, not malicious same-user protection.
+Old writers must not run concurrently; no orphan cleanup, automatic fence removal or
+atomic Herdr compare-and-act guarantee is introduced.

@@ -1,250 +1,218 @@
 # Issue 13 — Implementation Plan
 
-Companion: [Proposed Solution](13-proposed-solution.md),
+Companions: [Proposed Solution](13-proposed-solution.md),
 [ADR 0013](../adr/0013-root-scoped-monitor-ownership.md).
-Requirements snapshot: issue body SHA256
-`a68492345de53c3b422882938757bf2e11996ff9eef4d8a55109f86fdd7be0fb`;
-source base `main@23bc10fa959f179811cc43415921a2a144d40e10`.
-This is a design baseline for later authorization, not permission to repair a live board.
+Requirements: [issue13](https://github.com/skatrych/pi-intercom/issues/13), unchanged body
+SHA256 `a68492345de53c3b422882938757bf2e11996ff9eef4d8a55109f86fdd7be0fb`.
+Source base: `main@23bc10fa959f179811cc43415921a2a144d40e10`.
+Authority dependency: [PR28](https://github.com/skatrych/pi-intercom/pull/28), exact
+`8e46bdbcdb1ddfdc7511f63c2fa61bb2542312a5` (ADR0025 and issue25 solution/plan).
+This is docs-only planning, not implementation or live repair authorization. The AC1
+caller-relocation coverage gap in §4 prevents unconditional implementation-ready routing.
 
-## 1. Components and persistence
+## 1. State and migration
 
-Change `src/monitor-launcher.ts`, narrowly integrate authority/proof in
-`src/runtime.ts`, `src/adoption.ts` and `src/index.ts`, extend isolated monitor,
-extension and adoption regressions, and update README's monitor operations section.
-Follow the repository build convention for generated `dist` during implementation.
-Do not add a tool, endpoint, slash command, adoption consent step or dependency.
+Later implementation changes `src/monitor-launcher.ts`, runtime/index integration,
+monitor/extension/runtime tests, `.gitignore`, README and generated `dist`. Recheck locators
+after PR28 integration; no stacking/rebase, adoption helper, endpoint, command or dependency.
 
-### Root-scoped state
+Use machine-local `.pi-intercom/monitor-owner.json` version 2 with canonical `boardRoot`,
+`ownerSessionId`, `caller`, `pane`, `workspace`, `tab`, `stage` and operation ID.
+`pane` may be absent only before a split result is known. Keep completed `submitted`/
+`observed` and pending `split_pending`/`rename_pending`/`swap_pending`/`run_pending` stages;
+unknown stages or incomplete completed identities refuse. Optional `legacySource` is the
+exact imported v1 basename, not a hash or authority token. No handover proof/history fields.
 
-Use `.pi-intercom/monitor-owner.json` (version 2) and
-`.pi-intercom/monitor-owner.lock`, both machine-local. The record contains:
+Use exclusive-create `monitor-owner.lock`, containing this operation's root/session/token.
+All upgraded monitor writers use it; only its matching holder releases it. This is a
+**durable monitor uncertainty fence**, not PR28's crash-released `config.lock`: a launch
+can outlive its caller and must not become retryable on caller death. Do not reuse the
+config transaction lock or extend it across Herdr commands. No age/PID lock takeover.
+Pin canonical root; reject symlink/unsafe board, ownership, lock and publication paths.
+Publish through exclusive same-directory temp + atomic rename with final permission
+checks. Only confirmed success or a known no-effect refusal releases the owned lock;
+publication uncertainty retains it and source/temp evidence for inspection.
 
-- canonical `boardRoot`, `ownerSessionId`, `workspace`, `tab`, `caller`, optional
-  `pane` only while the split identity is unknown, and `stage`;
-- operation ID for the last launch/publication;
-- optional `importedLegacy`: exact basename and SHA256 of the original v1 record;
-- optional `handover`: prior owner session, verified active adoption commit and
-  transition ID authorizing the latest transfer.
+Under that lock, enumerate this root's producer-shaped v1 `monitor-<24hex>.json` files,
+their locks and monitor publication temps, including sessions older than the immediate
+predecessor. Any lock, unfinished temp, partial/invalid/unreadable record fences effects;
+an invalid v2 never falls back to v1. Validate v1's existing filename/session-key relation
+(the producer's SHA256 truncation is compatibility, not a new proof hash). Its canonical
+containing directory supplies root binding; it has no stored root/tab. Verify its saved
+caller/workspace/pane through exact inventory and establish tab from both live panes.
 
-Require exact types, nonempty bounded identifiers, recognized stage/version and
-safe regular-file paths. Keep the existing completed stages `submitted` and
-`observed`, and launch stages `split_pending`, `rename_pending`, `swap_pending`,
-`run_pending`. Missing required pane identity in a completed record is invalid.
-Do not turn an unknown stage into a completed stage. No process-ready stage is added.
+Import only one unambiguous completed live candidate after §2/§3 checks. Leave v1 unchanged;
+v2's `legacySource` identifies the one corroborating record, not a second candidate.
+Require that source to remain a safe completed v1 with the same caller/workspace/pane/
+stage tuple and valid filename/session relation. Missing or inconsistent source refuses.
+Do not hash arbitrary bytes: field validation/association, not byte provenance, protects
+this cooperating-local-filesystem migration. Other live records conflict; completed
+records with positively absent panes remain historical, not selectable by age. Locks/
+partial states always fence, even for historical or imported records. Revalidate this
+inventory and saved identities before publication/effects. No other-root scan or cleanup.
 
-The lock is exclusive creation, with an operation ID and owning session/root.
-All upgraded checks, imports, handovers and launches use this same lock. Only the
-operation holding its matching token may release it. No age/PID-based takeover.
-Check canonical root and non-symlink board directory/file paths; do not follow an
-ownership file into another root. Temporary publication files are unique, local,
-exclusive and atomically renamed. Check authority immediately before publication.
+**F1 integration under PR28:** add exact ignore entries for `monitor-owner.json`,
+`monitor-owner.lock` and owned publication temps; retain legacy ignores. PR28 deletes
+`inspectBoardNamespace`/first declaration, so do **not** revive/extend that obsolete
+adoption allowlist. A valid v2/lock must not obstruct first-board initialization or a
+matching-config responsibility load merely by existing; a lock still fences monitor
+work. Preserve config/root path refusals, monitor-file symlink/foreign-root refusals
+and board isolation. Foreign unrelated artifacts are not a new adoption allowlist gate.
 
-### Legacy inventory, including fences
+## 2. Current permission and bounded lookup
 
-Under the root lock, enumerate **all** legacy `monitor-<24-hex>.json` records,
-their `.lock` files and unfinished monitor publication `.tmp` files in this board,
-not just records keyed by current/previous sessions. Revalidate the inventory before
-an effect. A partial/invalid/unreadable record, any legacy lock (even without its
-record), or unfinished publication refuses further effects. A canonical malformed,
-partial or foreign-root record likewise refuses; never fall back to a legacy file.
+Require PR28's current strict-config coordinator pair to match this runtime's native
+session/actually bound port, with local responsibility loaded for the pinned root. Reuse
+its fresh runtime-owned check, not cached `me.coordinator` or caller-supplied identity/proof.
+Check admission, before/after awaits, immediately before publication/pane effects, retries
+and success. Observed drift ends the invocation; later loading cannot resume it. Preserve
+lifecycle generation/root/path/worker/target/job guards, empty-roster/non-Herdr behavior.
+P3 boot publication/loading precedes monitor work; monitor setup never repairs ports.
+No claims, Git, epochs, attestations or chain: the current coordinator can take over the
+associated display regardless of how many sessions preceded it.
 
-Validate each v1 filename against its payload session hash. The canonical containing
-board directory supplies v1's root binding; v1 has no embedded root or tab. Do not
-scan other roots, import user-supplied paths or guess provenance from a label.
-The saved caller/workspace/pane plus current Herdr association supply the remaining
-legacy identity evidence. This retains the existing cooperating-filesystem trust
-model; it does not authenticate a deliberately copied/forged same-user record.
+Use `pane current --current` for the actual caller, workspace inventory for discovery,
+and `pane get <exact-id>` for saved caller/monitor identities and any incomplete rows.
+Match workspace/tab explicitly; a moved pane is not absent. Only a structured explicit
+not-found for the requested ID establishes absence. Empty output, nonzero exit, malformed
+JSON, timeout, transport failure or unsupported lookup is uncertainty, not absence.
+`src/pane-close.ts` demonstrates exact lookup and a 4000ms bounded runner, but does not
+establish a documented not-found payload: test the supported Herdr adapter contract;
+if a host cannot distinguish it, refuse replacement rather than interpret an error string.
 
-Preserve the imported v1 file unchanged. Once v2 is published, only its exact
-`importedLegacy` bytes are superseded for candidate selection, not its locks or
-partial-state checks. Missing/changed imported evidence is an inspection case.
-Other completed legacy records with positively absent panes are historical evidence,
-not candidates; retain them. Other live records are competing ownership evidence and
-must be accounted for before creation/handover; do not choose “newest.”
+**Lookup budget:** at most 4000ms per read-only Herdr subprocess, 20000ms aggregate elapsed
+read budget per check and 16 read calls, whichever limit is reached first; zero retries,
+abort on the first error. Each timeout is `min(4000ms, remaining read budget)`, not 16 × 4s.
+Deduct all initial/final inventories and exact lookups. Refuse when a complete classification cannot
+fit, not partial success. Apply real subprocess timeout/termination and await settlement,
+not a `Promise.race` leaving work pending. Cap output at 1 MiB. The 20s budget is not a hard
+OS/process-cleanup or filesystem deadline; a stalled cleanup never licenses lock release
+while work is unresolved. Keep existing 40000ms mutation-command bound (`src/launcher.ts`),
+no mutation retries; timeout after submission is durable uncertainty. Pre-effect read
+failure releases only this operation's no-effect lock; after a pending effect it retains
+the record/lock. Test injected runners against these limits without sleeping/live Herdr.
 
-## 2. Authority and succession proof
+## 3. Reconciliation and failure table
 
-Expose a narrow **internal**, runtime-owned monitor authorization capability. It
-captures runtime/session generation and action-readiness epoch, pins canonical root,
-current coordinator identity and responsibility, and provides a fresh assertion for
-every effect. Extend the existing runtime guard rather than treating the boolean
-`coordinatorActionReady()` as fresh external-evidence approval.
+Classify **all** conflicts before reuse/import: every generic/session-bearing label in the
+current tab, all root-record candidates irrespective of tab, caller-as-monitor, moved or
+competing saved identities. A recorded monitor must retain the generic or recorded-owner
+legacy marker; mismatched/missing marker refuses, not automatic rename. Foreign labels
+discover conflicts, never confer ownership.
+Do not select the newest record or ignore another caller's root record to launch anew.
 
-For adopted boards, use `assertActionReady`'s current claim/config/committed-evidence
-proof at final-effect boundaries. For claim-free legacy coordinators, still verify
-that this session is the current coordinator in the bound board; permit ordinary
-same-session behavior but never infer cross-session succession. Session/epoch loss,
-changed config/claim, unavailable Git evidence or unloaded responsibility stops the
-operation. Check immediately before and after awaited Herdr commands, and before
-ownership publication and successful return. A stale capability cannot revive when
-readiness later reopens.
-
-Add a read-only adoption proof helper, reusing the existing canonical parser and
-active/prepared ancestry proof, not a second weaker interpretation of claim JSON.
-It verifies the newest committed active claim, identical worktree bytes, root,
-current board pair, local promotion and captured epoch. Then:
-
-1. A completed adoption's `previous` identity is the direct predecessor, including
-   adoption from a board without older claim history. Its ended attestation and
-   prepared-to-active derivation must already validate through existing proof.
-2. If the monitor owner is older, walk `previousRecordCommit` links. Each historical
-   active claim must be canonical, committed, same-root, an ancestor of its successor's
-   prepared intent, and have a coordinator pair equal to that successor's `previous`.
-   Validate its own prepared-to-active derivation before using its `previous` edge.
-3. Prepared-before renewal may leave intermediate prepared claims in these links.
-   Traverse only anchored renewal records of the **same transition**, root,
-   coordinator/previous pairs and before/after hashes, following their prior links
-   until the historical active predecessor is reached. A prepared record by itself
-   never supplies a completed succession edge.
-4. Stop at the first matched owner. A first declaration supplies no predecessor;
-   cycles, missing objects, unrelated transitions, inconsistent pairs, resource-bound
-   exhaustion or broken ancestry refuse. Do not search arbitrary older commits for
-   a convenient match. Pin the proof to the current active commit/epoch and reprove
-   it before ownership publication.
-
-Keep this capability inside runtime/launcher integration. No external caller may
-supply an owner, predecessor, “confirmed” flag or serialized proof as authority.
-Preserve adoption's existing transaction and promotion semantics: do not call monitor
-setup from `adoptCoordinator` or `promoteCoordinator`.
-
-## 3. Reconciliation algorithm
-
-Preserve non-Herdr early return and empty-roster skip. Use Herdr's actual
-`pane current --current`, not focused-pane or stale environment-ID fallback.
-Use complete workspace inventory for current-tab candidates. Discover both generic
-and session-bearing monitor labels, including foreign-session markers; an unowned
-foreign marker in the caller tab blocks creation, never grants ownership. For each
-recorded pane that appears missing, query `pane get <exact-id>` (already used by this repo's
-close provider): only an explicit not-found is absence; transport errors, malformed
-results or unsupported lookup are uncertainty. Lookup that finds another workspace
-or tab means moved, not absent. Validate workspace/tab identity of rows, querying
-the exact pane when a list does not supply enough identity data.
-
-After acquiring the root lock and validating all evidence, classify conflicts
-**before** any positive reuse/import path. Extra current-tab generic labels or
-session markers are competing candidates, including when one owned pane already
-matches. The exact imported legacy record corroborates v2, not a second candidate.
-Apply this order:
-
-| State | Action |
+| State after complete inventory and fresh permission | Result |
 |---|---|
-| Any unresolved lock, partial publication/launch, invalid state or lost authority | Refuse; no pane changes, no fallback. |
-| Completed v2 with live matching caller/monitor/workspace/tab | Reuse if owner is current; otherwise require verified succession and publish owner transfer. |
-| No v2; exactly one completed v1 live candidate bound to this caller/workspace, same current tab | Import if same-session; otherwise require verified succession, then publish v2 for successor. |
-| No record; exactly one current-session legacy marker, valid caller association and no other candidate | Retain existing legacy-label migration, capture v2 identities; rename only that verified legacy pane. |
-| Foreign owner without succession, generic-only, caller marker, multiple/conflicting candidates, or moved pane | Refuse with exact IDs/failed association; no claim, rename, split or command injection. |
-| Completed owned state and positively absent monitor | Require current ownership or succession proof, matching saved caller/workspace/tab where recorded, and no competing candidate/fence; allow one normal replacement launch. |
-| No ownership records, candidate or fence | Allow one normal launch. |
-| Legacy history exists but no unambiguous completed current/verified-predecessor owner can be selected | Refuse; do not select a record by age or treat its absence as a claim-free first launch. |
+| Lock/partial/temp/invalid state, conflict, missing identity or lost permission | Inspection refusal; no fallback or pane mutation |
+| Completed v2; exact saved caller/monitor/workspace/tab match current association | Current owner: reuse without rewrite. Different owner: atomically update owner/operation ID only; same pane and stage |
+| No v2; one completed v1 live candidate with exact current caller/workspace/tab association | Import v2 for current coordinator, regardless of old session; preserve v1 and pane |
+| No record; one current-session legacy marker, same tab and verified caller association; no conflicts | Preserve existing label migration: publish observed v2 and rename only that verified legacy marker |
+| Generic-only/foreign marker, different caller/tab/workspace, moved monitor, multiple candidates | Name IDs and failed association; refuse without claim, split, rename, run or close |
+| Completed record, exact caller/workspace/tab match, monitor positively absent, no candidates/fences | One ordinary replacement launch for current root coordinator; absence must be exact, not list-filter absence |
+| No ownership evidence/candidate/fence | One ordinary launch |
+| Legacy history only with no unambiguous associated owner | Refuse; history is not permission for a new first launch |
 
-For v1, establish tab association from the live saved caller and monitor, since it
-was not persisted. For v2, saved tab must also match. Any additional recorded identity
-must match; never discard a mismatch to make migration succeed. A known record for
-another caller does not become permission to create a monitor for the new caller.
-A current-tab generic label or session marker with no verified association blocks
-creation even when an owned record's old pane has disappeared.
+Handover/import changes no pane; repeated v2 checks make no rewrite/command. Renaming a
+current-session legacy marker is the existing exception, not predecessor handover.
+Launches retain preflight/quoting/no-focus/geometry checks; save `split_pending` before
+split, then distinct returned ID and each pre-effect stage. `submitted` acknowledges
+command submission only, not readiness.
+On confirmed-absence replacement, the new pending/completed record drops `legacySource`;
+the untouched v1 now belongs to positively absent history, not the replacement pane.
 
-For handover, preserve pane/caller/workspace/tab and completed stage. Atomically
-publish v2 with successor owner, operation ID and handover evidence; no rename,
-split, swap, close, focus change or `pane run`. On legacy import record its byte hash.
-Release the owned lock only after confirmed publication and final authority check.
-Repeated checks then recognize v2, with no ownership rewrite or pane command.
+Pre-effect refusal names known candidates/root/owner and “no pane mutation attempted.”
+After split submission name returned ID or “identity unknown” and persisted stage. An
+uncertain filesystem publication, command, lock release or interruption retains evidence;
+never auto-unlink a fence, retry, roll back, retire or clean up. Crash after successful
+publication but before lock release still requires inspection. Revalidation cannot recall
+submitted OS work or make Herdr association checks atomic against external pane changes.
 
-For a new/replacement launch, retain the existing explicit entrypoint preflight,
-no-focus split, geometry/focus verification, quoting and platform behavior. Persist
-`split_pending` **before** splitting; persist the returned distinct pane ID before
-renaming; preserve each existing pre-effect stage. Publish `submitted` only after
-command submission is acknowledged. Never run a command in a reused pane.
+## 4. AC1 gap and unaccepted metadata-relocation option
 
-## 4. Interruption and diagnostics
+The solution's source-supported matrix is mandatory coverage, not optional clarification.
+Same-pane handover satisfies the reported fixture; different-pane succession remains a
+coverage gap against broad AC1. Do not represent its safe refusal as full AC1 completion.
+The smallest recommended extension is **ownership metadata relocation only**, not moving,
+closing or restarting a monitor. It needs explicit approval of the changed association
+contract (and AC2 interpretation); it is **not part of the authorized algorithm above**:
 
-- Pre-effect refusal releases only this operation's lock, changes no ownership
-  evidence/panes, and identifies the known candidate(s), root, owner and failed
-  identity/proof or fence. Say “no pane mutation attempted,” not “unknown pane remains.”
-- Once a launch stage is persisted, any failure/timeout/authority loss retains that
-  durable partial record. Once handover/import publication is attempted, an uncertain
-  filesystem outcome retains the root lock, source evidence and any temp file. No
-  finally block may erase a fence to make the next session work. Known no-effect
-  refusals and fully verified success are the only normal lock-release paths.
-- Crash after lock acquisition, after successful ownership publication but before
-  release, or uncertain lock release is an inspection case. A lock left by a finished
-  operation is still not auto-cleared. State may be published despite a failed receipt;
-  report that accurately, never retry or overwrite automatically.
-- During split uncertainty, distinguish “split submitted; resulting pane ID unknown”
-  from a known returned pane ID. Later failures name pane ID and persisted stage.
-  A command failure does not establish whether its mutation occurred.
-- Success says “ownership handed over / existing pane preserved; process readiness
-  not checked” or “command submitted; readiness not awaited.” Never report a live
-  monitor process, retirement or cleanup from inventory alone.
+- Require §2's current exact config pair/root/responsibility and the exact current caller
+  from this runtime's `pane current --current` plus `pane get`. Never accept a caller ID
+  argument or bind an unrelated root. Reject current caller equal to monitor.
+- Resolve one completed predecessor root record (or unambiguous completed v1); validate
+  its recorded owner session, original caller, monitor, workspace and original tab. Query
+  both old caller and monitor exactly. The monitor must still match its recorded location
+  and marker, not have moved. Any extra candidate/lock/partial state refuses.
+- For the old caller: explicit not-found can establish it is gone; if present, require its
+  original workspace/tab and verifiable Pi session identity matching the saved predecessor
+  owner, not merely a label. Existing `src/pane-close.ts:verifyPane` queries `pane get`,
+  requires `agent === 'pi'`, `agent_session.source === 'herdr:pi'`, `kind === 'path'`, then
+  canonicalizes that path; `verifySessionHeader` safely opens a regular no-follow file and
+  checks its first header's session ID. That provider is Linux-only: the recommendation
+  needs injected/real supported-host adapter evidence before claiming Windows coverage.
+  Reuse this bounded read-only pattern only where supported; no session-history listing.
+  A header alone proves neither live process ownership nor termination; even this mapping
+  is not hostile repurposing protection. Missing/mismatched data refuses, never means “old
+  coordinator ended.” Current config, not endpoint silence/title/header, revokes authority.
+- Same-tab new caller: update owner/caller metadata after fresh exact checks, retain the
+  original monitor. Different-tab new caller: reuse the **remote display in its original
+  tab**, with no new monitor in the successor tab. Store current `callerTab` separately
+  from monitor `tab`; each later check verifies both rather than requiring their equality.
+  Cross-workspace relocation stays refused unless separately authorized. No need to scan
+  session history, persist a succession chain or authenticate old config ports.
+- Atomically publish new owner/caller/current-caller-tab after revalidation across awaits;
+  preserve monitor identity/location/stage and legacy source. Migration validation must
+  compare legacy evidence against the original association, not the rebound caller: the
+  extension would need one immutable imported association tuple, **not a growing history**.
+  Tests must cover interruption, repeated remote reuse and repurposed/missing old caller.
 
-Recovery remains operator inspection, outside automatic setup. Documentation names
-root/legacy records and locks and the exact association to inspect; it does not
-instruct deleting locks, closing a label-matched pane or editing an owner session to
-bypass the proof. Repeated checks, session replacement and time passage grant no
-recovery authority. There is no retirement or closure branch in this implementation.
+This is a concrete recommendation for independent review, not authority to add those
+fields/checks now. Alternative: explicitly amend AC1 to unchanged same-pane association
+and separately track relocation. An undocumented scope cut, or automatic cleanup/rebinding
+based only on “old caller no longer coordinator,” is not acceptable. If different-tab AC1
+also requires the display to appear beside the successor, metadata-only reuse is insufficient;
+that separate placement/destructive-operation choice needs human direction.
 
-## 5. Implementation sequence and validation
+## 5. Sequence, validation and review dispositions
 
-1. Add persistence/legacy classification and root-lock tests, then implement them.
-2. Add verified succession and pinned runtime authority capability; cover immediate,
-   multi-adoption and renewal history paths and all proof refusals.
-3. Wire reconciliation through existing serialized monitor task/startup/configure
-   paths. Keep adoption/promotion pane-effect-free. Add accurate diagnostics.
-4. Update operational docs; build and run focused tests, full tests and typecheck.
-   Run package gate separately where network is available. Do not run live adoption
-   or production Herdr commands as implementation validation.
+1. After independent design review/human gate and resolution of §4, wait for PR28's
+   implementation integration. Recheck exact-pair/load/P3 boundaries and source locators.
+   Its selected native provider, semantic config writer and boot recovery are dependencies,
+   not decisions to reopen or duplicate in monitor code.
+2. Add state/lock/migration and current-permission tests, then root-scoped reconciliation.
+   Wire existing serialized startup/reload/first-worker checks; no monitor call from adoption
+   or promotion. Include F1 ignore/load regressions; no obsolete declaration namespace scan.
+3. Update README operations, build, run focused monitor/extension/runtime tests,
+   `npm run typecheck`, `npm test`, then `npm run check:package` where available.
+   Independent review of actual implementation follows; no live adoption/Herdr validation.
 
-All new tests use temporary board roots, synthetic session IDs/claims and an
-injected Herdr inventory/runner. Git proof fixtures use disposable Git repositories;
-no installed role or live `.pi-intercom` access. Retain before/after record bytes,
-inventory and **command traces**, with explicit no-mutation assertions:
+Use temporary board roots, synthetic session IDs/config and injected Herdr runner/inventory.
+Record before/after ownership bytes, inventory and command traces, not only message strings.
 
-| Coverage | Required evidence |
+| Coverage | Required assertions |
 |---|---|
-| AC1 | Registered worker, completed predecessor v1 generic-label pane, valid committed adoption, unchanged caller association: one v2 successor owner, original v1 unchanged, exactly the same monitor pane, no split/run/close. Repeat for existing v2, multi-adoption and renewed adoption. |
-| AC2 | Foreign root/session, config-only ID edit, declaration without predecessor, malformed/deleted/newer/dirty/prepared/unreachable claim, unloaded promotion, wrong caller/workspace/tab, moved exact pane, caller marker, multiple candidates, missing fields and changed source hash: refusal, unchanged panes/ownership evidence. |
-| AC3 | Every pending stage, legacy lock without record, canonical lock, temp publication, malformed state, split timeout before/after simulated mutation, unknown returned pane, publication/lock-release uncertainty, crash boundaries and epoch/authority loss before/after each await: fence survives reload and another successor; no blind retry or cleanup. Include concurrent different-session checks, with at most one mutation winner. |
-| AC4 | Repeated same/successor-session checks after successful import/handover: one pane, no further record rewrite/rename/run/split/close, truthful readiness outcome. Confirmed absent completed pane may launch once; moved/unknown absence never may. |
-| AC5 | Known-unowned generic pane refusal names its ID and no attempted split. Genuinely uncertain split names the pending stage and unknown/new pane accurately. Compare traces, not only strings. |
-| Regression | Ordinary creation, same-session reuse, current-session legacy-label migration, missing pane, no workers, first worker, saved disconnected worker, non-Herdr, missing build, Windows quoting and Linux quoting, geometry/focus, messaging unaffected by monitor refusal, adoption/promotion no pane effects. |
+| AC1 supported path | Registered worker, v1 then v2 predecessor, current successor config pair + loaded responsibility, unchanged association: one successor-owned original pane, v1 preserved, no split/run/close; repeat after multiple replacements without any claim/history |
+| AC1 gap | Different-pane same-tab, different-tab and different-workspace fixtures prove baseline reachability/refusal differences and proposed no-duplicate refusals; not marked AC1 passing until §4 resolved |
+| AC2 | Wrong session **or bound port**, unloaded responsibility, replaced runtime/root, malformed config, foreign root/record/marker, wrong caller/workspace/tab, moved exact pane, caller marker, multiple candidates, changed/missing legacy source: refuse without ownership/pane mutation |
+| AC3 | Every pending stage, old lock without record, root lock, temp, publication/release uncertainty, crash boundaries, read error/budget exhaustion, split timeout before/after simulated mutation, permission loss before/after each await/publication retry: fence survives reload/new successor; concurrent sessions at most one winner |
+| AC4–5 | Repeated recognized v2 has no rewrite/rename/run/split/close; exact absence permits one launch, moved/unknown does not. Known-unowned/no-split and genuinely uncertain split diagnostics differ; readiness never inferred |
+| Regression/F1 | Creation/reuse/legacy marker, geometry/focus, missing build, Linux/Windows quoting, no workers/first worker/saved disconnected worker, non-Herdr, messaging/worker guards, adoption/promotion pane-effect-free; v2 before matching-pair load/first startup; exact artifact ignores, monitor lock still fences, config/monitor path refusals preserved |
 
-Suggested gates: `node --test tests/monitor-launcher.test.mjs` after build,
-`npm run typecheck`, `npm test`, `npm run check:package`. Extend relevant runtime,
-extension and adoption tests rather than relying only on a mocked proof boolean.
-Unsupported/missing Herdr identity data must produce a tested safe refusal, not a
-claim of all-host support. Real Windows/Linux Herdr smoke, if separately authorized,
-is deployment evidence rather than a substitute for isolated fault injection.
+This round validates docs/links/whitespace only, not behavior (including the historical
+8/8 baseline). No build/runtime test, probe, install or board/pane write. Retire/reload old
+monitor writers before deployment; PR28's whole-board upgrade is not termination proof.
+Risks: mixed writers, filesystem interruption, unsupported identity/not-found data and
+same-user record/pane forgery. No distributed/process-provenance/cancellation guarantee.
 
-## 6. Design validation, risks and handover
+| Review source | Disposition in this round |
+|---|---|
+| Petro [original review](https://github.com/skatrych/pi-intercom/pull/31#pullrequestreview-5622249196), [authority inline](https://github.com/skatrych/pi-intercom/pull/31#discussion_r4354675537), [chain inline](https://github.com/skatrych/pi-intercom/pull/31#discussion_r4354675630) | Addressed: current-config/root/loaded responsibility + exact association replace all removed proof machinery, fields, tests and ADR consequence; implementation after PR28 integration |
+| Petro [caller/tab inline](https://github.com/skatrych/pi-intercom/pull/31#discussion_r4354675717), original review §2 | Coverage gap acknowledged, source matrix and concrete unaccepted metadata-only option in §4; no silent AC1 narrowing or unauthorized rebinding |
+| Original review size, migration, lookup, consequences | Addressed: remove history/proof sections and repeated narrative, keep actionable state/migration/tests; no new source-byte hash; concrete 4s/20s/16-read/zero-retry budget; concise ADR |
+| Petro [drift review](https://github.com/skatrych/pi-intercom/pull/31#pullrequestreview-5630892995), [claim-free inline](https://github.com/skatrych/pi-intercom/pull/31#discussion_r4361483318) | Addressed: no claim-free cross-session refusal; same rule for every current coordinator. ADR top headings match current Architect rules and PR28 exact dependency: Decision Statement / Short Summary / Details |
+| Independent [B1](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6362731506) and [Captain routing](https://github.com/skatrych/pi-intercom/issues/13#issuecomment-6402437740) | Authority choice settled by Captain; incompatible proof contract removed. Fresh independent review still required; §4 remains a separate coverage choice |
+| Independent [F1](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6344223490), [accepted carry](https://github.com/skatrych/pi-intercom/pull/31#issuecomment-6344246768) | Retained and adapted explicitly in §1/§5: artifact/lock ignores and load/startup regression; obsolete adoption allowlist/declaration removed by PR28, not revived; path/foreign-root safety retained |
 
-Read the full current issue body/comments and the reviewed Swactory shared/Architect
-source instructions (`swactory origin/main` at
-`c80197daa373723a1834ba48b15081d30d32869e`). No approved-body drift.
-Read launcher/runtime/adoption proof and relevant tests at the recorded base.
-Ran the committed baseline `tests/monitor-launcher.test.mjs`: 8/8 pass, no build or
-tracked changes. An isolated ephemeral injected-runner probe reproduced the
-successor generic-label refusal with only `current,list`, unchanged predecessor
-record and unchanged inventory. A prior `split_pending` record and lock were ignored
-by the successor, which reached entrypoint preflight instead of reporting the fence.
-All temporary probe/test roots were removed. No live board/pane was inspected.
-
-These checks do not validate the proposed implementation; its new behavior remains
-unimplemented. No full suite, package gate, new fault-injection suite, installed
-version comparison or real Herdr smoke is claimed for this docs-only assignment.
-
-Main risks are incomplete legacy provenance, ancestry/renewal proof mistakes,
-cross-version writers and filesystem interruption. Conservative refusal is preferred
-to duplicate creation. Deployment must retire/reload older monitor writers before
-using the new lock protocol; active adoption already requires the named predecessor
-ended. A same-user forged root-local v1 record or identically repurposed pane cannot
-be authenticated retrospectively; no process readiness/provenance detector is added.
-There are no unresolved design choices requiring Developer risk acceptance and no
-live recovery authorization. Local helper structure, bounded I/O implementation and
-error formatting remain Developer choices, subject to the contracts above.
-
-Deliverables are exactly the Proposed Solution, this plan and ADR 0013 under `docs/`.
-Declared remaining fixtures: **none**. Intended handover: Coordinator publishes the
-docs-only draft architecture PR and dispatches independent review; implementation
-waits for subsequent workflow authorization. Workspace write ownership remains with
-the assigned Architect until the Coordinator records its transfer.
+Deliver exactly these three docs; no fixtures/submodules. Hand back pushed SHA/clean tree/
+index to Coordinator on issue13 for mandatory independent review. No implementation, install,
+board repair, thread resolution or operative issue-body change is authorized.
