@@ -36,6 +36,10 @@ export const ROLE_LAUNCHER_ENV = 'PI_INTERCOM_ROLE_LAUNCHER';
 export const DEFAULT_ROLE_LAUNCHER = 'pi-role';
 export const DEFAULT_DESCRIPTION = 'Coordinate workers, delegate work, and manage shared configuration.';
 export const key = (name: string) => name.toLowerCase();
+/** Canonical-path comparison. Windows paths are case-insensitive, so a case-only difference is not an alias. */
+export function sameCanonicalPath(left: string, right: string): boolean {
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
 export function fail(message: string): never { throw new Error(`PiIntercom: ${message}`); }
 export function text(value: unknown, field: string, max = 4096): asserts value is string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0')) fail(`invalid ${field}`);

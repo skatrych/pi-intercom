@@ -31,6 +31,8 @@ export declare const ROLE_LAUNCHER_ENV = "PI_INTERCOM_ROLE_LAUNCHER";
 export declare const DEFAULT_ROLE_LAUNCHER = "pi-role";
 export declare const DEFAULT_DESCRIPTION = "Coordinate workers, delegate work, and manage shared configuration.";
 export declare const key: (name: string) => string;
+/** Canonical-path comparison. Windows paths are case-insensitive, so a case-only difference is not an alias. */
+export declare function sameCanonicalPath(left: string, right: string): boolean;
 export declare function fail(message: string): never;
 export declare function text(value: unknown, field: string, max?: number): asserts value is string;
 export declare function port(value: unknown): asserts value is number;

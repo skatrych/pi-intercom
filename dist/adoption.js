@@ -2,7 +2,7 @@ import { lstat, readFile, realpath } from 'node:fs/promises';
 import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { ConfigPreviewChanged, coordinator, fail, sha256, } from './config.js';
+import { ConfigPreviewChanged, coordinator, fail, sameCanonicalPath, sha256, } from './config.js';
 import { ConfigLockContention, ConfigLockUnavailable, LegacyConfigLock } from './native-lock.js';
 /**
  * Coordinator adoption (ADR 0025): the board config's coordinator `sessionId` and `port` are the whole
@@ -221,7 +221,7 @@ export class AdoptionWorkflow {
             return { stop: halt('BOARD_PATH', 'cwd or projects home cannot be canonicalised; nothing was read') };
         if (!contains(canonicalHome, cwd))
             return { stop: halt('BOARD_PATH', `cwd ${cwd} is outside projects home ${canonicalHome}; no board is read or written`) };
-        if (path.resolve(context.cwd) !== cwd || path.resolve(home) !== canonicalHome)
+        if (!sameCanonicalPath(path.resolve(context.cwd), cwd) || !sameCanonicalPath(path.resolve(home), canonicalHome))
             return { stop: halt('BOARD_PATH', 'cwd or projects home is a symlink/alias; use its canonical path') };
         const boards = await countBoards(cwd, canonicalHome);
         const identity = this.identity();
@@ -286,7 +286,7 @@ export class AdoptionWorkflow {
         let at = surveyed.cwd;
         for (;;) {
             const info = await lstat(at);
-            if (!info.isDirectory() || info.isSymbolicLink() || await realpath(at) !== at)
+            if (!info.isDirectory() || info.isSymbolicLink() || !sameCanonicalPath(await realpath(at), at))
                 failAt('BOARD_PATH', `unsafe directory ${at}`);
             paths.set(at, `${info.dev}:${info.ino}`);
             const board = path.join(at, CONFIG_DIRECTORY);
@@ -334,7 +334,7 @@ export class AdoptionWorkflow {
         try {
             for (const [file, identity] of surveyed.paths ?? []) {
                 const info = lstatSync(file);
-                if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(file) !== file || `${info.dev}:${info.ino}` !== identity)
+                if (!info.isDirectory() || info.isSymbolicLink() || !sameCanonicalPath(realpathSync(file), file) || `${info.dev}:${info.ino}` !== identity)
                     failAt('STALE_PREVIEW', `directory identity changed: ${file}`);
             }
             let at = surveyed.cwd;

@@ -4,7 +4,7 @@ import { realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
-import { ConfigStore, WORKER_ROLE_ENV, coordinator, directory, fail, logicalRole, named, requireCoordinator, requireCoordinatorPair, text, validateConfig, type Agent, type Config, type ConfigCaller, type ConfigDocument } from './config.js';
+import { ConfigStore, WORKER_ROLE_ENV, coordinator, directory, fail, logicalRole, named, requireCoordinator, requireCoordinatorPair, sameCanonicalPath, text, validateConfig, type Agent, type Config, type ConfigCaller, type ConfigDocument } from './config.js';
 import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } from './transport.js';
 import { ReportPublicationRefused, saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
@@ -253,7 +253,7 @@ export class Intercom {
         const home = projectsHome({ projectsHome: this.options.adoption?.projectsHome ?? process.env[PROJECTS_HOME_ENV], homeDirectory: homedir() });
         const cwd = await realpath(this.host.cwd), root = await realpath(home);
         const relative = path.relative(root, cwd);
-        if (cwd !== path.resolve(this.host.cwd) || root !== path.resolve(home) || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('unsafe Orchestrator projects-home/cwd path');
+        if (!sameCanonicalPath(cwd, path.resolve(this.host.cwd)) || !sameCanonicalPath(root, path.resolve(home)) || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('unsafe Orchestrator projects-home/cwd path');
         const boards = await countBoards(cwd, root);
         // Board isolation, not traceability: an empty or malformed extra board still stops, and every
         // refusal names the offending path, the expected root, and the one human-safe remediation.
