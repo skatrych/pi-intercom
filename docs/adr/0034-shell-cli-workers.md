@@ -1,15 +1,20 @@
 # ADR 0034: Shell-launched CLI workers with local conversation mapping
 
-## Status and context
+## Decision Statement
 
-Proposed; docs-only, pending independent exact-SHA review and human design approval.
-Authority: [issue #34](https://github.com/skatrych/pi-intercom/issues/34), body SHA-256
-`6d6402ee3f644c53b18acf4a9240ea2fc34b4a2f27e1fc017310445c0807cca4`,
-[requirements approval](https://github.com/skatrych/pi-intercom/issues/34#issuecomment-6422638099)
-and [routing](https://github.com/skatrych/pi-intercom/issues/34#issuecomment-6422655000).
-Source baseline: `main@4dc11b34d9a2c01be3780445ea41ffc3b91b0890`.
+Use a standalone, shell-launched Node worker to connect headless coding-agent CLIs
+to the existing Intercom protocol, with private local mapping for exact conversation
+resume across turns and worker restarts. Do not extend Pi host or lifecycle tools.
 
-## Decisions
+## Short Summary
+
+A Pi coordinator needs to delegate work to non-Pi agents without changing Pi semantics.
+The adapter reuses existing board, transport and report contracts, runs one CLI turn
+at a time and reports explicit public results. Cursor is required; agy remains
+experimental/unverified. Shell-only lifecycle and fail-closed conversation mapping
+limit coupling and avoid implying unsupported cancellation or recovery guarantees.
+
+## Details
 
 1. **A standalone Node worker, not a Pi host shim.** A shell starts
    `pi-intercom-worker`; it reads an existing board, opens its own loopback endpoint,
@@ -45,7 +50,7 @@ Source baseline: `main@4dc11b34d9a2c01be3780445ea41ffc3b91b0890`.
    automatic recovery. Local timeout/signal cleanup is bounded best effort for the
    adapter's own direct child, not an Intercom cancellation capability.
 
-## Consequences and alternatives
+### Consequences and alternatives
 
 The existing coordinator can configure, reload, send, request status, inspect health
 and read stored reports without a new runtime discriminator. Restart needs retained
@@ -61,5 +66,7 @@ negotiation and non-Pi lifecycle-tool integration remain separate decisions, not
 prerequisites silently added to this issue.
 
 Details and exact future write surface: [solution](../issues/34-proposed-solution.md)
-and [implementation plan](../issues/34-implementation-plan.md). This ADR authorizes
-no implementation, installation, live-board changes or CLI execution.
+and [implementation plan](../issues/34-implementation-plan.md).
+
+Status: proposed, pending independent exact-SHA review and human design approval.
+This ADR authorizes no implementation, installation, live-board changes or CLI execution.
