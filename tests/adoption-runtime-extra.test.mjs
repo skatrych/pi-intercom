@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import path from 'node:path';
-import { mkdir, lstat } from 'node:fs/promises';
+import { mkdir, lstat, realpath } from 'node:fs/promises';
 import { Intercom } from '../dist/runtime.js';
 import { ConfigStore } from '../dist/config.js';
 import { probeWorker } from '../dist/connections.js';
@@ -104,7 +104,7 @@ test('Orchestrator discovery never reads or writes above the counted projects ho
   t.after(async () => { await runtime.close(); await f.dispose(); });
   await runtime.start();
   assert.equal(discoveries, 0, 'the counted projects home is the only discovery root');
-  assert.equal(runtime.store.root, home);
+  assert.equal(runtime.store.root, await realpath(home));
   assert.equal(await f.board.read(), before, 'a board above the projects home is untouched');
   // The first board is created at the counted projects home itself, never above it or in a child.
   assert.equal((await new ConfigStore(home).read()).agents[0].sessionId, IDS.fresh);
