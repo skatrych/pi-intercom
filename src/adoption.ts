@@ -262,7 +262,7 @@ export class AdoptionWorkflow {
     const cwd = await this.canonical(context.cwd), canonicalHome = await this.canonical(home);
     if (cwd === undefined || canonicalHome === undefined) return { stop: halt('BOARD_PATH', 'cwd or projects home cannot be canonicalised; nothing was read') };
     if (!contains(canonicalHome, cwd)) return { stop: halt('BOARD_PATH', `cwd ${cwd} is outside projects home ${canonicalHome}; no board is read or written`) };
-    if (!sameCanonicalPath(path.resolve(context.cwd), cwd) || !sameCanonicalPath(path.resolve(home), canonicalHome)) return { stop: halt('BOARD_PATH', 'cwd or projects home is a symlink/alias; use its canonical path') };
+    if (!sameCanonicalPath(context.cwd, cwd) || !sameCanonicalPath(home, canonicalHome)) return { stop: halt('BOARD_PATH', 'cwd or projects home is a symlink/alias; use its canonical path') };
     const boards = await countBoards(cwd, canonicalHome);
     const identity = this.identity();
     if ('stop' in identity) return identity;

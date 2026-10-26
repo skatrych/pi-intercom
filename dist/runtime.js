@@ -242,7 +242,9 @@ export class Intercom {
                 const home = projectsHome({ projectsHome: this.options.adoption?.projectsHome ?? process.env[PROJECTS_HOME_ENV], homeDirectory: homedir() });
                 const cwd = await realpath(this.host.cwd), root = await realpath(home);
                 const relative = path.relative(root, cwd);
-                if (!sameCanonicalPath(cwd, path.resolve(this.host.cwd)) || !sameCanonicalPath(root, path.resolve(home)) || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+                // Compare the canonical result with the original input: a canonical path may differ only in case on
+                // Windows, while a symlink/alias still differs and is refused.
+                if (!sameCanonicalPath(cwd, this.host.cwd) || !sameCanonicalPath(root, home) || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
                     fail('unsafe Orchestrator projects-home/cwd path');
                 const boards = await countBoards(cwd, root);
                 // Board isolation, not traceability: an empty or malformed extra board still stops, and every
