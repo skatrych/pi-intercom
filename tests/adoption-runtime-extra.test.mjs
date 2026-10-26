@@ -295,6 +295,55 @@ test('P3 refuses when the runtime endpoint is replaced during temporary close', 
   assert.ok(notices.some(text => /bound endpoint changed during boot publication/.test(text)));
 });
 
+test('P3 keeps the captured numeric port when the endpoint wrapper object is rebound', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const occupied = await listen(0, async () => {}, () => ({ version: 1, sessionId: 'foreign' }));
+  t.after(() => occupied.close());
+  await f.board.write(configText('single', { ...f.ports(), coordinator: occupied.port }));
+  const before = await f.board.read();
+  const roles = path.join(f.home, 'roles');
+  await mkdir(path.join(roles, 'orchestrator'), { recursive: true });
+  let runtime, capturedPort, currentPort;
+  class DriftStore extends ConfigStore {
+    async openTemporary(file) {
+      const handle = await super.openTemporary(file);
+      return {
+        writeFile: data => handle.writeFile(data), sync: () => handle.sync(),
+        close: async () => {
+          await handle.close();
+          const endpoint = runtime.endpoint;
+          capturedPort = endpoint.port;
+          const closeOldListener = endpoint.close;
+          const replacement = await listen(0, async () => {}, () => ({ version: 1, sessionId: IDS.gone }));
+          currentPort = replacement.port;
+          // Retain the mutable Endpoint wrapper object and rebind the real listener onto it.
+          Object.assign(endpoint, replacement);
+          await closeOldListener();
+          assert.equal(runtime.endpoint, endpoint);
+          assert.notEqual(currentPort, capturedPort);
+          assert.equal((await probeWorker({ sessionId: IDS.gone, port: currentPort })).state, 'connected');
+        },
+      };
+    }
+  }
+  const notices = [];
+  runtime = new Intercom({ cwd: f.home, sessionId: () => IDS.gone, busy: () => false,
+    roleDirectory: path.join(roles, 'orchestrator'), rolesDirectory: roles, workerRole: '',
+    deliver: () => {}, notify: text => notices.push(text), setName: async () => {} },
+  { launch: async () => assert.fail('no launch'), store: root => new DriftStore(root),
+    observe: () => ({ record() {}, close: async () => {}, maintain() {} }),
+    adoption: { projectsHome: f.home, rolesDirectory: roles } });
+  t.after(() => runtime.close());
+  await runtime.start();
+  assert.equal(await f.board.read(), before, 'the captured numeric port must invalidate publication');
+  assert.equal(runtime.responsibility, undefined);
+  assert.equal(await runtime.coordinatorActionReady(), false);
+  assert.ok(notices.some(text => /bound endpoint changed during boot publication/.test(text)));
+  assert.equal((await runtime.store.read()).agents[0].port, occupied.port, 'the saved port was never replaced');
+  void capturedPort; void currentPort;
+});
+
 test('malformed existing config stops startup with no write and no implicit repair', async t => {
   const f = await setup(t);
   await f.board.write('{ "version": 1, "agents": [');

@@ -465,7 +465,10 @@ export class Intercom {
   private async recoverBootPort(initial: ConfigDocument, assertValid: () => void): Promise<'recovered' | string> {
     const saved = coordinator(initial.config);
     const endpoint = this.endpoint!;
-    const pair = `saved ${saved.sessionId}/${saved.port}, actual ${this.initialId}/${endpoint.port}`;
+    // Freeze the numeric port and the wrapper identity separately before any boot await. The wrapper's
+    // `port` property is mutable and must never be used as its own snapshot.
+    const bootPort = endpoint.port;
+    const pair = `saved ${saved.sessionId}/${saved.port}, actual ${this.initialId}/${bootPort}`;
     if (!this.orchestratorLaunch()) {
       this.bootHeld = false;
       return `this session is not the canonical Orchestrator launch, so no boot port recovery is permitted for ${pair} on the board at ${this.store.file}`;
@@ -478,7 +481,7 @@ export class Intercom {
     const probe = this.options.probe ?? probeWorker;
     const verifyOwnEndpoint = async (): Promise<void> => {
       assertValid();
-      const own = await probe({ sessionId: this.initialId, port: endpoint.port }, { timeoutMs: 2000 });
+      const own = await probe({ sessionId: this.initialId, port: bootPort }, { timeoutMs: 2000 });
       assertValid();
       if (own.state !== 'connected') fail(`${COORDINATOR_NOT_AUTHORIZED}: this bound endpoint did not verify session ${this.initialId} (${own.reason}); a port is never guessed and the boot publication stops`);
     };
@@ -489,9 +492,9 @@ export class Intercom {
         sessionId: this.initialId,
         expectedRaw: initial.raw,
         savedPort: saved.port,
-        newPort: endpoint.port,
+        newPort: bootPort,
         recheck: async () => {
-          this.assertBoundEndpoint(endpoint);
+          this.assertBoundEndpoint(endpoint, bootPort);
           await verifyOwnEndpoint();
           // A bounded observation of the saved pair, never a liveness fence against a later reconnect: a
           // matching live identity refuses; disconnected/unknown proceeds under the accepted P3 risk.
@@ -501,7 +504,7 @@ export class Intercom {
           await this.store.validateRoot(this.store.root);
           assertValid();
         },
-        assertValid: () => { assertValid(); this.assertBoundEndpoint(endpoint); this.assertCoordinatorPaths(); },
+        assertValid: () => { assertValid(); this.assertBoundEndpoint(endpoint, bootPort); this.assertCoordinatorPaths(); },
       });
       const published = this.store.readDocumentSync();
       // Post-publication verification uses the runtime's current endpoint, never only the captured one.
@@ -520,9 +523,11 @@ export class Intercom {
    * The captured boot endpoint must still be the runtime's current endpoint. Binding a replacement
    * listener and closing the old one during staging must refuse the publication, not publish a closed port.
    */
-  private assertBoundEndpoint(expected: { port: number }): void {
-    if (this.endpoint !== expected || this.endpoint.port !== expected.port) {
-      fail(`${COORDINATOR_NOT_AUTHORIZED}: this runtime's bound endpoint changed during boot publication (captured ${expected.port}, current ${this.endpoint?.port ?? 'none'}); the saved port is not published from a closed or replaced endpoint`);
+  private assertBoundEndpoint(expected: object, capturedPort: number): void {
+    // Compare the immutable numeric snapshot, not a property read back from the mutable wrapper: a
+    // retained Endpoint object can be rebound with Object.assign while still being the same object.
+    if (this.endpoint !== expected || this.endpoint?.port !== capturedPort) {
+      fail(`${COORDINATOR_NOT_AUTHORIZED}: this runtime's bound endpoint changed during boot publication (captured ${capturedPort}, current ${this.endpoint?.port ?? 'none'}); the saved port is not published from a closed or replaced endpoint`);
     }
   }
   /** Root/board/path validity independent of any caller guard, re-proved after each boot await. */
