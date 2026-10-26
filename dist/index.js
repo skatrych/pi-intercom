@@ -117,8 +117,9 @@ export default function intercomExtension(pi) {
                 const monitor = await ensureMonitorPane({
                     root: current.store.root, sessionId: id,
                     script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
+                    // Final pane-effect guard: the earlier async readiness checks do not cover later provider calls.
                     assertCurrent: () => { if (!isCurrent())
-                        throw new Error('Coordinator session changed'); },
+                        throw new Error('Coordinator session changed'); current.assertCoordinatorFinal({ responsibility: true }); },
                 });
                 if (isCurrent())
                     ctx.ui.notify(`Intercom status monitor: ${monitor.outcome}${monitor.pane ? ` (${monitor.pane})` : ''}`, 'info');

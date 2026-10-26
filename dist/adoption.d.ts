@@ -135,6 +135,11 @@ export declare class AdoptionWorkflow {
     /** The launch role is read from captured process configuration, never from the request or a model. */
     private launchRole;
     private survey;
+    /**
+     * The adopting endpoint must verify this native session before any question and again under the lock
+     * before any write. A refusal after the config was already replaced is not an admissible outcome.
+     */
+    private assertOwnEndpoint;
     /** Native session id from this runtime and the port its endpoint actually bound. Never a history search. */
     private identity;
     /** Snapshot actual ancestor directories, not a descendant tree scan. */

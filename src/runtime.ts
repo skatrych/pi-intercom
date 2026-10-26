@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
@@ -134,6 +134,10 @@ export class Intercom {
   private bootHeld = false;
   /** At most one port change may use the captured boot snapshot of one startup. */
   private bootPortAttempted = false;
+  /** The counted board layout captured at startup: P3 may not publish across a changed ancestor chain. */
+  private startupHome?: string;
+  private startupCwd?: string;
+  private startupBoards: string[] = [];
   /** This runtime's captured authority pair: native session id and the port actually bound. Never an argument. */
   private caller(): ConfigCaller {
     const sessionId = this.id();
@@ -257,6 +261,7 @@ export class Intercom {
         // Windows, while a symlink/alias still differs and is refused.
         if (!sameCanonicalPath(cwd, this.host.cwd) || !sameCanonicalPath(root, home) || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('unsafe Orchestrator projects-home/cwd path');
         const boards = await countBoards(cwd, root);
+        this.startupHome = root; this.startupCwd = cwd; this.startupBoards = [...boards];
         // Board isolation, not traceability: an empty or malformed extra board still stops, and every
         // refusal names the offending path, the expected root, and the one human-safe remediation.
         if (boards.length > 1) fail(`BOARD_COUNT: a second board at ${path.join(boards[1], '.pi-intercom')} is a creation-time failure, not a cleanup item; the expected root is ${path.join(root, '.pi-intercom')} and the boards found are ${boards.join(', ')}; a human may remove a confirmed empty, unintended stray directory and retry, and populated or malformed board data needs separate inspection, never recursive deletion`);
@@ -307,13 +312,16 @@ export class Intercom {
       // answers read-only `/intercom-adopt status`.
       const board = previous ? coordinator(previous) : undefined;
       const bootPending = board !== undefined && board.sessionId === this.initialId && board.port !== endpoint.port && previousDocument !== undefined;
-      if (!bootPending) record('runtime.starting');
+      // Coordinator-startup observer records are held back until responsibility is loaded (ADR 0025 P3).
+      const deferredRecords: { event: EventType; metadata: EventMetadata }[] = [];
       if (previousDocument === undefined) {
         // ---- first board: ordinary runtime startup, zero questions, zero claims --------------------
         // A canonical Orchestrator launch creates the first board only at the projects home: a child
         // directory never receives a private board, and the empty root metadata directory it may have is
         // an allowed absence. Any other session preserves upstream behavior at its own resolved root.
-        if (countedRoot !== undefined && !countedBoard && await realpath(this.host.cwd) !== countedRoot) {
+        // First-board creation is allowed only at the canonical projects-home cwd itself, including when
+        // an empty metadata directory already exists there. A child cwd is always held, never initialized.
+        if (countedRoot !== undefined && !sameCanonicalPath(await realpath(this.host.cwd), countedRoot)) {
           record('runtime.ready', { port: endpoint.port, role: 'anonymous', outcome: 'ready' });
           this.host.notify(`Intercom Orchestrator held at 127.0.0.1:${endpoint.port}; no board exists between ${this.host.cwd} and ${countedRoot}, and a private board is never created in a child directory. Enter /intercom-adopt status.`);
           return;
@@ -324,7 +332,7 @@ export class Intercom {
         const winner = await this.store.read(); assertValid();
         const won = coordinator(winner);
         this.observationEnabled = true;
-        if (initialized) record('config.changed', { operation: 'initialize', outcome: 'written' });
+        if (initialized) deferredRecords.push({ event: 'config.changed', metadata: { operation: 'initialize', outcome: 'written' } });
         if (won.sessionId !== caller.sessionId || won.port !== caller.port) {
           // A competing initializer won the no-replace publication. Its board is read normally, and it
           // grants this runtime nothing: no replacement, no question, and no coordinator effect.
@@ -348,7 +356,7 @@ export class Intercom {
             this.host.notify(`Intercom Coordinator held at 127.0.0.1:${endpoint.port}; ${outcome}. Only the read-only health endpoint and /intercom-adopt status are available; no other coordinator effect ran and nothing was repaired or retried. Restart this session on a non-conflicting port.`);
             return;
           }
-          record('config.changed', { operation: 'port_update', outcome: 'written', port: this.endpoint.port });
+          deferredRecords.push({ event: 'config.changed', metadata: { operation: 'port_update', outcome: 'written', port: this.endpoint.port } });
         }
         // Verified exact pair: responsibility loads in place, write-free, with no worker action, reload,
         // job recovery, report clearing, or model turn.
@@ -361,15 +369,28 @@ export class Intercom {
           this.host.notify(`Intercom Coordinator endpoint at 127.0.0.1:${this.endpoint.port}; ${String(error)}; coordinator tools, close recovery and observer maintenance stay refused until the board names this exact pair.`);
           return;
         }
+        // Only now, with the exact pair and loaded responsibility, may the observer see coordinator events.
         this.observationEnabled = true;
-        if (bootPending) record('runtime.starting');
+        record('runtime.starting');
+        for (const deferred of deferredRecords) record(deferred.event, deferred.metadata);
         this.startServices(assertValid);
         await this.handoff!.recover(); assertValid();
+        // Recovery awaits: re-prove the exact pair and loaded role before maintenance and the ready notice.
+        try { await this.assertCoordinatorEffect(assertValid, { responsibility: true }); }
+        catch (error) {
+          assertValid();
+          record('host.submission', { outcome: 'blocked', errorCode: 'operation_failed' });
+          this.host.notify(`Intercom Coordinator held at 127.0.0.1:${this.endpoint.port}; the board stopped naming this exact pair during boot recovery (${String(error)}); observer maintenance and the ready notice were not run. Restart with the current board entry.`);
+          return;
+        }
         try { this.observer?.maintain?.(); } catch { /* No cleanup failure affects readiness. */ }
+        this.assertCoordinatorEffectSync({ responsibility: true });
         this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
       } else {
         if (me) { try { await this.reload(); } catch (e) { assertValid(); this.host.notify(`Name/responsibility synchronization failed: ${String(e)}`); } }
         assertValid();
+        if (!bootPending) record('runtime.starting');
+        for (const deferred of deferredRecords) record(deferred.event, deferred.metadata);
         this.startServices(assertValid);
         const role = me?.coordinator ? undefined : this.reportedRole();
         try {
@@ -411,7 +432,9 @@ export class Intercom {
     }, this.options.reminderClock, this.reminderIntervalMsCache);
     this.handoff = new HandoffWorkflow({
       state: async () => this.state(),
-      assertCurrent: () => { assertValid(); },
+      // Provider inspection/closure guards call this final callback: retain role-appropriate current
+      // config permission alongside lifecycle/job/target guards, so a revoked pair blocks the pane effect.
+      assertCurrent: () => { assertValid(); this.assertEffectAllowedSync({ responsibility: true }); },
       update: async (mutate, guard) => {
         // The store re-proves the exact pair at locked admission and at every publication attempt; this
         // guard keeps the caller's own target/lifecycle predicates in front of each mutation.
@@ -482,7 +505,7 @@ export class Intercom {
       const published = this.store.readDocumentSync();
       requireCoordinatorPair(published.config, { sessionId: this.initialId, port: endpoint.port });
       this.bootHeld = false;
-      this.observationEnabled = true;
+      // Observation stays closed until responsibility is loaded after the guarded publication.
       return 'recovered';
     } catch (error) {
       assertValid();
@@ -495,7 +518,34 @@ export class Intercom {
   private assertCoordinatorPaths(): void {
     if (this.configuredRoot !== undefined && (this.store.root !== this.configuredRoot || this.store.file !== this.configuredFile)) fail('config store boundary changed');
     if (realpathSync(this.store.root) !== this.store.root) fail('config store root is aliased');
+    this.assertStartupBoardLayout();
   }
+  /**
+   * The ancestor board chain counted at startup must be unchanged when P3 publishes: a second board
+   * appearing (or the counted one disappearing) during a boot probe invalidates the captured snapshot.
+   */
+  private assertStartupBoardLayout(): void {
+    if (this.startupHome === undefined || this.startupCwd === undefined) return;
+    const seen: string[] = [];
+    let at = this.startupCwd;
+    for (;;) {
+      const board = path.join(at, '.pi-intercom');
+      try {
+        const info = lstatSync(board);
+        if (!info.isDirectory() || info.isSymbolicLink()) fail(`BOARD_COUNT: unsafe board directory at ${board}; the boot port publication stops`);
+        seen.push(at);
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (at === this.startupHome) break;
+      const parent = path.dirname(at);
+      if (parent === at) break;
+      at = parent;
+    }
+    if (seen.join('\n') !== this.startupBoards.join('\n')) {
+      fail(`BOARD_COUNT: the ancestor board layout changed during boot (was ${this.startupBoards.join(', ') || 'none'}, now ${seen.join(', ') || 'none'}); the boot port publication stops`);
+    }
+  }
+  /** Final synchronous permission for an already-admitted coordinator effect (monitor pane operations). */
+  assertCoordinatorFinal(requirements: { responsibility?: boolean } = {}): void { this.assertCoordinatorEffectSync(requirements); }
   async close(): Promise<void> {
     if (this.closing) return this.closing;
     this.recordObservation('runtime.closed');

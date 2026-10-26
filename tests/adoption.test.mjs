@@ -8,7 +8,7 @@ const source = await readFile(new URL('./fixtures/adoption-runner.mjs', import.m
 // scenario count is deliberately smaller than the claim-era table: obsolete evidence/Git phases were
 // deleted rather than renamed, and the remaining cases each prove one current-config behavior.
 const names = [...source.matchAll(/^\s*'([^']+)': (?:async )?\(\) =>/gm)].map(match => match[1]);
-assert.equal(names.length, 15, 'fixture table gained or lost a case without an explicit decision');
+assert.equal(names.length, 18, 'fixture table gained or lost a case without an explicit decision');
 for (const name of names) test(`adoption fixture ${name}`, () => {
   const env = { ...process.env }; delete env.PI_ROLE_DIR; delete env.PI_INTERCOM_WORKER_ROLE;
   const child = spawnSync(process.execPath, ['tests/fixtures/adoption-runner.mjs', name], { env, encoding: 'utf8', timeout: 30000 });

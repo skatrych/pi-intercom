@@ -103,6 +103,10 @@ export declare class Intercom {
     private bootHeld;
     /** At most one port change may use the captured boot snapshot of one startup. */
     private bootPortAttempted;
+    /** The counted board layout captured at startup: P3 may not publish across a changed ancestor chain. */
+    private startupHome?;
+    private startupCwd?;
+    private startupBoards;
     /** This runtime's captured authority pair: native session id and the port actually bound. Never an argument. */
     private caller;
     /**
@@ -145,6 +149,15 @@ export declare class Intercom {
     private recoverBootPort;
     /** Root/board/path validity independent of any caller guard, re-proved after each boot await. */
     private assertCoordinatorPaths;
+    /**
+     * The ancestor board chain counted at startup must be unchanged when P3 publishes: a second board
+     * appearing (or the counted one disappearing) during a boot probe invalidates the captured snapshot.
+     */
+    private assertStartupBoardLayout;
+    /** Final synchronous permission for an already-admitted coordinator effect (monitor pane operations). */
+    assertCoordinatorFinal(requirements?: {
+        responsibility?: boolean;
+    }): void;
     close(): Promise<void>;
     /** Canonical launch role only: `<PI_ROLES_DIR or ~/.pi/roles>/orchestrator`, captured from this process. */
     private orchestratorLaunch;

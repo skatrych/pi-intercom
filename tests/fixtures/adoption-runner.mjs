@@ -183,6 +183,45 @@ const cases = {
     check('no question and no write', s.ui.prompts.length === 0 && (await f.board.read()).includes(`"port": ${f.ports().workerOne}`));
   }),
 
+  /** The adopting endpoint must verify this native session before the question and before any write. */
+  'own-unverified': () => withBoard('single', async f => {
+    const before = await f.board.read();
+    const s = standalone(f, { port: f.ports().coordinator + 100,
+      probe: async agent => ({ sessionId: agent.sessionId, state: 'unknown', checkedAt: null, reason: 'timeout' }) });
+    const result = await s.workflow.run(s.context, 'adopt');
+    terminal(result);
+    check('unverifiable own endpoint refuses', result.code === 'IDENTITY');
+    check('refusal happens before any question', s.ui.prompts.length === 0);
+    check('the board is untouched', await f.board.read() === before);
+  }),
+
+  /** A yes must not be reused when the own endpoint stops verifying before the locked write. */
+  'own-revoked-under-lock': () => withBoard('single', async f => {
+    const before = await f.board.read();
+    let calls = 0;
+    const s = standalone(f, { port: f.ports().coordinator + 100,
+      probe: async agent => {
+        calls++;
+        return { sessionId: agent.sessionId, state: calls === 1 ? 'connected' : 'unknown',
+          checkedAt: null, reason: calls === 1 ? 'verified' : 'timeout' };
+      } });
+    const result = await s.workflow.run(s.context, 'adopt');
+    terminal(result);
+    check('the replaced-under-lock own endpoint refuses before writing', result.code === 'IDENTITY');
+    check('the answer was asked once and nothing was written', s.ui.prompts.length === 1 && await f.board.read() === before);
+  }),
+
+  /** A health endpoint answering for a different identity at this bound port is the same refusal. */
+  'own-health-mismatch': () => withBoard('single', async f => {
+    const before = await f.board.read();
+    const s = standalone(f, { port: f.ports().coordinator + 100,
+      probe: async agent => ({ sessionId: agent.sessionId, state: 'disconnected', checkedAt: null, reason: 'identity_mismatch' }) });
+    const result = await s.workflow.run(s.context, 'adopt');
+    terminal(result);
+    check('identity mismatch refuses', result.code === 'IDENTITY');
+    check('no question and no write', s.ui.prompts.length === 0 && await f.board.read() === before);
+  }),
+
   /** Same session id with a different bound port is a command-time restart refusal, not a repair. */
   'same-id-different-port': () => withBoard('single', async f => {
     const s = standalone(f, { id: IDS.gone, port: f.ports().coordinator + 1 });
@@ -198,7 +237,10 @@ const cases = {
     const s = standalone(f, { port: f.ports().coordinator + 1 });
     const result = await s.workflow.run(s.context, 'adopt');
     terminal(result);
-    check('legacy directory lock refuses with upgrade guidance', result.code === 'LOCK_LEGACY' && /offline upgrade/.test(result.lines.join(' ')));
+    const text = result.lines.join(' ');
+    check('legacy directory lock refuses with upgrade guidance',
+      result.code === 'LOCK_LEGACY' && /offline upgrade/.test(text) && /remove only that established lock directory/.test(text));
+    check('the offending path is named', text.includes(path.join(f.home, '.pi-intercom', 'config.lock')));
     check('the legacy lock directory survives untouched', (await f.board.read()).includes('Coordinator'));
   }),
 

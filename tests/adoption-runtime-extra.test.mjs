@@ -124,8 +124,13 @@ test('boot fallback publishes the verified port before any observer write or res
   assert.equal(board.sessionId, IDS.gone);
   assert.equal(board.port, runtime.endpoint.port, 'the verified fallback port was published');
   assert.equal(runtime.responsibility?.coordinator, true, 'responsibility loads only after publication');
-  assert.deepEqual(events[0], { event: 'config.changed', metadata: { operation: 'port_update', outcome: 'written', port: runtime.endpoint.port } });
-  assert.ok(maintain.length <= 1, 'maintenance cannot precede publication');
+  // The observer may only see coordinator events after the exact pair and responsibility are loaded.
+  assert.deepEqual(events[0], { event: 'runtime.starting', metadata: {} });
+  const portUpdate = events.find(entry => entry.metadata?.operation === 'port_update');
+  assert.ok(portUpdate, 'the verified port publication is recorded');
+  assert.equal(portUpdate.metadata.port, runtime.endpoint.port);
+  assert.ok(events.every(entry => entry.event !== 'config.changed' || entry === events[events.indexOf(portUpdate)]), 'no other config event');
+  assert.ok(maintain.length <= 1, 'maintenance cannot precede publication/load');
 });
 
 test('same-port startup performs no redundant port write', async t => {
@@ -192,6 +197,61 @@ test('competing first-board initializers never overwrite the winner and the lose
   assert.equal(winner.runtime.responsibility?.sessionId, board.sessionId);
   assert.equal(loser.runtime.responsibility, undefined, 'a losing initializer claims no authority');
   assert.equal(await loser.runtime.coordinatorActionReady(), false);
+});
+
+test('a child cwd is held even when the projects home already has empty metadata', async t => {
+  const f = await setup(t, { cwdRelative: 'app' });
+  // The metadata directory exists at the projects home, but there is no config: still not a child board.
+  await mkdir(path.join(f.home, '.pi-intercom'), { recursive: true });
+  const { runtime, notices } = await f.start();
+  assert.equal(runtime.responsibility, undefined);
+  assert.equal(await runtime.coordinatorActionReady(), false);
+  assert.ok(notices.some(text => /private board is never created/.test(text)));
+  await assert.rejects(lstat(path.join(f.home, '.pi-intercom/config.json')), { code: 'ENOENT' });
+  await assert.rejects(lstat(path.join(f.home, 'app', '.pi-intercom')), { code: 'ENOENT' });
+});
+
+test('a second board appearing during the boot probe stops the port publication', async t => {
+  const occupied = await listen(0, async () => {}, () => ({ version: 1, sessionId: 'foreign' }));
+  const f = await setup(t, { style: 'single', cwdRelative: 'app' });
+  await f.board.write((await f.board.read()).replace(`"port": ${f.ports().coordinator}`, `"port": ${occupied.port}`));
+  const before = await f.board.read();
+  const probe = async (agent, options) => {
+    if (agent.port === occupied.port) await mkdir(path.join(f.home, 'app', '.pi-intercom'), { recursive: true });
+    return probeWorker(agent, options);
+  };
+  const { runtime, notices } = await f.start(IDS.gone, { probe });
+  await occupied.close();
+  assert.equal(runtime.responsibility, undefined);
+  assert.equal(await runtime.coordinatorActionReady(), false);
+  assert.ok(notices.some(text => /ancestor board layout changed during boot/.test(text)));
+  assert.equal(await f.board.read(), before, 'the fallback port was not published');
+});
+
+test('a revocation during handoff recovery blocks maintenance and the ready notice', async t => {
+  const f = await setup(t, { style: 'single' });
+  const before = await f.board.read();
+  const replacement = (() => { const c = JSON.parse(before); c.agents[0].sessionId = 'another-coordinator'; c.agents[0].port = 43113; return JSON.stringify(c); })();
+  let maintained = 0; const notices = [];
+  class RevokingIntercom extends Intercom {
+    startServices(guard) {
+      super.startServices(guard);
+      this.handoff.recover = async () => { await f.board.write(replacement); };
+    }
+  }
+  const roles = f.roles;
+  const runtime = new RevokingIntercom({ cwd: f.home, sessionId: () => IDS.gone, busy: () => false,
+    roleDirectory: path.join(roles, 'orchestrator'), rolesDirectory: roles, workerRole: '',
+    deliver: () => {}, notify: text => notices.push(text), setName: async () => {} },
+  { launch: async () => assert.fail('no launch'), probe: probeWorker,
+    observe: () => ({ record() {}, close: async () => {}, maintain: () => { maintained++; } }),
+    adoption: { projectsHome: f.home, rolesDirectory: roles } });
+  t.after(() => runtime.close());
+  await runtime.start();
+  assert.equal(maintained, 0, 'maintenance must not run after the pair is revoked during recovery');
+  assert.equal(await runtime.coordinatorActionReady(), false);
+  assert.ok(notices.some(text => /stopped naming this exact pair during boot recovery/.test(text)));
+  assert.ok(!notices.some(text => /Coordinator ready/.test(text)));
 });
 
 test('malformed existing config stops startup with no write and no implicit repair', async t => {

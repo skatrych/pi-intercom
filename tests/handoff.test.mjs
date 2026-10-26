@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
@@ -46,6 +46,7 @@ async function fixture(t, options = {}) {
   };
   const shared = { launch: async () => assert.fail('no launch'), observe: () => ({ record() {}, close() {} }),
     closeProvider: provider, closeTimeoutMs: options.timeout ?? 2000,
+    ...(options.store ? { store: options.store } : {}),
     send: async (port, message) => { wire.push(message); if (options.intercept) await options.intercept(message); await send(port, message); },
   };
   const host = id => ({ cwd: root, sessionId: () => id, busy: () => id === 'w' && busy,
@@ -304,4 +305,105 @@ test('unpublished close intent fences concurrent resume and controls before conf
     await assert.rejects(f.c.tool('configure_worker', { sessionId: 'w', port: f.w.endpoint.port, projectDirectory: '.', name: 'Worker', description: 'changed' }), /fenced/);
   } finally { release(); }
   await pending;
+});
+
+// ---- retained target/provider predicates under config-entry authority (ADR 0025) -------------------
+/** A valid board with the coordinator pair replaced by another cooperating process. */
+function replacedBoard(raw) {
+  const config = JSON.parse(raw);
+  const board = config.agents.find(agent => agent.coordinator);
+  board.sessionId = 'replacement-coordinator';
+  board.port = 43991;
+  return JSON.stringify(config);
+}
+/** A store that can inject one target fault between store admission and the handoff mutation. */
+class FaultStore extends ConfigStore {
+  faultWhen = null;
+  async update(caller, mutate, guard) {
+    return super.update(caller, async config => {
+      if (this.faultWhen && this.faultWhen(config)) this.faultWhen = null;
+      return mutate(config);
+    }, guard);
+  }
+}
+const faultFor = (fault) => config => {
+  const worker = config.agents.find(agent => agent.sessionId === 'w');
+  if (fault === 'missing') config.agents = config.agents.filter(agent => agent !== worker);
+  if (fault === 'coordinator') worker.coordinator = true;
+  if (fault === 'job') worker.closeJob.jobId = 'different-job';
+  if (fault === 'port') worker.port++;
+  if (fault === 'directory') worker.projectDirectory = 'nested/other';
+};
+
+for (const fault of ['missing', 'coordinator', 'job', 'port', 'directory']) test(`handoff transition target retains ${fault} predicate under config authority`, async t => {
+  let store;
+  const f = await fixture(t, { store: root => (store ??= new FaultStore(root)) });
+  store.faultWhen = faultFor(fault);
+  store.faultWhen = config => {
+    const worker = config.agents.find(agent => agent.sessionId === 'w');
+    // Only the transition mutation: request has no closeJob yet; the transition sees one in 'requested'.
+    if (worker?.closeJob?.state === 'requested') { faultFor(fault)(config); return true; }
+    return false;
+  };
+  await f.request();
+  await f.waitForJob('failed');
+  const worker = await f.entry();
+  assert.equal(worker.handoff, undefined, 'a refused transition must not publish a handoff');
+  assert.equal(worker.closeJob.state, 'failed');
+  assert.equal(f.closes.length, 0);
+  assert.equal(await f.c.coordinatorActionReady(), true);
+});
+
+for (const fault of ['missing', 'coordinator', 'job', 'port', 'directory']) test(`handoff report target retains ${fault} predicate before the summary is saved`, async t => {
+  let store;
+  const f = await fixture(t, { store: root => (store ??= new FaultStore(root)) });
+  const job = await f.request(); await f.prepared();
+  store.faultWhen = config => {
+    const worker = config.agents.find(agent => agent.sessionId === 'w');
+    if (worker?.closeJob?.state === 'awaiting_handoff') { faultFor(fault)(config); return true; }
+    return false;
+  };
+  await assert.rejects(f.report(job), /invalid handoff protocol|not configured|recipient/i);
+  const worker = await f.entry();
+  assert.equal(worker.handoff, undefined, 'a refused summary must not enter the mutating config');
+  assert.notEqual(worker.closeJob?.state, 'awaiting_settlement');
+  assert.equal(f.closes.length, 0);
+  assert.equal(await f.c.coordinatorActionReady(), true);
+});
+
+test('handoff provider inspect guard refuses a pane effect after the config pair is replaced', async t => {
+  const f = await fixture(t);
+  let inspected = 0;
+  f.provider.inspect = async (_proof, _id, guard) => {
+    const file = path.join(f.root, '.pi-intercom/config.json');
+    await writeFile(file, replacedBoard(await readFile(file, 'utf8')));
+    guard();
+    inspected++;
+  };
+  await f.request();
+  await until(async () => !(await f.c.coordinatorActionReady()));
+  assert.equal(inspected, 0, 'the supplied guard must reject before the provider effect');
+  assert.equal(f.closes.length, 0);
+  // The revocation also refuses the job's failure-state persistence: the last published state stays
+  // truthful and in-memory fencing prevents any later pane effect.
+  assert.equal((await f.entry()).closeJob.state, 'requested');
+});
+
+test('handoff provider close guard refuses the pane effect after the config pair is replaced', async t => {
+  const f = await fixture(t);
+  const job = await f.request(); await f.prepared(); await f.report(job);
+  let paneEffects = 0;
+  f.provider.close = async (_proof, _id, guard, beforeSubmit) => {
+    await beforeSubmit();
+    const file = path.join(f.root, '.pi-intercom/config.json');
+    await writeFile(file, replacedBoard(await readFile(file, 'utf8')));
+    guard();
+    paneEffects++;
+    return { paneClosed: true, workerExited: true };
+  };
+  f.w.workerSettled(new Set(['handoff-tool']));
+  await until(async () => !(await f.c.coordinatorActionReady()));
+  assert.equal(paneEffects, 0, 'no pane effect may run after the pair was revoked');
+  assert.equal(f.closes.length, 0);
+  assert.equal((await f.entry()).closeJob.state, 'closing', 'the pre-revocation transition remains truthful');
 });

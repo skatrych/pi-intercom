@@ -301,6 +301,16 @@ export class AdoptionWorkflow {
     catch (error) { return { stop: halt('BOARD_PATH', reason(error)) }; }
     return surveyed;
   }
+  /**
+   * The adopting endpoint must verify this native session before any question and again under the lock
+   * before any write. A refusal after the config was already replaced is not an admissible outcome.
+   */
+  private async assertOwnEndpoint(identity: AdoptionIdentity): Promise<void> {
+    const own = await this.options.probe({ sessionId: identity.sessionId, port: identity.port }, { timeoutMs: 2000 });
+    if (own.state !== 'connected') {
+      failAt('IDENTITY', `this endpoint port ${identity.port} did not verify session ${identity.sessionId} (${own.reason}); a port is never guessed or supplied, and the board was not changed. Restart Pi and retry`);
+    }
+  }
   /** Native session id from this runtime and the port its endpoint actually bound. Never a history search. */
   private identity(): AdoptionIdentity | { stop: Result } {
     const port = this.options.endpointPort();
@@ -381,6 +391,7 @@ export class AdoptionWorkflow {
     const identity = this.identity();
     if ('stop' in identity) failAt(identity.stop.code, reasonOf(identity.stop));
     if (identity.sessionId !== surveyed.identity.sessionId || identity.port !== surveyed.identity.port) failAt('SESSION_CHANGED', 'this runtime session or bound endpoint changed during the decision');
+    await this.assertOwnEndpoint(identity);
     this.assertCurrent(context);
     this.assertPaths(surveyed);
   }
@@ -444,6 +455,11 @@ export class AdoptionWorkflow {
    */
   private async humanAdoptionDecision(context: CommandContext, surveyed: Survey, board: { sessionId: string; port: number }): Promise<{ confirmed: true } | { stop: Result }> {
     const identity = surveyed.identity;
+    // Own identity first: an unverifiable adopting endpoint refuses before the question and before any
+    // old-endpoint probe, so a yes can never lead to a replacement that cannot be promoted.
+    try { await this.assertOwnEndpoint(identity); }
+    catch (error) { return { stop: halt(codeFor(error), reason(error)) }; }
+    if (this.options.busy()) return { stop: halt('BUSY', 'this Pi host became busy while verifying the adopting endpoint; nothing was asked or written') };
     const probe = await this.options.probe({ sessionId: board.sessionId, port: board.port });
     if (probe.state === 'connected') {
       return { stop: halt('OLD_CONNECTED', `configured coordinator ${board.sessionId} port ${board.port} still verifies at its endpoint; adoption stops and no config was written`) };
@@ -500,6 +516,9 @@ export class AdoptionWorkflow {
         await this.assertSnapshot(context, surveyed);
         await this.phaseThen('after-answer', async () => undefined);
         await this.phaseThen('before-publish', async () => undefined);
+        // Final pre-write identity proof, after every await and immediately before the replacement.
+        await this.assertOwnEndpoint(identity);
+        await this.assertSnapshot(context, surveyed);
         const result = await coded('PUBLISH', () => store.replaceCoordinatorEntry({
           sessionId: identity.sessionId,
           port: identity.port,
@@ -628,7 +647,10 @@ function codeFor(error: unknown): ResultCode {
  */
 function reason(error: unknown): string {
   const message = String(error).replace(/^PiIntercom:\s*/, '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
-  if (error instanceof AdoptionFailure) return message;
+  // Known safety refusals are the full operator instruction (path + offline-upgrade steps). Only
+  // unbounded foreign error prose is capped.
+  if (error instanceof AdoptionFailure || error instanceof LegacyConfigLock
+    || error instanceof ConfigLockContention || error instanceof ConfigLockUnavailable) return message;
   return message.length > 240 ? `${message.slice(0, 240)}…` : message;
 }
 /**
