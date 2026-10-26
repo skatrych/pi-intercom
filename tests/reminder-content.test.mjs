@@ -45,9 +45,12 @@ function fakeStats(overrides = {}) {
 }
 function fakeHandle(bytes, stats = {}) {
   let offset = 0;
-  return {
+  const handle = {
+    /** Number of content reads: proves when the loader did or did not read bytes. */
+    contentReads: 0,
     stat: async () => fakeStats({ size: bytes.length, ...stats }),
     read: async (buffer, at, length) => {
+      handle.contentReads++;
       const n = Math.min(length, bytes.length - offset);
       Buffer.from(bytes).copy(buffer, at, offset, offset + n);
       offset += n;
@@ -55,6 +58,7 @@ function fakeHandle(bytes, stats = {}) {
     },
     close: async () => {},
   };
+  return handle;
 }
 
 async function fixture(t) {
@@ -154,10 +158,21 @@ test('selector rules: empty, relative, whitespace-padded, control and non-absolu
   const counted = countingFiles();
   for (const selector of ['', ' ', '\t', 'reminder.txt', './reminder.txt', '../reminder.txt', '~/reminder.txt', '$HOME/reminder.txt',
     '${HOME}/x', 'file:///tmp/reminder.txt', ' /tmp/reminder.txt', '\t/tmp/reminder.txt', '/tmp/reminder.txt\n', '\n/tmp/x',
-    '/tmp/x\rtail', '/tmp/x\0tail', 'C:\\reminder.txt']) {
+    '/tmp/x\rtail', '/tmp/x\0tail']) {
     assert.deepEqual(await loadReminderContent(selector, { files: counted.files }), { ok: false, failure: 'selector' }, JSON.stringify(selector));
   }
   assert.deepEqual(counted.calls, { lstat: [], open: [], stat: 0, read: 0 });
+});
+
+test('a drive-letter selector is platform-scoped: valid absolute on win32, invalid and untouched on linux', async () => {
+  // Explicit platform seams make both halves deterministic on any host, including a Windows CI runner.
+  const counted = countingFiles();
+  assert.deepEqual(await loadReminderContent('C:\\reminder.txt', { files: counted.files, platform: 'linux' }), { ok: false, failure: 'selector' });
+  assert.deepEqual(counted.calls, { lstat: [], open: [], stat: 0, read: 0 }, 'a linux drive-letter selector never touches the filesystem');
+  const win = await loadReminderContent('C:\\reminder.txt', { files: counted.files, platform: 'win32' });
+  assert.notEqual(win.failure, 'selector', 'on win32 the drive-letter path is a valid absolute selector and reaches the filesystem');
+  assert.equal(win.failure, 'read', 'the missing fixture file is then reported as a read failure');
+  assert.equal(counted.calls.lstat.length, 1);
 });
 
 test('selector rules are native-platform fixtures: Windows absolute forms and POSIX-only roots', () => {
@@ -232,22 +247,28 @@ test('a leaf symlink is refused before any open even when the target is a valid 
 });
 
 test('growth and replacement during the read are rejected, never partially accepted', async () => {
+  // The selector must be absolute for the platform under test, so the fake lstat/open race is what is measured.
+  const selected = process.platform === 'win32' ? 'C:\\fixture\\reminder.txt' : '/fixture/reminder.txt';
   // Regular at lstat, then the open handle reports a different inode: a replacement race.
-  const replaced = await loadReminderContent('/fixture/reminder.txt', { files: fakeFiles({
-    lstat: fakeStats({ ino: 7 }), open: fakeHandle(Buffer.from('new text'), { ino: 8 }) }) });
+  const replacedHandle = fakeHandle(Buffer.from('new text'), { ino: 8 });
+  const replaced = await loadReminderContent(selected, { files: fakeFiles({
+    lstat: fakeStats({ ino: 7 }), open: replacedHandle }) });
   assert.deepEqual(replaced, { ok: false, failure: 'read' });
+  assert.equal(replacedHandle.contentReads, 0, 'a replaced inode is refused before any content read');
   // The handle grows past its reported size: more bytes than were stat'd are refused.
-  const grown = await loadReminderContent('/fixture/reminder.txt', { files: fakeFiles({
+  const grown = await loadReminderContent(selected, { files: fakeFiles({
     lstat: fakeStats({ size: 4 }), open: fakeHandle(Buffer.alloc(40, 0x61), { size: 4 }) }) });
   assert.deepEqual(grown, { ok: false, failure: 'read' });
   // Reading past the byte cap is refused even if the stat claimed a small size.
-  const oversize = await loadReminderContent('/fixture/reminder.txt', { files: fakeFiles({
+  const oversize = await loadReminderContent(selected, { files: fakeFiles({
     lstat: fakeStats({ size: 1 }), open: fakeHandle(Buffer.alloc(REMINDER_FILE_MAX_BYTES + 5, 0x61), { size: 1 }) }) });
   assert.deepEqual(oversize, { ok: false, failure: 'size' });
   // A handle that is no longer a regular file (a device or FIFO swapped in) is refused without a read.
-  const swapped = await loadReminderContent('/fixture/reminder.txt', { files: fakeFiles({
-    lstat: fakeStats(), open: fakeHandle(Buffer.from('x'), { isFile: () => false }) }) });
+  const swappedHandle = fakeHandle(Buffer.from('x'), { isFile: () => false });
+  const swapped = await loadReminderContent(selected, { files: fakeFiles({
+    lstat: fakeStats(), open: swappedHandle }) });
   assert.deepEqual(swapped, { ok: false, failure: 'read' });
+  assert.equal(swappedHandle.contentReads, 0, 'a non-regular handle is never read');
 });
 
 test('invalid UTF-8 is rejected by fatal decoding, never repaired', async t => {
