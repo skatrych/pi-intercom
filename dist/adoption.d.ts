@@ -140,6 +140,12 @@ export declare class AdoptionWorkflow {
      * before any write. A refusal after the config was already replaced is not an admissible outcome.
      */
     private assertOwnEndpoint;
+    /**
+     * Synchronous final guard: the captured adopting pair must still be this runtime's native session and
+     * currently bound endpoint. The store calls this after temp write/sync/close and on every rename
+     * attempt, so endpoint drift during staging refuses before any replacement is published.
+     */
+    private assertCapturedIdentity;
     /** Native session id from this runtime and the port its endpoint actually bound. Never a history search. */
     private identity;
     /** Snapshot actual ancestor directories, not a descendant tree scan. */

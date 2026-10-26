@@ -147,6 +147,11 @@ export declare class Intercom {
      * Returns 'recovered' or a human-readable held reason. It never retries a mutation automatically.
      */
     private recoverBootPort;
+    /**
+     * The captured boot endpoint must still be the runtime's current endpoint. Binding a replacement
+     * listener and closing the old one during staging must refuse the publication, not publish a closed port.
+     */
+    private assertBoundEndpoint;
     /** Root/board/path validity independent of any caller guard, re-proved after each boot await. */
     private assertCoordinatorPaths;
     /**

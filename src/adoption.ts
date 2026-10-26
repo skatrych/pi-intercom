@@ -311,6 +311,21 @@ export class AdoptionWorkflow {
       failAt('IDENTITY', `this endpoint port ${identity.port} did not verify session ${identity.sessionId} (${own.reason}); a port is never guessed or supplied, and the board was not changed. Restart Pi and retry`);
     }
   }
+  /**
+   * Synchronous final guard: the captured adopting pair must still be this runtime's native session and
+   * currently bound endpoint. The store calls this after temp write/sync/close and on every rename
+   * attempt, so endpoint drift during staging refuses before any replacement is published.
+   */
+  private assertCapturedIdentity(identity: AdoptionIdentity): void {
+    let sessionId: string;
+    try { sessionId = this.options.sessionId(); }
+    catch { failAt('SESSION_CHANGED', 'the runtime lifecycle/session was replaced before publication'); }
+    if (sessionId !== identity.sessionId) failAt('SESSION_CHANGED', `the native session changed from ${identity.sessionId} to ${sessionId} before publication`);
+    const currentPort = this.options.endpointPort();
+    if (currentPort !== identity.port) {
+      failAt('IDENTITY', `this runtime's bound endpoint changed from port ${identity.port} to ${currentPort ?? 'none'} after the preview; the stale pair is not published`);
+    }
+  }
   /** Native session id from this runtime and the port its endpoint actually bound. Never a history search. */
   private identity(): AdoptionIdentity | { stop: Result } {
     const port = this.options.endpointPort();
@@ -530,8 +545,9 @@ export class AdoptionWorkflow {
             if (config.agents.some(agent => agent.sessionId === identity.sessionId)) failAt('SESSION_COLLISION', 'the adopting session became a configured entry during the preview');
             if (config.agents.some(agent => agent.port === identity.port && agent.sessionId !== identity.sessionId)) failAt('PORT_COLLISION', 'the adopting port became a configured entry during the preview');
             this.assertCurrent(context);
+            this.assertCapturedIdentity(identity);
           },
-          assertValid: () => { this.assertCurrent(context); this.assertPaths(surveyed); },
+          assertValid: () => { this.assertCurrent(context); this.assertCapturedIdentity(identity); this.assertPaths(surveyed); },
         }));
         if (sha256(result.after) !== sha256(expected)) {
           return { stop: halt('PUBLISH', 'the published config does not match the reviewed two-value replacement; the transaction stops and no local promotion is claimed') };

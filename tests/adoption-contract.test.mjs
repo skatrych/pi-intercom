@@ -178,6 +178,30 @@ test('concurrent historical log append survives adoption; reports and claim byte
   assert.deepEqual(await seeded.snapshot(), { ...before, logs: { ...before.logs, [name]: before.logs[name] + appended } });
 });
 
+test('an endpoint change at temporary close refuses before the captured pair is published', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  await f.board.write(configText('single', f.ports()));
+  const before = await f.board.read();
+  let endpointPort = f.ports().coordinator + 100;
+  class DriftStore extends ConfigStore {
+    async openTemporary(file) {
+      const handle = await super.openTemporary(file);
+      return {
+        writeFile: data => handle.writeFile(data), sync: () => handle.sync(),
+        // The runtime rebinds its endpoint during the staging awaits, after the last snapshot.
+        close: async () => { await handle.close(); endpointPort++; },
+      };
+    }
+  }
+  const store = new DriftStore(f.home);
+  const s = standalone(f, { portValue: () => endpointPort });
+  s.workflow.options.storeFor = () => store;
+  const result = await s.workflow.run(s.context, 'adopt');
+  assert.equal(result.code, 'IDENTITY', result.lines.join('\n'));
+  assert.equal(await f.board.read(), before, 'the board must be byte-for-byte unchanged');
+});
+
 test('preview hash binds the answer; a same-semantic reformat still refuses', async t => {
   const f = await createFixture();
   t.after(() => f.dispose());

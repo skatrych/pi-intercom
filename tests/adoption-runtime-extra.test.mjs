@@ -254,6 +254,47 @@ test('a revocation during handoff recovery blocks maintenance and the ready noti
   assert.ok(!notices.some(text => /Coordinator ready/.test(text)));
 });
 
+test('P3 refuses when the runtime endpoint is replaced during temporary close', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const roles = path.join(f.home, 'roles');
+  await mkdir(path.join(roles, 'orchestrator'), { recursive: true });
+  await f.board.write(configText('single', f.ports()));
+  const occupied = await listen(0, async () => {}, () => ({ version: 1, sessionId: 'foreign' }));
+  t.after(() => occupied.close());
+  await f.board.write((await f.board.read()).replace(`"port": ${f.ports().coordinator}`, `"port": ${occupied.port}`));
+  const before = await f.board.read();
+  let runtime;
+  class DriftStore extends ConfigStore {
+    async openTemporary(file) {
+      const handle = await super.openTemporary(file);
+      return {
+        writeFile: data => handle.writeFile(data), sync: () => handle.sync(),
+        close: async () => {
+          await handle.close();
+          // Bind a new real loopback endpoint for this session and close the old one.
+          const old = runtime.endpoint;
+          runtime.endpoint = await listen(0, async () => {}, () => ({ version: 1, sessionId: IDS.gone }));
+          await old.close();
+        },
+      };
+    }
+  }
+  const notices = [];
+  runtime = new Intercom({ cwd: f.home, sessionId: () => IDS.gone, busy: () => false,
+    roleDirectory: path.join(roles, 'orchestrator'), rolesDirectory: roles, workerRole: '',
+    deliver: () => {}, notify: text => notices.push(text), setName: async () => {} },
+  { launch: async () => assert.fail('no launch'), probe: probeWorker, store: root => new DriftStore(root),
+    observe: () => ({ record() {}, close: async () => {}, maintain() {} }),
+    adoption: { projectsHome: f.home, rolesDirectory: roles } });
+  t.after(() => runtime.close());
+  await runtime.start();
+  assert.equal(await f.board.read(), before, 'the board must be byte-for-byte unchanged');
+  assert.equal(runtime.responsibility, undefined);
+  assert.equal(await runtime.coordinatorActionReady(), false);
+  assert.ok(notices.some(text => /bound endpoint changed during boot publication/.test(text)));
+});
+
 test('malformed existing config stops startup with no write and no implicit repair', async t => {
   const f = await setup(t);
   await f.board.write('{ "version": 1, "agents": [');

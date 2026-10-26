@@ -491,6 +491,7 @@ export class Intercom {
         savedPort: saved.port,
         newPort: endpoint.port,
         recheck: async () => {
+          this.assertBoundEndpoint(endpoint);
           await verifyOwnEndpoint();
           // A bounded observation of the saved pair, never a liveness fence against a later reconnect: a
           // matching live identity refuses; disconnected/unknown proceeds under the accepted P3 risk.
@@ -500,10 +501,11 @@ export class Intercom {
           await this.store.validateRoot(this.store.root);
           assertValid();
         },
-        assertValid: () => { assertValid(); this.assertCoordinatorPaths(); },
+        assertValid: () => { assertValid(); this.assertBoundEndpoint(endpoint); this.assertCoordinatorPaths(); },
       });
       const published = this.store.readDocumentSync();
-      requireCoordinatorPair(published.config, { sessionId: this.initialId, port: endpoint.port });
+      // Post-publication verification uses the runtime's current endpoint, never only the captured one.
+      requireCoordinatorPair(published.config, this.caller());
       this.bootHeld = false;
       // Observation stays closed until responsibility is loaded after the guarded publication.
       return 'recovered';
@@ -512,6 +514,15 @@ export class Intercom {
       this.bootHeld = false;
       this.observationEnabled = false;
       return `the guarded boot port recovery for ${pair} on the board at ${this.store.file} stopped: ${String(error)}`;
+    }
+  }
+  /**
+   * The captured boot endpoint must still be the runtime's current endpoint. Binding a replacement
+   * listener and closing the old one during staging must refuse the publication, not publish a closed port.
+   */
+  private assertBoundEndpoint(expected: { port: number }): void {
+    if (this.endpoint !== expected || this.endpoint.port !== expected.port) {
+      fail(`${COORDINATOR_NOT_AUTHORIZED}: this runtime's bound endpoint changed during boot publication (captured ${expected.port}, current ${this.endpoint?.port ?? 'none'}); the saved port is not published from a closed or replaced endpoint`);
     }
   }
   /** Root/board/path validity independent of any caller guard, re-proved after each boot await. */
