@@ -85,7 +85,7 @@ export class CoordinatorIdleReminders {
     timerEpoch = 0;
     cancel;
     disposed = false;
-    /** Suspended: no scheduling and no admission. Authorization transitions re-arm; authority loss suspends. */
+    /** Suspended: no new idle observation/admission. Owned diagnostic bounds survive authority loss. */
     suspended = true;
     /** Serial admission window: one proof/attempt at a time. */
     checking = false;
@@ -106,23 +106,23 @@ export class CoordinatorIdleReminders {
         if (this.disposed)
             return;
         this.suspended = false;
+        // Admission/attempt diagnostics own this handle until their original bound. Reopening authority
+        // must neither replace an admission diagnostic nor postpone the submission-relative warning.
+        if (this.checking)
+            return;
         if (this.attempt) {
-            // An fenced attempt never dissolves across authorization transitions: its bounded uncertainty
-            // observation re-observes from the reopen without a retry, release or second timer.
-            if (!this.attempt.warned)
-                this.schedule(ATTEMPT_WARNING_MS, () => this.warnCheck());
-            else
+            if (this.attempt.warned)
                 this.schedule(this.intervalMs, () => this.pollIdle());
             return;
         }
         this.scheduleIdleObservation();
     }
     /**
-     * Authority/root/session loss: cancel this loop's timer. An outstanding attempt keeps its single
-     * bounded uncertainty observation across the transition — one handle, no release and no retry.
+     * Authority/root/session loss: cancel idle observation only. An admission or submitted attempt keeps
+     * its original bounded diagnostic across the transition — one handle, no release and no retry.
      */
     suspend() {
-        if (this.attempt) {
+        if (this.attempt || this.checking) {
             this.suspended = true;
             return;
         }
@@ -301,8 +301,12 @@ export class CoordinatorIdleReminders {
             const wasChecking = this.checking;
             this.checking = false;
             // A drained, unresolved or fenced proof must never leave the loop stalled or the slot stuck.
-            if (wasChecking && (drained || unresolved || this.tooOld) && !this.attempt)
-                this.recover();
+            if (wasChecking && !this.attempt) {
+                if (this.suspended)
+                    this.stopTimer();
+                else if (drained || unresolved || this.tooOld)
+                    this.recover();
+            }
         }
     }
     /** The one bounded uncertainty warning, then fenced observation. No retry, resubmission or cancel API. */

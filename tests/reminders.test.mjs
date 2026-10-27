@@ -213,6 +213,50 @@ test('a proof that outlives one additional interval is suppressed as too old and
   u.reminders.dispose();
 });
 
+test('a hung admission keeps its original diagnostic deadline across delayed authority transitions', async () => {
+  const u = unit({ interval: 60_000 });
+  const release = u.gate();
+  u.reminders.arm();
+  u.clock.advance(60_000);
+  for (const delay of [10_000, 20_000, 29_999]) {
+    u.clock.advance(delay);
+    u.reminders.suspend(); u.bumpGuard(); u.reminders.arm();
+    assert.equal(u.clock.pending.size, 1, 'the admission retains its one original handle');
+    assert.equal(u.state.reads, 1, 'no parallel proof or retry');
+    assert.deepEqual(u.warnings, []);
+  }
+  u.clock.advance(1);
+  assert.deepEqual(u.warnings, [REMINDER_ADMISSION_DIAGNOSTIC], 'warn at t=120s, not a reopen-relative bound');
+  u.clock.advance(10 * 60_000);
+  assert.deepEqual(u.warnings, [REMINDER_ADMISSION_DIAGNOSTIC]);
+  assert.equal(u.clock.pending.size, 0, 'hung admission stays fenced without polling handles');
+  assert.equal(u.state.reads, 1);
+  assert.equal(u.delivered.length, 0);
+  release(true); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0, 'expired/guard-invalid proof cannot submit when drained');
+  assert.equal(u.clock.pending.size, 1, 'only draining permits fresh idle observation');
+  u.reminders.dispose();
+});
+
+test('submitted warning keeps its original 30-second deadline across delayed repeated authority transitions', async () => {
+  const u = unit({ interval: 60_000 });
+  u.reminders.arm();
+  u.clock.advance(60_000); await settled(u.reminders);
+  for (const delay of [20_000, 9000, 999]) {
+    u.clock.advance(delay);
+    u.reminders.suspend(); u.bumpGuard(); u.reminders.arm();
+    assert.equal(u.clock.pending.size, 1);
+    assert.deepEqual(u.warnings, []);
+  }
+  u.clock.advance(1);
+  assert.deepEqual(u.warnings, [REMINDER_ATTEMPT_DIAGNOSTIC], 'warn at t=90s, not 30s after reopening');
+  u.clock.advance(10 * 60_000); await settled(u.reminders);
+  assert.deepEqual(u.warnings, [REMINDER_ATTEMPT_DIAGNOSTIC]);
+  assert.equal(u.delivered.length, 1, 'authority transitions never release or replay submitted work');
+  assert.equal(u.state.reads, 1);
+  u.reminders.dispose();
+});
+
 test('the unconfirmed attempt is warned about once and stays fenced with no resubmission', async () => {
   const u = unit();
   u.reminders.arm();

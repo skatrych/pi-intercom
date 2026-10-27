@@ -5,6 +5,7 @@ import { rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import extension from '../dist/index.js';
+import { Intercom } from '../dist/runtime.js';
 import {
   ATTEMPT_WARNING_MS, REMINDER_ADMISSION_DIAGNOSTIC, REMINDER_ATTEMPT_DIAGNOSTIC,
   REMINDER_MINUTES_ENV, REMINDER_TEXT, isWakeupEntry, WAKEUP_CUSTOM_TYPE,
@@ -43,6 +44,9 @@ async function freePort() {
  * deliver → pi.sendMessage adapter, the attempt fence, and the correlation path are what run.
  */
 async function orchestratorAdapter(t) {
+  let runtime;
+  const start = Intercom.prototype.start;
+  t.mock.method(Intercom.prototype, 'start', function (...args) { runtime = this; return start.apply(this, args); });
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const saved = { minutes: process.env[REMINDER_MINUTES_ENV], file: process.env.PI_INTERCOM_REMINDER_FILE, role: process.env.PI_ROLE_DIR, roles: process.env.PI_ROLES_DIR, home: process.env.PI_INTERCOM_PROJECTS_HOME, worker: process.env.PI_INTERCOM_WORKER_ROLE, herdr: process.env.HERDR_ENV };
   t.after(async () => {
@@ -87,7 +91,7 @@ async function orchestratorAdapter(t) {
   await events.get('session_start')({}, ctx);
   t.after(async () => { await events.get('session_shutdown')(); await rm(f.home, { recursive: true, force: true }); });
   const settleRun = entries => events.get('agent_settled')({ aborted: false }, { ...ctx, sessionManager: { ...ctx.sessionManager, getBranch: () => entries } });
-  return { f, tools, ctx, events, setBranch: entries => { branch = entries; }, submissions, steered, notices, tick: ms => t.mock.timers.tick(ms), settleRun };
+  return { f, tools, ctx, events, runtime, setBranch: entries => { branch = entries; }, submissions, steered, notices, tick: ms => t.mock.timers.tick(ms), settleRun };
 }
 
 const OWN_SHA256 = createHash('sha256').update(REMINDER_TEXT, 'utf8').digest('hex');
@@ -127,6 +131,22 @@ test('tree summarization activity invalidates the old deadline and settles one f
   await waitFor(() => a.submissions.length === 1);
 });
 
+test('a cancelled tree operation without completion invalidates the old deadline before its proof drains', supportedHost, async t => {
+  const a = await orchestratorAdapter(t);
+  a.tick(50_000);
+  await a.events.get('session_before_tree')({ preparation: {}, signal: AbortSignal.abort() }, a.ctx);
+  // Cancellation/failure means session_tree never arrives. Cross the ORIGINAL expiry and wait for
+  // any admitted real filesystem proof to drain before the absence assertion (mutation-sensitive).
+  a.tick(10_000);
+  await waitFor(() => !a.runtime.reminders.checking);
+  assert.equal(a.submissions.length, 0, 'no stale expiry after a cancelled pre-tree operation');
+  a.tick(50_000); // t=110: observation, not admission; no completion event has rescued the deadline
+  await waitFor(() => !a.runtime.reminders.checking);
+  assert.equal(a.submissions.length, 0, 'observe idle conservatively after failed summarization');
+  a.tick(MINUTE);
+  await waitFor(() => a.submissions.length === 1);
+});
+
 test('a delayed unrelated agent_settled fences the attempt; owned consumption inside a run resolves it', supportedHost, async t => {
   const a = await orchestratorAdapter(t);
   a.tick(MINUTE);
@@ -154,7 +174,7 @@ test('a delayed unrelated agent_settled fences the attempt; owned consumption in
   assert.equal(a.submissions[1].message.details.reminderSha256, OWN_SHA256);
 });
 
-test('a prepared run without a settlement keeps the fence, warns once at the bound and stays silent', supportedHost, async t => {
+test('a submission without any host lifecycle evidence keeps the fence and warns once at the bound', supportedHost, async t => {
   const a = await orchestratorAdapter(t);
   a.tick(MINUTE);
   await waitFor(() => a.submissions.length === 1);

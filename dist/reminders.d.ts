@@ -76,7 +76,7 @@ export declare class CoordinatorIdleReminders {
     private timerEpoch;
     private cancel?;
     private disposed;
-    /** Suspended: no scheduling and no admission. Authorization transitions re-arm; authority loss suspends. */
+    /** Suspended: no new idle observation/admission. Owned diagnostic bounds survive authority loss. */
     private suspended;
     /** Serial admission window: one proof/attempt at a time. */
     private checking;
@@ -90,8 +90,8 @@ export declare class CoordinatorIdleReminders {
     /** Authorization open or fresh startup: begin one full idle observation of a fresh X, with no worker call. */
     arm(): void;
     /**
-     * Authority/root/session loss: cancel this loop's timer. An outstanding attempt keeps its single
-     * bounded uncertainty observation across the transition — one handle, no release and no retry.
+     * Authority/root/session loss: cancel idle observation only. An admission or submitted attempt keeps
+     * its original bounded diagnostic across the transition — one handle, no release and no retry.
      */
     suspend(): void;
     dispose(): void;
