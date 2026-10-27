@@ -245,7 +245,7 @@ A coordinator-local timer wakes an idle agent to review delegated work. It is **
 - Aborting the owning tool's Pi run also disarms its reminder generation when that AbortSignal is available. This is **not universal Escape/Stop detection**: the host may later be in a separate retry/compaction run whose abort does not reach the original signal. Use the explicit stop tool to disable reminders reliably.
 - Reminder delivery uses Pi's existing user-message path. Host input rejection remains possible (including the documented compaction gap); reminders are not immediately retried. The next normal tick is a new periodic check, not proof of prior delivery.
 
-The reminder contains only this fixed public text, never task payloads or private reasoning:
+By default the reminder contains only this fixed public text, never task payloads or private reasoning. An operator can instead select one plain-text file with [`PI_INTERCOM_REMINDER_FILE`](#reminder-text-file); the file's exact text then replaces this default:
 
 > Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.
 >
@@ -253,7 +253,7 @@ The reminder contains only this fixed public text, never task payloads or privat
 >
 > This reminder does not authorize new work, retries, worker closure, or publication.
 
-The text is fixed and interval-neutral: it never contains the configured value, task payloads, or worker data.
+The default text is fixed and interval-neutral: it never contains the configured value, task payloads, or worker data. Interval and text are independent: selecting a text file never changes the interval.
 
 Reload the coordinator's extension to register the new tool and timer logic. No existing live session is armed merely by installing the change.
 
@@ -274,6 +274,25 @@ $env:PI_INTERCOM_REMINDER_MINUTES = "2"; pi
 - `0` is **not** a disable switch. `intercom_stop_reminders({})` remains the way to disable reminders until the next qualifying worker call.
 - Scope is the coordinator Pi process environment only. This option has **no `settings.json` support and no project/global precedence**: Pi 0.84.4 documents no extension-key settings API, so Intercom does not read Pi settings for it. Worker processes and shared workspace configuration are unaffected, and nothing watches or re-reads the value while a runtime runs.
 - Startup, Pi `/reload`, and session replacement each read it again for the new runtime; a `/reload` only re-reads the environment that process already has. A shell `export` executed as a child tool cannot change the already-running coordinator, so restart Pi with the new inherited environment to change an operator-provided interval. The new runtime still starts disarmed.
+
+#### Reminder text file
+
+`PI_INTERCOM_REMINDER_FILE` optionally selects the **exact text** of a coordinator reminder from one plain UTF-8 file. It is generic: Intercom imposes no content format, question list, header, identifier, version or workflow. Unset keeps the built-in text above, byte-for-byte, and performs no file access.
+
+```sh
+PI_INTERCOM_REMINDER_FILE=/absolute/path/to/reminder.txt pi
+```
+
+```powershell
+$env:PI_INTERCOM_REMINDER_FILE = "C:\absolute\path\reminder.txt"; pi
+```
+
+- **Selector:** exactly one absolute path for the native platform. Spaces are literal. Nothing is trimmed, `~`/environment variables are not expanded, globs and URLs are not interpreted, and nothing is resolved from the working directory. Empty, relative, whitespace-padded, or NUL/CR/LF-containing values are invalid; an empty value is **invalid, not unset**. No settings key, command-line flag, ancestor lookup or board field competes with it.
+- **File:** a regular file, at most **16,384 bytes**, decoded as strict UTF-8. Symlinks at the selected path and non-regular files (directories, devices, FIFOs) are refused before any read. A file that grows, shrinks or is replaced during the read is refused.
+- **Text:** 1 to **4,000 Unicode code points** (not UTF-16 length) with at least one non-whitespace character. A byte-order mark, CR, NUL, other control characters except TAB and LF, and DEL are refused. Every accepted byte is preserved exactly: spaces, tabs, line breaks and the presence or absence of a final newline. Nothing is trimmed, normalised, truncated, interpolated or executed.
+- **Snapshot and restart:** the selector and file are read **once per coordinator runtime start**, before any reminder can be armed, and the resulting text is fixed for that runtime. Ticks, arming, tool calls and file edits never reread it, and no watcher exists. Editing the file takes effect at the next Pi `/reload` or session start. Changing the selector requires a new Pi process with the changed environment: a shell export inside a running session cannot affect the process. A runtime that is shut down or replaced while its load is in flight cannot arm reminders. Restart or reload never replays old reminders or expired deadlines.
+- **Failure:** a selected value that is invalid, unreadable, oversize, or not acceptable text disables **reminder delivery only** for that runtime, and emits this single fixed notice: `Intercom reminder configuration invalid; reminders unavailable until corrected and runtime reloaded.` Intercom never silently falls back to the default text, reuses earlier text, retries on a timer, or passes an error to the model. Messaging, adoption, readiness and read-only status keep working. Correct the file or selector, then reload the coordinator or restart Pi.
+- **Privacy and trust:** the path, raw environment value, file contents, raw filesystem error and private reasoning are never logged or shown in the notice. The configured text is sent to the model as ordinary user input on each delivery, so it must contain no secrets. It is trusted local prompt input, not a sandbox: whoever can replace the selected file controls the text. Standalone `pi` users choose it directly; the selector grants no reminder, workflow or tool authority.
 
 ## Config and wire contracts
 
@@ -412,6 +431,13 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### Unreleased Optional reminder text file
+
+- New optional coordinator-process environment variable `PI_INTERCOM_REMINDER_FILE` selects the reminder text from one bounded UTF-8 file; see [Reminder text file](#reminder-text-file). Unset keeps the built-in text byte-for-byte with no file access. Invalid selections disable reminder delivery for that runtime with one fixed notice; they never fall back silently.
+- Generic loader and immutable per-runtime snapshot (`src/reminder-content.ts`), with the content source and SHA-256 passed to the delivery boundary. The delivered message shape is unchanged in this release. No scheduler, stop-tool, role-eligibility or ordinary-messaging behavior changed, and `PI_INTERCOM_REMINDER_MINUTES` is unchanged.
+- Version is not bumped and no release is published by this entry; it is an unreleased change set on `main`.
+- Local validation: 633 executed tests (579 before, plus 54 new in `tests/reminder-content.test.mjs`, `tests/reminder-content-runtime.test.mjs`, `tests/reminders.test.mjs` and `tests/extension.test.mjs`), typecheck, and the isolated package gate. Every executed test process scrubs inherited `PI_INTERCOM_REMINDER_FILE`, `PI_INTERCOM_REMINDER_MINUTES`, `PI_ROLE_DIR` and `PI_INTERCOM_WORKER_ROLE` (`tests/support/scrub-process-env.mjs`), so an operator's launch environment cannot change results.
 
 ### Unreleased Configurable reminder interval
 
