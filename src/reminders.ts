@@ -43,6 +43,8 @@ export const WAKEUP_CUSTOM_TYPE = 'intercom-orchestrator-wakeup';
 /** One bounded observation of an unconfirmed attempt. No second attempt and no replay follow it. */
 export const ATTEMPT_WARNING_MS = 30_000;
 export const REMINDER_ATTEMPT_DIAGNOSTIC = 'Intercom orchestrator idle reminder: one submitted wake-up attempt has no confirmed processing. No automatic retry, replay or catch-up follows; resolve this explicitly or restart the process for a fresh schedule.';
+/** The one fixed diagnostic for an admission window that never completed within its bound. */
+export const REMINDER_ADMISSION_DIAGNOSTIC = 'Intercom orchestrator idle reminder: one expiry admission window did not complete within its bound (a slow or unresolved eligibility check). Nothing was submitted and no automatic retry or catch-up follows; if a window never completes, an explicit process restart is required to continue wake-ups.';
 /** Truthful non-stopping stop-tool result. Wake-ups are never disabled by an agent or by absence of work. */
 export const REMINDER_STOP_REASON = 'idle_wakeups_are_automatic';
 
@@ -117,10 +119,24 @@ export class CoordinatorIdleReminders {
   arm(): void {
     if (this.disposed) return;
     this.suspended = false;
+    if (this.attempt) {
+      // An fenced attempt never dissolves across authorization transitions: its bounded uncertainty
+      // observation re-observes from the reopen without a retry, release or second timer.
+      if (!this.attempt.warned) this.schedule(ATTEMPT_WARNING_MS, () => this.warnCheck());
+      else this.schedule(this.intervalMs, () => this.pollIdle());
+      return;
+    }
     this.scheduleIdleObservation();
   }
-  /** Authority/root/session loss: cancel this loop's timer. Outstanding attempts stay fenced, never retried. */
+  /**
+   * Authority/root/session loss: cancel this loop's timer. An outstanding attempt keeps its single
+   * bounded uncertainty observation across the transition — one handle, no release and no retry.
+   */
   suspend(): void {
+    if (this.attempt) {
+      this.suspended = true;
+      return;
+    }
     this.stopTimer();
     this.suspended = true;
   }
@@ -193,7 +209,14 @@ export class CoordinatorIdleReminders {
     let unresolved = true;
     // Bounded admission window: a proof that outlives one additional interval is suppressed as too old
     // and drained before anything else. This is an age bound, not another idle test.
-    this.schedule(this.intervalMs, () => { if (this.checking) this.tooOld = true; else this.recover(); });
+    this.schedule(this.intervalMs, () => {
+      if (this.checking) {
+        // The bound is reached while the proof still runs: unpublishable and unobservable fencing is
+        // wrong, so emit the one fixed sanitized diagnostic even if the read never resolves.
+        this.tooOld = true;
+        try { this.host.warn(REMINDER_ADMISSION_DIAGNOSTIC); } catch { /* A warning failure cannot affect scheduling. */ }
+      } else this.recover();
+    });
     try {
       try { guard?.(); } catch { drained = true; return; }
       const eligible = await this.host.eligible();
@@ -226,7 +249,8 @@ export class CoordinatorIdleReminders {
       this.attempt.warned = true;
       try { this.host.warn(REMINDER_ATTEMPT_DIAGNOSTIC); } catch { /* A warning failure cannot affect scheduling. */ }
     }
-    if (this.attempt) this.schedule(this.intervalMs, () => this.pollIdle());
+    // While suspended the fence stays with the diagnostic; resumed observation waits for reauthorization.
+    if (this.attempt && !this.suspended) this.schedule(this.intervalMs, () => this.pollIdle());
   }
   /** Resume the idle observation loop after a drained or failed window. Same handle, no parallel checks. */
   private recover(): void {

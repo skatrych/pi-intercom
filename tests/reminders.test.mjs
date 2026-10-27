@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ATTEMPT_WARNING_MS, BUILTIN_REMINDER_CONTENT, CoordinatorIdleReminders, DEFAULT_REMINDER_INTERVAL_MS,
-  REMINDER_ATTEMPT_DIAGNOSTIC, REMINDER_STOP_REASON, REMINDER_TEXT, reminderIntervalMs, isWakeupEntry, WAKEUP_CUSTOM_TYPE,
+  REMINDER_ADMISSION_DIAGNOSTIC, REMINDER_ATTEMPT_DIAGNOSTIC, REMINDER_MINUTES_ENV, REMINDER_STOP_REASON,
+  REMINDER_TEXT, isWakeupEntry, reminderIntervalMs, WAKEUP_CUSTOM_TYPE,
 } from '../dist/reminders.js';
 import { recordingClock, settled, wakeupRuntime } from './fixtures/wakeup-fixture.mjs';
 
@@ -405,4 +406,122 @@ test('a session restart disposes old callbacks, starts one fresh deadline and re
   assert.equal(f.reminders().length, 1, 'the stale old callback cannot deliver for the new runtime');
   await f.tick();
   assert.equal(f.reminders().length, 2);
+});
+
+
+// ---- Correctness regressions from independent review ----
+
+const MINUTE = 60000;
+const setImmediatePromise = () => new Promise(resolve => setImmediate(resolve));
+
+test('without any correlation the single attempt stays fenced with no resubmission and its warning fires', async t => {
+  const f = await wakeupRuntime(t, { tickWithoutCorrelation: true });
+  await f.runtime.start();
+  await f.tick();
+  assert.equal(f.reminders().length, 1);
+  f.clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 1, 'no resubmission while the attempt stays fenced');
+  f.clock.advance(5 * DEFAULT_REMINDER_INTERVAL_MS); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 1);
+  f.clock.advance(ATTEMPT_WARNING_MS); await settled(f.runtime.reminders);
+  assert.ok(f.notices.includes(REMINDER_ATTEMPT_DIAGNOSTIC), 'one bounded uncertainty warning');
+  // Correlation arrives late; the fresh interval starts from it, not from the fenced window.
+  f.runtime.reminders.attemptResolved(); f.runtime.reminders.activitySettled();
+  f.clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 2);
+});
+
+test('a genuinely unresolved eligibility read emits its bounded diagnostic once and stays fenced', async () => {
+  const diagnostics = [];
+  const u = unit();
+  u.reminders['host'].eligible = () => new Promise(() => {}); // never resolves
+  u.reminders['host'].warn = message => diagnostics.push(message);
+  u.reminders.arm();
+  u.clock.advance(INTERVAL);
+  u.clock.advance(INTERVAL); // the age bound elapses while the read still pends (no settle possible)
+  assert.deepEqual(diagnostics, [REMINDER_ADMISSION_DIAGNOSTIC], 'one fixed sanitized diagnostic at the bound');
+  assert.equal(u.delivered.length, 0, 'nothing was submitted');
+  u.clock.advance(5 * INTERVAL); await setImmediatePromise();
+  assert.equal(u.delivered.length, 0, 'never submitted, never duplicated');
+  assert.equal(diagnostics.length, 1, 'the diagnostic is emitted once');
+  assert.equal(u.clock.pending.size, 0, 'the hung window holds no deferred catch-up handle');
+});
+
+test('a hang that later resolves is drained conservatively before the next full interval', async () => {
+  const u = unit();
+  const release = u.gate();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL);
+  u.clock.advance(INTERVAL); // the diagnostic bound elapses while the read pends
+  release(true);
+  await settled(u.reminders);
+  assert.equal(u.delivered.length, 0, 'the beyond-bound window submits nothing');
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1, 'drained observation converts into a fresh full interval');
+  u.reminders.dispose();
+});
+
+test('the bounded attempt warning survives suspension and reauthorization without release or retry', async () => {
+  const u = unit();
+  const release = u.gate();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL);
+  release(true);
+  await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.reminders.suspend(); // authority closes directly after the submission
+  u.reminders.arm(); // a later authorization transition reopens
+  assert.equal(u.clock.pending.size, 1, 'exactly one handle across the transition');
+  u.clock.advance(ATTEMPT_WARNING_MS - 1); await settled(u.reminders);
+  assert.equal(u.warnings.length, 0);
+  u.clock.advance(1); await settled(u.reminders);
+  assert.deepEqual(u.warnings, [REMINDER_ATTEMPT_DIAGNOSTIC], 'the warning is preserved across suspension');
+  assert.equal(u.delivered.length, 1, 'no release and no retry');
+  u.clock.advance(5 * INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1, 'still fenced with no resubmission');
+  u.reminders.dispose();
+});
+
+for (const [label, raw, delay] of [
+  ['valid nondefault override', '2', 2 * MINUTE],
+  ['upper boundary', '35791', 35791 * MINUTE],
+  ['trimmed leading zeros', ' 0007 ', 7 * MINUTE],
+  ['zero is not a disable switch', '0', 5 * MINUTE],
+  ['malformed exponent', '2e3', 5 * MINUTE],
+  ['above boundary', '35792', 5 * MINUTE],
+]) {
+  test(`an eligible Orchestrator runtime schedules the validated interval: ${label}`, async t => {
+    const f = await wakeupRuntime(t, { reminderMinutesEnv: () => raw });
+    assert.equal(f.reads.minutes, 0, 'construction alone must not read the environment');
+    await f.runtime.start();
+    assert.equal(f.reads.minutes, 1, 'one read per runtime start');
+    assert.deepEqual(f.clock.delays, [delay]);
+    await f.tick(delay); await f.tick(delay);
+    assert.equal(f.reminders().length, 2);
+    assert.equal(f.reads.minutes, 1, 'tool calls, ticks and arrivals never reread');
+  });
+}
+
+test('the production path reads the inherited process environment once per eligible runtime', async t => {
+  const inherited = process.env[REMINDER_MINUTES_ENV];
+  const f = await wakeupRuntime(t); // no seam: the production default reader
+  process.env[REMINDER_MINUTES_ENV] = '1';
+  try {
+    await f.runtime.start();
+    assert.deepEqual(f.clock.delays, [1 * MINUTE], 'an inherited variable reaches scheduling');
+    process.env[REMINDER_MINUTES_ENV] = '10'; // a later shell export cannot reach this process
+    f.runtime.reminders.arm(); // an authorization transition re-arms without any reread
+    assert.deepEqual(f.clock.delays.at(-1), 1 * MINUTE, 'no reread while the runtime runs');
+    await f.tick();
+    delete process.env[REMINDER_MINUTES_ENV];
+    await f.runtime.close();
+    await f.runtime.start();
+    assert.deepEqual(f.clock.delays.at(-1), DEFAULT_REMINDER_INTERVAL_MS, 'a fresh runtime without the variable returns to the default');
+    await f.tick();
+    assert.equal(f.reminders().length, 2);
+  } finally {
+    if (inherited === undefined) delete process.env[REMINDER_MINUTES_ENV];
+    else process.env[REMINDER_MINUTES_ENV] = inherited;
+  }
 });

@@ -27,6 +27,8 @@ export declare const WAKEUP_CUSTOM_TYPE = "intercom-orchestrator-wakeup";
 /** One bounded observation of an unconfirmed attempt. No second attempt and no replay follow it. */
 export declare const ATTEMPT_WARNING_MS = 30000;
 export declare const REMINDER_ATTEMPT_DIAGNOSTIC = "Intercom orchestrator idle reminder: one submitted wake-up attempt has no confirmed processing. No automatic retry, replay or catch-up follows; resolve this explicitly or restart the process for a fresh schedule.";
+/** The one fixed diagnostic for an admission window that never completed within its bound. */
+export declare const REMINDER_ADMISSION_DIAGNOSTIC = "Intercom orchestrator idle reminder: one expiry admission window did not complete within its bound (a slow or unresolved eligibility check). Nothing was submitted and no automatic retry or catch-up follows; if a window never completes, an explicit process restart is required to continue wake-ups.";
 /** Truthful non-stopping stop-tool result. Wake-ups are never disabled by an agent or by absence of work. */
 export declare const REMINDER_STOP_REASON = "idle_wakeups_are_automatic";
 /**
@@ -87,7 +89,10 @@ export declare class CoordinatorIdleReminders {
     constructor(host: IdleReminderHost, timer?: ReminderClock, intervalMs?: number, content?: ReminderContent);
     /** Authorization open or fresh startup: begin one full idle observation of a fresh X, with no worker call. */
     arm(): void;
-    /** Authority/root/session loss: cancel this loop's timer. Outstanding attempts stay fenced, never retried. */
+    /**
+     * Authority/root/session loss: cancel this loop's timer. An outstanding attempt keeps its single
+     * bounded uncertainty observation across the transition — one handle, no release and no retry.
+     */
     suspend(): void;
     dispose(): void;
     /** Any agent run invalidates the future deadline, regardless of its trigger: human, worker, or reminder. */

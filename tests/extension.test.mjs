@@ -199,7 +199,7 @@ test('single extension registers all agreed tools without starting resources in 
   assert.deepEqual([...channels.keys()], [ADOPTION_CHANNEL]);
   assert.equal(ADOPTION_CHANNEL, 'intercom:coordinator-adoption:v1');
   assert.equal(ADOPTION_PROTOCOL, 1);
-  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'session_before_compact', 'session_compact', 'session_compact_failed', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
+  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'session_before_compact', 'session_compact', 'session_compact_failed', 'session_before_tree', 'session_tree', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
   const create = tools.get('intercom_create_worker');

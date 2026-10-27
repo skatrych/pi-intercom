@@ -89,6 +89,7 @@ export async function wakeupRuntime(t, options = {}) {
   await commitFirstDeclaration(f, { sessionId: id, port: 41001, claim: (options.claim ?? 'ready') === 'ready' });
   const state = { busy: false };
   const deliveries = [], notices = [];
+  const reads = { minutes: 0 };
   const runtime = new Intercom({
     cwd: f.home, sessionId: () => id,
     roleDirectory: path.join(f.home, 'roles', options.roleDirectory ?? 'orchestrator'),
@@ -104,7 +105,7 @@ export async function wakeupRuntime(t, options = {}) {
     observe: () => ({ record() {}, close() {}, maintain() {} }),
     adoption: { projectsHome: f.home, rolesDirectory: path.join(f.home, 'roles') },
     reminderClock: clock,
-    ...(options.reminderMinutesEnv ? { reminderMinutesEnv: options.reminderMinutesEnv } : {}),
+    ...(options.reminderMinutesEnv ? { reminderMinutesEnv: () => { reads.minutes++; return options.reminderMinutesEnv(); } } : {}),
     ...(options.reminderFileEnv ? { reminderFileEnv: options.reminderFileEnv } : {}),
     ...(options.reminderFiles ? { reminderFiles: options.reminderFiles } : {}),
     ...(options.overrides ?? {}),
@@ -112,7 +113,7 @@ export async function wakeupRuntime(t, options = {}) {
   t.after(async () => { await runtime.close().catch(() => {}); await f.dispose(); });
   const reminders = () => deliveries.filter(d => d.submission !== undefined);
   const api = {
-    f, id, runtime, clock, deliveries, notices, reminders, endpoints,
+    f, id, runtime, clock, deliveries, notices, reminders, endpoints, reads,
     setBusy: value => { state.busy = value; },
     /**
      * One observed interval; when a wake-up arrived inside it, correlate the owned attempt like the

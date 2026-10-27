@@ -9,10 +9,11 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const dist = async name => import(path.join(ROOT, 'dist', name));
+// Windows-safe ESM specifier: bare absolute paths (C:\...) are parsed as URL schemes.
+const dist = async name => import(pathToFileURL(path.join(ROOT, 'dist', name)).href);
 const execute = promisify(execFile);
 
 export const IDS = { gone: 'gone-coordinator', fresh: 'fresh-orchestrator', workerOne: 'worker-one', workerTwo: 'worker-two', other: 'another-session' };

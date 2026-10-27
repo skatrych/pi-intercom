@@ -290,6 +290,12 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   });
   pi.on('session_compact', async () => { runtime?.reminderSettled(); });
   pi.on('session_compact_failed', async () => { runtime?.reminderSettled(); });
+  pi.on('session_before_tree', async () => {
+    // Branch navigation/summarization is busy for the wake-up loop and can finish without any
+    // agent run; the pre-hook's conservative observation covers paths with no completion event.
+    runtime?.reminderActivity();
+  });
+  pi.on('session_tree', async () => { runtime?.reminderSettled(); });
   pi.on('agent_settled', async (_event, ctx) => {
     context = ctx;
     activityOutcome = 'settled';
