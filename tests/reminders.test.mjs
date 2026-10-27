@@ -1,321 +1,408 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { createHash } from 'node:crypto';
-import { BUILTIN_REMINDER_CONTENT, CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, REMINDER_TEXT } from '../dist/reminders.js';
-import { Intercom } from '../dist/runtime.js';
-import { ConfigStore } from '../dist/config.js';
+import {
+  ATTEMPT_WARNING_MS, BUILTIN_REMINDER_CONTENT, CoordinatorIdleReminders, DEFAULT_REMINDER_INTERVAL_MS,
+  REMINDER_ATTEMPT_DIAGNOSTIC, REMINDER_STOP_REASON, REMINDER_TEXT, reminderIntervalMs, isWakeupEntry, WAKEUP_CUSTOM_TYPE,
+} from '../dist/reminders.js';
+import { recordingClock, settled, wakeupRuntime } from './fixtures/wakeup-fixture.mjs';
 
-function fakeClock(interval = DEFAULT_REMINDER_INTERVAL_MS) {
-  let now = 0, next = 0;
-  const pending = new Map(), callbacks = [], delays = [];
+const INTERVAL = DEFAULT_REMINDER_INTERVAL_MS;
+
+/** Unit harness: fake clock, injectable eligibility gate, generation-guarded host. */
+function unit({ interval = INTERVAL, busy = false, eligible = true } = {}) {
+  const clock = recordingClock();
+  const delivered = [], warnings = [];
+  const state = { busy, eligible, guardEpoch: 0, reads: 0 };
+  const host = {
+    captureGuard() {
+      const at = state.guardEpoch;
+      return () => { if (state.guardEpoch !== at) throw new Error('guard epoch changed'); };
+    },
+    async eligible() {
+      state.reads++;
+      return state.eligible;
+    },
+    busy: () => state.busy,
+    deliver: (text, submission) => delivered.push({ text, submission, at: clock.now }),
+    warn: message => warnings.push(message),
+  };
+  const reminders = new CoordinatorIdleReminders(host, clock, interval, BUILTIN_REMINDER_CONTENT);
   return {
-    pending, callbacks, delays,
-    schedule(callback, delay) {
-      // Every scheduled delay must equal the configured interval exactly: no
-      // early tick and no unit or rounding drift between scheduler and caller.
-      assert.equal(delay, interval, 'scheduled delay');
-      delays.push(delay);
-      const id = ++next; pending.set(id, { callback, due: now + delay }); callbacks.push(callback);
-      return () => pending.delete(id);
-    },
-    advance(milliseconds) {
-      now += milliseconds;
-      for (const [id, entry] of [...pending]) if (entry.due <= now) { pending.delete(id); entry.callback(); }
+    clock, delivered, warnings, reminders, state,
+    setBusy: value => { state.busy = value; },
+    setEligible: value => { state.eligible = value; },
+    bumpGuard: () => { state.guardEpoch++; },
+    /** Gate the awaited eligibility proof of the next admission window; later reads resolve immediately. */
+    gate: () => {
+      let resolveProof;
+      host.eligible = async () => { state.reads++; return new Promise(resolve => { resolveProof = resolve; }); };
+      return value => {
+        resolveProof(value);
+        host.eligible = async () => { state.reads++; return state.eligible; };
+      };
     },
   };
 }
-const settle = () => new Promise(resolve => setImmediate(resolve));
-async function settled(reminders) {
-  const deadline = Date.now() + 2000;
-  while (reminders?.checking) {
-    assert.ok(Date.now() < deadline, 'reminder role check did not finish');
-    await settle();
-  }
-}
-function helper(interval = DEFAULT_REMINDER_INTERVAL_MS) {
-  const clock = fakeClock(interval), delivered = [];
-  let role = true, busy = false;
-  const host = { isCoordinator: async () => role, busy: () => busy, deliver: text => delivered.push(text) };
-  const reminders = new CoordinatorReminders(host, clock, interval);
-  return { clock, host, reminders, delivered, setRole: value => { role = value; }, setBusy: value => { busy = value; } };
-}
 
-// Only the delay differs between these intervals: scheduling, fencing, busy skip
-// and lifecycle behavior must hold at the default and at every override.
-const INTERVALS = [
-  ['default', DEFAULT_REMINDER_INTERVAL_MS],
-  ['1 minute override', 60000],
-  ['2 minute override', 120000],
-  ['upper boundary 35791 minutes', 35791 * 60000],
-];
+test('the interval parser, constants and built-in content are unchanged by the scheduler rewrite', () => {
+  assert.equal(reminderIntervalMs(undefined), INTERVAL);
+  assert.equal(reminderIntervalMs('35791'), 35791 * 60000);
+  assert.equal(reminderIntervalMs('35792'), INTERVAL);
+  assert.equal(reminderIntervalMs('0'), INTERVAL);
+  assert.equal(BUILTIN_REMINDER_CONTENT.text, REMINDER_TEXT);
+});
 
-for (const [label, interval] of INTERVALS) {
-  test(`reset, recurring delivery without an automatic cap, stop and rearm [${label}]`, async () => {
-    const h = helper(interval); assert.equal(h.clock.pending.size, 0);
-    h.reminders.arm(); h.clock.advance(interval - 1); await settle(); assert.equal(h.delivered.length, 0);
-    assert.deepEqual(h.clock.delays, [interval]);
-    h.reminders.arm(); h.clock.advance(1); await settle(); assert.equal(h.delivered.length, 0);
-    h.clock.advance(interval - 1); await settled(h.reminders); assert.deepEqual(h.delivered, [REMINDER_TEXT]);
-    assert.deepEqual(h.clock.delays, [interval, interval, interval]);
-    for (let i = 0; i < 5; i++) { h.clock.advance(interval); await settled(h.reminders); }
-    assert.equal(h.delivered.length, 6); assert.equal(h.clock.pending.size, 1);
-    h.reminders.stop(); h.clock.advance(interval); await settle(); assert.equal(h.delivered.length, 6);
-    h.reminders.arm(); h.clock.advance(interval); await settled(h.reminders); assert.equal(h.delivered.length, 7);
-    h.reminders.dispose(); assert.equal(h.clock.pending.size, 0);
-  });
-
-  test(`busy ticks skip without backlog; failed delivery has no immediate replay [${label}]`, async () => {
-    const h = helper(interval); h.reminders.arm(); h.setBusy(true);
-    h.clock.advance(interval); await settled(h.reminders); assert.equal(h.delivered.length, 0);
-    h.setBusy(false); await settle(); assert.equal(h.delivered.length, 0);
-    h.clock.advance(interval); await settled(h.reminders); assert.equal(h.delivered.length, 1);
-    let attempts = 0;
-    h.host.deliver = () => { attempts++; throw new Error('uncertain submission'); };
-    h.clock.advance(interval); await settled(h.reminders); await settle(); assert.equal(attempts, 1);
-    h.clock.advance(interval - 1); assert.equal(attempts, 1);
-    h.clock.advance(1); await settled(h.reminders); assert.equal(attempts, 2);
-    h.reminders.dispose();
-  });
-
-  test(`stale callbacks and pending role reads are fenced by reset, stop, disposal and role loss [${label}]`, async () => {
-    for (const action of ['arm', 'stop', 'dispose']) {
-      const h = helper(interval); let release;
-      h.host.isCoordinator = () => new Promise(resolve => { release = resolve; });
-      h.reminders.arm(); const stale = h.clock.callbacks.at(-1);
-      h.clock.advance(interval); h.reminders[action](); release(true);
-      await settled(h.reminders); stale(); await settle(); assert.equal(h.delivered.length, 0);
-      h.reminders.dispose();
-    }
-    const h = helper(interval); h.reminders.arm(); h.setRole(false);
-    h.clock.advance(interval); await settled(h.reminders);
-    assert.equal(h.delivered.length, 0); assert.equal(h.clock.pending.size, 0);
-  });
-
-  test(`owning abort signals disarm only their generation and already-aborted signals never arm [${label}]`, async () => {
-    const h = helper(interval), old = new AbortController(), current = new AbortController();
-    h.reminders.arm(AbortSignal.abort()); assert.equal(h.clock.pending.size, 0);
-    h.reminders.arm(old.signal); h.reminders.arm(current.signal);
-    old.abort(); assert.equal(h.clock.pending.size, 1);
-    current.abort(); assert.equal(h.clock.pending.size, 0);
-    h.clock.advance(interval); await settle(); assert.equal(h.delivered.length, 0);
-    h.reminders.dispose();
-  });
-
-  test(`slow role reads do not overlap or deliver a stale missed interval [${label}]`, async () => {
-    const h = helper(interval); let release, reads = 0;
-    h.host.isCoordinator = () => { reads++; return new Promise(resolve => { release = resolve; }); };
-    h.reminders.arm(); h.clock.advance(interval); h.clock.advance(interval);
-    assert.equal(reads, 1); release(true); await settled(h.reminders); assert.equal(h.delivered.length, 0);
-    h.reminders.dispose();
+for (const interval of [INTERVAL, 60000]) {
+  test(`one full idle interval gates the first wake-up; correlation and settle arm the next [${interval}ms]`, async () => {
+    const u = unit({ interval });
+    u.reminders.arm();
+    u.clock.advance(interval - 1); await settled(u.reminders);
+    assert.equal(u.delivered.length, 0);
+    assert.deepEqual(u.clock.delays, [interval]);
+    u.clock.advance(1); await settled(u.reminders);
+    assert.equal(u.delivered.length, 1);
+    assert.equal(u.delivered[0].text, REMINDER_TEXT);
+    assert.deepEqual({ source: u.delivered[0].submission.source, sha256: u.delivered[0].submission.sha256 },
+      { source: 'builtin', sha256: BUILTIN_REMINDER_CONTENT.sha256 });
+    assert.equal(u.clock.pending.size, 1, 'the admitted attempt leaves one handle');
+    // Without correlation the attempt stays fenced: no backlog and no second attempt.
+    u.clock.advance(2 * interval); await settled(u.reminders);
+    assert.equal(u.delivered.length, 1);
+    u.reminders.attemptResolved(); u.reminders.activitySettled();
+    u.clock.advance(interval - 1); await settled(u.reminders);
+    assert.equal(u.delivered.length, 1, 'a fresh full interval starts only after known completion');
+    u.clock.advance(1); await settled(u.reminders);
+    assert.equal(u.delivered.length, 2);
+    assert.notEqual(u.delivered[0].submission.attemptId, u.delivered[1].submission.attemptId);
+    u.reminders.dispose();
   });
 }
 
-async function fixture(t, interval = DEFAULT_REMINDER_INTERVAL_MS) {
-  const root = await mkdtemp(path.join(tmpdir(), 'intercom-reminders-'));
-  await new ConfigStore(root).initialize('c', 12345);
-  const clock = fakeClock(interval), messages = [], sent = [], endpoints = new Map();
-  let port = 30000, busy = false;
-  const options = {
-    reminderClock: clock,
-    // The default path leaves the operator environment unset; an override is
-    // supplied through the narrow runtime seam so no test touches process.env.
-    reminderMinutesEnv: () => (interval === DEFAULT_REMINDER_INTERVAL_MS ? undefined : String(interval / 60000)),
-    listen: async (_preferred, accept) => { const p = port++; endpoints.set(p, accept); return { port: p, close: async () => { endpoints.delete(p); } }; },
-    send: async (p, message) => { sent.push(message); const accept = endpoints.get(p); if (!accept) throw new Error('offline'); await accept(message); },
-    launch: async () => { assert.equal(clock.pending.size, 1, 'arm before launch'); throw new Error('launch outcome uncertain'); },
-    probe: async () => { assert.equal(clock.pending.size, 1, 'arm before probe'); throw new Error('probe failed'); },
-  };
-  const host = id => ({ cwd: root, sessionId: () => id, busy: () => busy,
-    deliver: text => messages.push({ id, text }), setName: async () => {}, notify() {} });
-  const c = new Intercom(host('c'), options), w = new Intercom(host('w'), options);
-  t.after(async () => { await w.close(); await c.close(); await rm(root, { recursive: true, force: true }); });
-  await c.start(); await w.start();
-  await c.tool('configure_worker', { sessionId: 'w', port: w.endpoint.port, projectDirectory: '.', name: 'Worker', description: 'Assigned scope' });
-  await c.tool('reload_worker', { to: 'Worker' }); await c.tool('stop_reminders', {});
-  const tick = async () => { clock.advance(interval); await settled(c.reminders); };
-  const reminderCount = () => messages.filter(message => message.id === 'c' && message.text === REMINDER_TEXT).length;
-  return { root, c, w, clock, messages, sent, tick, reminderCount, options, setBusy: value => { busy = value; } };
-}
+test('a busy expiry sample sends nothing, completes zero reviews and restarts observation without a backlog', async () => {
+  const u = unit();
+  u.reminders.arm();
+  u.setBusy(true);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  assert.equal(u.state.reads, 0, 'a busy sample never opens an eligibility read');
+  u.setBusy(false);
+  u.reminders.activitySettled();
+  u.clock.advance(INTERVAL - 1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  u.clock.advance(1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.reminders.dispose();
+});
 
-test('valid coordinator worker calls arm before effects including failed/uncertain calls', async t => {
-  const f = await fixture(t);
-  const configure = { sessionId: 'w', port: f.w.endpoint.port, projectDirectory: '.', name: 'Worker', description: 'Assigned scope' };
-  for (const [operation, args] of [
-    ['send', { to: 'Worker', message: 'Scoped request' }], ['configure_worker', configure],
-    ['reload_worker', { to: 'Worker' }], ['request_status', { to: 'Worker' }],
-    ['create_worker', {}], ['resume_worker', { to: 'Worker', confirmClosed: true }],
-  ]) {
-    await f.c.tool('stop_reminders', {}); assert.equal(f.clock.pending.size, 0);
-    await f.c.tool(operation, args).catch(error => {
-      assert.ok(['create_worker', 'resume_worker'].includes(operation), error.message);
-    });
-    assert.equal(f.clock.pending.size, 1, operation);
-    await f.tick();
+test('busy work lasting longer than X produces no queued and no immediate catch-up reminder', async () => {
+  const u = unit();
+  u.reminders.arm();
+  u.reminders.activityStarted();
+  u.clock.advance(3 * INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0, 'no catch-up anywhere inside one long busy span');
+  assert.equal(u.clock.pending.size, 1, 'one handle, no accumulating ticks');
+  u.reminders.activitySettled();
+  u.clock.advance(INTERVAL - 1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  u.clock.advance(1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.reminders.dispose();
+});
+
+test('activity concurrent with an expiry invalidates the stale deadline before any sample', async () => {
+  const u = unit();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL - 1);
+  u.setBusy(true);
+  u.reminders.activityStarted();
+  u.clock.advance(1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0, 'the replaced deadline cannot fire');
+  u.setBusy(false);
+  u.reminders.activitySettled();
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.reminders.dispose();
+});
+
+test('stale timer callbacks after dispose, suspend or re-arm are fenced and never deliver', async () => {
+  for (const action of ['dispose', 'suspend']) {
+    const u = unit();
+    u.reminders.arm();
+    const stale = u.clock.callbacks.at(-1);
+    u.reminders[action]();
+    stale(); await settled(u.reminders);
+    assert.equal(u.delivered.length, 0);
+    assert.equal(u.clock.pending.size, 0);
   }
-  assert.equal(f.reminderCount(), 6);
-  await f.c.tool('stop_reminders', {});
-  f.c.options.closeProvider = {};
-  f.c.handoff.request = async () => { assert.equal(f.clock.pending.size, 1); throw new Error('close initiation uncertain'); };
-  await assert.rejects(f.c.tool('close_worker', { to: 'Worker' }), /uncertain/);
-  await f.tick(); assert.equal(f.reminderCount(), 7);
-  await f.c.tool('stop_reminders', {}); await f.w.close();
-  await assert.rejects(f.c.tool('send', { to: 'Worker', message: 'follow-up' }), /offline/);
-  await f.tick(); assert.equal(f.reminderCount(), 8);
+  const u = unit();
+  u.reminders.arm();
+  const stale = u.clock.callbacks.at(-1);
+  u.reminders.arm(); // a later authorization transition replaces the fresh observation
+  stale(); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1, 'only the fresh schedule delivers');
+  u.reminders.dispose();
 });
 
-test('invalid args/roles and read-only/report/bookkeeping operations never arm', async t => {
-  const f = await fixture(t);
-  for (const [operation, args] of [
-    ['send', { to: 'Worker', message: '' }], ['send', { to: 'missing', message: 'x' }],
-    ['configure_worker', { sessionId: 'w', port: 0, projectDirectory: '.', name: 'Worker', description: 'x' }],
-    ['configure_worker', { sessionId: 'w', port: 1234, projectDirectory: '.', name: 'Coordinator', description: 'x' }],
-    ['create_worker', { projectDirectory: '..' }], ['resume_worker', { to: 'Worker' }],
-    ['close_worker', { to: 'Worker' }], ['stop_worker', { to: 'Worker' }],
-  ]) { await assert.rejects(f.c.tool(operation, args)); assert.equal(f.clock.pending.size, 0, operation); }
-  await assert.rejects(f.w.tool('stop_reminders', {}), /coordinator permission/);
-  await assert.rejects(f.w.tool('create_worker', {}), /coordinator permission/);
-  await f.c.tool('list', {}); await f.c.tool('worker_status', {});
-  await f.w.tool('send', { to: 'Coordinator', message: 'worker finding' });
-  await f.w.tool('report_work', { status: 'blocked', summary: 'Need input' });
-  await f.w.tool('report_status', {});
-  assert.equal(f.clock.pending.size, 0);
-  await f.c.tool('remove_worker', { to: 'Worker' }); assert.equal(f.clock.pending.size, 0);
+test('failed eligibility suspends the loop without a timer; a later authorization transition re-arms fresh', async () => {
+  const u = unit();
+  u.setEligible(false);
+  u.reminders.arm();
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  assert.equal(u.clock.pending.size, 0, 'a non-eligible session leaves no scheduled wake-up');
+  u.clock.advance(5 * INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  u.setEligible(true);
+  u.reminders.arm();
+  assert.deepEqual(u.clock.delays.at(-1), INTERVAL);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.reminders.dispose();
 });
 
-test('stop or newer calls fence old preflights; owner abort during preflight cannot arm later', async t => {
-  for (const mode of ['stop', 'newer', 'abort']) {
-    const f = await fixture(t), owner = new AbortController();
-    let release, entered, first = true;
-    const gate = new Promise(resolve => { release = resolve; });
-    const started = new Promise(resolve => { entered = resolve; });
-    const state = f.c.state.bind(f.c);
-    f.c.state = async () => {
-      const result = await state();
-      if (first) { first = false; entered(); await gate; }
-      return result;
-    };
-    f.c.options.launch = async () => ({ submitted: true });
-    const pending = f.c.tool('create_worker', {}, 'create-tool', owner.signal);
-    await started;
-    if (mode === 'stop') await f.c.tool('stop_reminders', {});
-    if (mode === 'newer') await f.c.tool('send', { to: 'Worker', message: 'newer call' });
-    if (mode === 'abort') owner.abort();
-    const callbacks = f.clock.callbacks.length;
-    release(); await pending;
-    assert.equal(f.clock.callbacks.length, callbacks, 'late preflight must not install/reset a timer');
-    assert.equal(f.clock.pending.size, mode === 'newer' ? 1 : 0);
+test('runtime/authority guard loss during the awaited proof suppresses unsubmitted input and re-observes idle', async () => {
+  const u = unit();
+  const release = u.gate();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL);
+  assert.equal(u.state.reads, 1, 'the one admitted attempt opens exactly one eligibility read');
+  u.bumpGuard(); // authority/root/runtime changed while the proof still awaits
+  release(true);
+  await settled(u.reminders);
+  assert.equal(u.delivered.length, 0, 'an independent change suppresses the attempt completely');
+  // No blind immediate retry: the drained loop re-observes idle and starts a full fresh interval.
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  assert.equal(u.state.reads, 2, 'the later attempt re-proves eligibility');
+  u.reminders.dispose();
+});
+
+test('activity starting after the single idle sample while the proof awaits cannot cancel the admitted attempt', async () => {
+  const u = unit();
+  const release = u.gate();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL); // admitted; proof in flight
+  u.setBusy(true);
+  u.reminders.activityStarted();
+  u.reminders.activitySettled();
+  u.setBusy(false);
+  release(true);
+  await settled(u.reminders);
+  assert.equal(u.delivered.length, 1, 'no post-sample idle/activity/deadline recheck cancels an admitted attempt');
+  assert.equal(u.clock.pending.size, 1);
+  u.reminders.dispose();
+});
+
+test('a proof that outlives one additional interval is suppressed as too old and drained, never submitted', async () => {
+  const u = unit();
+  const release = u.gate();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL); // admission window bounded by one interval from the captured due
+  u.clock.advance(INTERVAL); // the age bound elapses while the proof still pends
+  release(true);
+  await settled(u.reminders);
+  assert.equal(u.delivered.length, 0, 'a beyond-bound window submits nothing');
+  assert.equal(u.clock.pending.size, 1, 'the loop is drained, not disarmed');
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1, 'observation resumes and a new full interval admits again');
+  u.reminders.dispose();
+});
+
+test('the unconfirmed attempt is warned about once and stays fenced with no resubmission', async () => {
+  const u = unit();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  assert.equal(u.clock.delays.at(-1), ATTEMPT_WARNING_MS, 'the single handle runs the bounded warning');
+  u.clock.advance(ATTEMPT_WARNING_MS - 1); await settled(u.reminders);
+  assert.equal(u.warnings.length, 0);
+  u.clock.advance(1); await settled(u.reminders);
+  assert.deepEqual(u.warnings, [REMINDER_ATTEMPT_DIAGNOSTIC], 'exactly one bounded warning from the same handle');
+  u.clock.advance(5 * INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1, 'no blind retry, resubmission or catch-up');
+  assert.equal(u.warnings.length, 1, 'no repeated warnings');
+  // Correlation retires the fence and starts the next full interval.
+  u.reminders.attemptResolved(); u.reminders.activitySettled();
+  u.clock.advance(INTERVAL - 1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.clock.advance(1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 2);
+  u.reminders.dispose();
+});
+
+test('a busy arm waits for observed idle, never counting busy time as idle', async () => {
+  const u = unit();
+  u.setBusy(true);
+  u.reminders.arm();
+  assert.deepEqual(u.clock.delays, [INTERVAL]);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  u.setBusy(false);
+  u.reminders.activitySettled();
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.reminders.dispose();
+});
+
+test('an idle observation without any settle event establishes fresh X from the observation itself', async () => {
+  const u = unit();
+  u.setBusy(true);
+  u.reminders.arm();
+  u.setBusy(false);
+  u.clock.advance(INTERVAL); await settled(u.reminders); // the poll observes idle here
+  u.clock.advance(INTERVAL - 1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 0);
+  u.clock.advance(1); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1, 'a full interval elapsed after idle was first observed');
+  u.reminders.dispose();
+});
+
+test('repeated invalidation and settle cycles never accumulate timers or missed intervals', async () => {
+  const u = unit();
+  u.reminders.arm();
+  for (const at of [10, 1000, 40_000]) {
+    u.clock.advance(at);
+    u.reminders.activityStarted();
+    u.clock.advance(500);
+    u.reminders.activitySettled();
+    await settled(u.reminders);
   }
+  assert.equal(u.delivered.length, 0);
+  assert.equal(u.clock.pending.size, 1);
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 1);
+  u.reminders.dispose();
 });
 
-test('invalid/nonworker calls cannot supersede pending stop or older valid preflight', async t => {
-  for (const pendingOperation of ['stop_reminders', 'create_worker']) {
-    const f = await fixture(t);
-    await f.c.tool('send', { to: 'Worker', message: 'existing timer' });
-    let release, entered, first = true;
-    const gate = new Promise(resolve => { release = resolve; });
-    const started = new Promise(resolve => { entered = resolve; });
-    const state = f.c.state.bind(f.c);
-    f.c.state = async () => {
-      const value = await state();
-      if (first) { first = false; entered(); await gate; }
-      return value;
-    };
-    f.c.options.launch = async () => ({ submitted: true });
-    const callbacks = f.clock.callbacks.length;
-    const pending = f.c.tool(pendingOperation, {});
-    await started;
-    await assert.rejects(f.c.tool('send', { to: 'Worker', message: '' }));
-    await assert.rejects(f.c.tool('send', { to: 'missing', message: 'invalid target' }));
-    await f.c.tool('send', { to: 'Coordinator', message: 'not a worker call' });
-    release(); await pending;
-    assert.equal(f.clock.pending.size, pendingOperation === 'stop_reminders' ? 0 : 1);
-    assert.equal(f.clock.callbacks.length, callbacks + (pendingOperation === 'create_worker' ? 1 : 0));
-  }
+test('correlated completion starts the next full interval and never replays a missed deadline', async () => {
+  const u = unit();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  u.clock.advance(2 * INTERVAL); await settled(u.reminders); // fenced; the missed expiry is lost forever
+  u.reminders.attemptResolved(); u.reminders.activitySettled();
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 2, 'exactly one new attempt per fresh interval');
+  u.reminders.attemptResolved(); u.reminders.activitySettled();
+  u.clock.advance(INTERVAL); await settled(u.reminders);
+  assert.equal(u.delivered.length, 3);
+  u.reminders.dispose();
 });
 
-test('runtime call signal retained after tool return cancels its reminder but not a newer owner', async t => {
-  const f = await fixture(t), old = new AbortController(), next = new AbortController();
-  await f.c.tool('send', { to: 'Worker', message: 'first' }, 'first', old.signal);
-  await f.c.tool('send', { to: 'Worker', message: 'second' }, 'second', next.signal);
-  old.abort(); assert.equal(f.clock.pending.size, 1);
-  next.abort(); assert.equal(f.clock.pending.size, 0);
-  await f.tick(); assert.equal(f.reminderCount(), 0);
+test('a second due expiry while one admission window is open never starts a parallel check', async () => {
+  const u = unit();
+  const release = u.gate();
+  u.reminders.arm();
+  u.clock.advance(INTERVAL); // admission window opens with exactly one eligibility read
+  u.clock.advance(1000); // time passes; the window's own handle is the only timer
+  assert.equal(u.state.reads, 1);
+  assert.equal(u.clock.pending.size, 1, 'no second expiry handle while the window is open');
+  release(true);
+  await settled(u.reminders);
+  assert.equal(u.state.reads, 1, 'never two parallel checks');
+  assert.equal(u.delivered.length, 1);
+  u.reminders.dispose();
 });
 
-test('configured interval governs first tick, recurrence, stop/rearm and disposal in the runtime', async t => {
-  const f = await fixture(t, 120000);
-  // The fixture configures, reloads and then stops reminders while wiring itself.
-  const setup = f.clock.delays.length;
-  const scheduled = () => f.clock.delays.slice(setup);
-  assert.deepEqual(scheduled(), [], 'the fixture stop leaves no further scheduled delay');
-  await f.c.tool('send', { to: 'Worker', message: 'first' });
-  assert.deepEqual(scheduled(), [120000], 'first tick uses the configured interval');
-  await f.c.tool('send', { to: 'Worker', message: 'second' });
+test('wake-up entry correlation accepts only the identified custom_message entry', () => {
+  assert.equal(isWakeupEntry({ type: 'custom_message', customType: WAKEUP_CUSTOM_TYPE, details: { attemptId: 'a' } }, 'a'), true);
+  assert.equal(isWakeupEntry({ type: 'custom_message', customType: WAKEUP_CUSTOM_TYPE, details: { attemptId: 'b' } }, 'a'), false);
+  assert.equal(isWakeupEntry({ type: 'custom', customType: WAKEUP_CUSTOM_TYPE, details: { attemptId: 'a' } }, 'a'), false);
+  assert.equal(isWakeupEntry({ type: 'custom_message', customType: 'other', details: { attemptId: 'a' } }, 'a'), false);
+  assert.equal(isWakeupEntry(null, 'a'), false);
+  assert.equal(isWakeupEntry({ type: 'message', message: {} }, 'a'), false);
+});
+
+// ---- Runtime wiring: a real authorized Orchestrator fixture on a committed projects-home board ----
+
+test('an eligible zero-worker Orchestrator startup arms one fresh interval without any worker call', async t => {
+  const f = await wakeupRuntime(t);
+  assert.equal(f.clock.pending.size, 0, 'nothing armed before start');
+  await f.runtime.start();
+  assert.equal(f.runtime.coordinatorActionReady(), true);
+  assert.deepEqual(f.clock.delays, [DEFAULT_REMINDER_INTERVAL_MS]);
+  await f.tick();
+  assert.equal(f.reminders().length, 1);
+  assert.equal(f.reminders()[0].text, REMINDER_TEXT);
+  assert.equal(f.reminders()[0].busy, false);
+  await f.tick();
+  await f.tick();
+  assert.equal(f.reminders().length, 3, 'scheduled recurrence continues without worker calls');
+});
+
+test('a non-Orchestrator or unauthorized session never schedules a wake-up', async t => {
+  const developer = await wakeupRuntime(t, { roleDirectory: 'developer' });
+  await developer.runtime.start();
+  assert.equal(developer.clock.pending.size, 0, 'a plain coordinator session has no wake-up path');
+
+  const held = await wakeupRuntime(t, { claim: 'absent' });
+  await held.runtime.start();
+  assert.equal(held.runtime.coordinatorActionReady(), false);
+  assert.equal(held.clock.pending.size, 0);
+});
+
+test('busy startup waits for observed idle before one full interval', async t => {
+  const f = await wakeupRuntime(t);
   f.setBusy(true);
-  f.clock.advance(119999); await settle(); assert.equal(f.reminderCount(), 0);
+  await f.runtime.start();
+  assert.deepEqual(f.clock.delays, [DEFAULT_REMINDER_INTERVAL_MS]);
+  f.clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 0, 'the busy observation sample sends nothing');
   f.setBusy(false);
-  f.clock.advance(1); await settled(f.c.reminders); assert.equal(f.reminderCount(), 1);
-  f.clock.advance(120000); await settled(f.c.reminders); assert.equal(f.reminderCount(), 2);
-  assert.deepEqual(scheduled(), [120000, 120000, 120000, 120000]);
-  await f.c.tool('stop_reminders', {});
-  f.clock.advance(120000); await settle(); assert.equal(f.reminderCount(), 2); assert.equal(f.clock.pending.size, 0);
-  await f.c.tool('reload_worker', { to: 'Worker' });
-  assert.equal(f.clock.pending.size, 1, 'a qualifying call rearms at the same interval');
-  assert.deepEqual(scheduled().at(-1), 120000);
+  f.runtime.reminders.activitySettled();
+  f.clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 1, 'the fresh interval starts from observed idle');
+});
+
+test('authority loss suspends the wake-up loop; reopened authorization arms a fresh interval', async t => {
+  const f = await wakeupRuntime(t);
+  await f.runtime.start();
+  assert.deepEqual(f.clock.delays, [DEFAULT_REMINDER_INTERVAL_MS]);
+  // A coordinator transaction closes readiness through real paths; stage it as adoption tests do.
+  const epoch = f.runtime.closeActionEpoch('fixture: independent authority check closed');
+  assert.equal(typeof epoch, 'number');
+  assert.equal(f.clock.pending.size, 0, 'suspension cancels the loop timer');
+  f.clock.advance(5 * DEFAULT_REMINDER_INTERVAL_MS); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 0);
+  f.runtime.openActionEpoch(); // the promotion/adoption-open path of the runtime
+  assert.deepEqual(f.clock.delays.at(-1), DEFAULT_REMINDER_INTERVAL_MS, 'reauthorization arms fresh; nothing restored');
+  await f.tick();
+  assert.equal(f.reminders().length, 1);
+});
+
+test('worker-directed operations neither arm, reset, nor own the wake-up signal; the stop tool is truthful', async t => {
+  const f = await wakeupRuntime(t);
+  await f.runtime.start();
+  assert.deepEqual(f.clock.delays, [DEFAULT_REMINDER_INTERVAL_MS]);
+  const handles = f.clock.callbacks.length;
+  await f.runtime.tool('create_worker', {});
+  assert.equal(f.clock.callbacks.length, handles, 'a coordinator operation adds no timer');
+  f.clock.advance(DEFAULT_REMINDER_INTERVAL_MS - 1); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 0, 'the coordinator operation did not reset the deadline');
+  f.clock.advance(1); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 1);
+  assert.deepEqual(await f.runtime.tool('stop_reminders', {}), { stopped: false, reason: REMINDER_STOP_REASON });
+  // Nothing was cancelled and no disable bit was stored: the unconfirmed attempt keeps its bounded
+  // warning handle, and the loop continues observing.
+  f.clock.advance(ATTEMPT_WARNING_MS); await settled(f.runtime.reminders);
+  assert.equal(f.clock.pending.size, 1, 'the stop tool changes nothing about the loop');
+});
+
+test('a session restart disposes old callbacks, starts one fresh deadline and replays nothing', async t => {
+  const f = await wakeupRuntime(t);
+  await f.runtime.start();
+  await f.tick();
+  assert.equal(f.reminders().length, 1);
   const stale = f.clock.callbacks.at(-1);
-  await f.c.close();
-  stale(); await settle(); assert.equal(f.reminderCount(), 2); assert.equal(f.clock.pending.size, 0);
+  await f.runtime.close();
+  assert.equal(f.clock.pending.size, 0);
+  await f.runtime.start();
+  assert.deepEqual(f.clock.delays.at(-1), DEFAULT_REMINDER_INTERVAL_MS, 'one fresh deadline only');
+  stale(); await settled(f.runtime.reminders);
+  assert.equal(f.reminders().length, 1, 'the stale old callback cannot deliver for the new runtime');
+  await f.tick();
+  assert.equal(f.reminders().length, 2);
 });
-
-test('runtime reset, busy skip, lifecycle close/restart and changed role suppress stale reminders', async t => {
-  const f = await fixture(t);
-  await f.c.tool('send', { to: 'Worker', message: 'first' });
-  const stale = f.clock.callbacks.at(-1);
-  f.clock.advance(299999);
-  await f.c.tool('request_status', { to: 'Worker' });
-  f.clock.advance(1); await settled(f.c.reminders); assert.equal(f.reminderCount(), 0);
-  f.setBusy(true); f.clock.advance(299999); await settled(f.c.reminders); assert.equal(f.reminderCount(), 0);
-  f.setBusy(false); await f.tick(); assert.equal(f.reminderCount(), 1);
-  await f.c.tool('stop_reminders', {}); stale(); await settle(); assert.equal(f.reminderCount(), 1);
-  await f.c.tool('reload_worker', { to: 'Worker' });
-  const old = f.clock.callbacks.at(-1);
-  await f.c.close(); await f.c.start(); old(); await settle();
-  assert.equal(f.clock.pending.size, 0); assert.equal(f.reminderCount(), 1);
-  await f.c.tool('send', { to: 'Worker', message: 'new lifecycle' });
-  const state = f.c.state.bind(f.c);
-  f.c.state = async () => { const value = await state(); return { ...value, me: { ...value.me, coordinator: false } }; };
-  await f.tick(); assert.equal(f.reminderCount(), 1); assert.equal(f.clock.pending.size, 0);
-});
-
-test('the injected immutable snapshot supplies the text and metadata for every delivery', async () => {
-  const content = Object.freeze({ text: '  Custom generic text.\n', source: 'file', sha256: createHash('sha256').update('  Custom generic text.\n', 'utf8').digest('hex') });
-  const clock = fakeClock(DEFAULT_REMINDER_INTERVAL_MS), delivered = [];
-  let busy = false;
-  const reminders = new CoordinatorReminders({ isCoordinator: async () => true, busy: () => busy, deliver: (text, submission) => delivered.push({ text, submission }) },
-    clock, DEFAULT_REMINDER_INTERVAL_MS, content);
-  reminders.arm(); clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
-  busy = true; clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
-  busy = false; clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
-  assert.equal(delivered.length, 2, 'the busy tick sends nothing; the next idle tick sends the injected text');
-  for (const d of delivered) {
-    assert.equal(d.text, content.text);
-    assert.equal(d.submission.source, 'file');
-    assert.equal(d.submission.sha256, content.sha256);
-    assert.match(d.submission.attemptId, /^[0-9a-f-]{36}$/);
-  }
-  assert.notEqual(delivered[0].submission.attemptId, delivered[1].submission.attemptId);
-  reminders.dispose();
-});
-
-test('the default constructor keeps the built-in literal and its metadata', async () => {
-  const clock = fakeClock(DEFAULT_REMINDER_INTERVAL_MS), delivered = [];
-  const reminders = new CoordinatorReminders({ isCoordinator: async () => true, busy: () => false, deliver: (text, submission) => delivered.push({ text, submission }) }, clock);
-  reminders.arm(); clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
-  assert.equal(delivered[0].text, REMINDER_TEXT);
-  assert.deepEqual({ source: delivered[0].submission.source, sha256: delivered[0].submission.sha256 }, { source: 'builtin', sha256: BUILTIN_REMINDER_CONTENT.sha256 });
-  reminders.dispose();
-});
-

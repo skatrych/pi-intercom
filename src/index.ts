@@ -4,6 +4,7 @@ import { Type, type TSchema } from 'typebox';
 import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { ConfigStore } from './config.js';
 import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
+import { isWakeupEntry, WAKEUP_CUSTOM_TYPE } from './reminders.js';
 import type { CommandContext, Result } from './adoption.js';
 import { stop } from './adoption.js';
 import { adoptionInteraction } from './adoption-ui.js';
@@ -22,7 +23,7 @@ const tools: [string, string, TSchema][] = [
   ['list', 'Configured sessions only. Read current saved names, responsibilities, session IDs, roles and ports. No live probing. Output limited to 50 KiB/2000 lines; full data remains in config.json.', Type.Object({})],
   ['request_status', 'Coordinator only. Ask worker extension to send an independent sessionId/port/busy report without a model turn on worker. No synchronous status reply.', to],
   ['report_work', 'Configured, responsibility-loaded workers only. Store one public report (blocked, needs_decision, ready_for_review) and notify the coordinator; clear retires it. Summary required except clear (omit or empty). Never include private reasoning, credentials, raw tool payloads, or secrets. Receipt is not approval, verified completion, or permission for follow-up work.', Type.Object({ status: Type.String({ enum: ['blocked', 'needs_decision', 'ready_for_review', 'clear'] }), summary: Type.Optional(Type.String({ maxLength: 2000 })) })],
-  ['stop_reminders', 'Coordinator only. Disable the orchestration reminders at their configured interval, until the next worker-directed call. Use when there is genuinely nothing to follow up on. Stops only reminders, not workers, close jobs or model work. Reminder state is session-local and clears on shutdown/reload.', Type.Object({})],
+  ['stop_reminders', 'Coordinator only. Superseded: the Orchestrator idle wake-up loop is automatic and not stoppable by an agent, even with no actionable work. Returns stopped:false with the reason idle_wakeups_are_automatic; no deadline is cancelled and no disable bit is stored. Nothing is affected — not workers, close jobs, calls or model work. Only an operator restarting the Pi process or unloading Intercom changes the loop, and that is an outage of worker communication, not a harmless pause.', Type.Object({})],
   ['report_status', 'Worker only (including anonymous). Send runtime sessionId/port/busy and, when known, the logical role to the coordinator. This is NOT registration and creates no config entry. A saved role the worker does not report is a mismatch: the coordinator is notified and does not relaunch.', Type.Object({})],
   ['stop_worker', UNSUPPORTED_CANCELLATION, to],
   ['close_worker', 'Coordinator only. Begin a background save-handoff-and-close job for a configured worker in Linux Herdr. Requests a public summary, saves it in config, waits for successful tool persistence and final turn settlement, then attempts one verified pane close. Returns job acceptance, not completion. Registration/session history are retained. Check worker_status/list for closeJob; failure/timeout/uncertainty never authorizes retry. Not graceful abort or an all-descendants termination guarantee; Windows/non-Herdr unsupported.', to],
@@ -41,6 +42,25 @@ export function resumeSessionDirectory(cwd: string, envSessionDir = process.env.
     : SettingsManager.create(cwd, path.resolve(cwd, agentDir));
   const sessionDir = settings.getSessionDir();
   return sessionDir ? path.resolve(cwd, sessionDir) : undefined;
+}
+
+/**
+ * Reminder-only Orchestrator wake-up submission: one supported custom-message call with the full
+ * reminder text in model-facing content, generic source/hash/attempt metadata, and triggerTurn. No
+ * second submission, steering fallback or nextTurn follow-up exists, and an API return is not proof of
+ * admission or model consumption; only the correlation scan can retire the attempt fence.
+ */
+export function wakeupSubmission(
+  pi: Pick<ExtensionAPI, 'sendMessage'>,
+  content: string,
+  submission: { attemptId: string; source: 'builtin' | 'file'; sha256: string },
+): void {
+  pi.sendMessage({
+    customType: WAKEUP_CUSTOM_TYPE,
+    content,
+    display: true,
+    details: { attemptId: submission.attemptId, reminderSource: submission.source, reminderSha256: submission.sha256 },
+  }, { triggerTurn: true });
 }
 
 // Participate in Pi's own per-file mutation queue as well as Intercom serialization. Only the outer
@@ -92,6 +112,10 @@ function adoptionContext(captured: ExtensionContext, waitForIdle?: () => Promise
 }
 function stopResult(code: Parameters<typeof stop>[0], line: string): Result { return stop(code, [line]); }
 export default function intercomExtension(pi: ExtensionAPI): void {
+  // The single outstanding Orchestrator wake-up attempt. The adapter latches it before the supported
+  // custom-message call; an agent_settled scan of the containing run's own branch correlates the owned
+  // custom_message entry. API returns and transcript persistence alone prove nothing.
+  let pendingWakeup: { attemptId: string } | undefined;
   pi.registerFlag('intercom-root', {
     type: 'string',
     description: 'Explicit Intercom board root: this session cwd or one of its ancestors. A root outside that lineage is refused.',
@@ -141,6 +165,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     const started = ++generation;
     unsubscribeAdoption?.(); unsubscribeAdoption = undefined;
     activity.reset();
+    pendingWakeup = undefined; // a replaced session never replays an old wake-up attempt
     const oldRuntime = runtime;
     runtime = undefined;
     await oldRuntime?.close();
@@ -158,7 +183,16 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       busy: () => !context!.isIdle(),
       // Always supply the supported busy mode: the arrival snapshot can become
       // stale before Pi checks it. Pi still starts a normal turn when idle.
-      deliver: content => pi.sendUserMessage(content, { deliverAs: 'steer' }),
+      deliver: (content, _busy, submission) => {
+        if (submission) {
+          // Reminder-only channel for the Swactory #68 Orchestrator idle wake-up. Deferral/steering by
+          // the host is an accepted race; outcome uncertainty is fenced, never resent.
+          pendingWakeup = { attemptId: submission.attemptId };
+          wakeupSubmission(pi, content, submission);
+          return;
+        }
+        pi.sendUserMessage(content, { deliverAs: 'steer' });
+      },
       setName: async name => { if (pi.getSessionName() !== name) pi.setSessionName(name); await launcher.syncName(name); },
       notify: text => ctx.ui.notify(text, 'info'),
     }, {
@@ -201,6 +235,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   pi.on('session_shutdown', async () => {
     generation++;
     activity.reset();
+    pendingWakeup = undefined;
     unsubscribeAdoption?.();
     unsubscribeAdoption = undefined;
     const oldRuntime = runtime;
@@ -244,9 +279,17 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   pi.on('agent_start', async (_event, ctx) => {
     context = ctx;
     runtime?.workerStarted();
+    runtime?.reminderActivity(); // agent runs, regardless of trigger, invalidate the future deadline
     activityOutcome = 'started';
     try { activity.start(); } finally { activityOutcome = 'snapshot'; }
   });
+  pi.on('session_before_compact', async () => {
+    // Compaction preparation is busy time, not idle. A failing or cancelled compact still ends here
+    // scheduler-side in session_compact_failed with a conservative new observation.
+    runtime?.reminderActivity();
+  });
+  pi.on('session_compact', async () => { runtime?.reminderSettled(); });
+  pi.on('session_compact_failed', async () => { runtime?.reminderSettled(); });
   pi.on('agent_settled', async (_event, ctx) => {
     context = ctx;
     activityOutcome = 'settled';
@@ -254,12 +297,24 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     // Settlement is notification-only and follows tool-result persistence. Inspect
     // only entry kinds and successful tool call IDs, never message/reasoning bodies.
     const successful = new Set<string>();
+    let wakeupConsumed = false;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === 'message' && entry.message.role === 'toolResult' && !entry.message.isError) {
         successful.add(entry.message.toolCallId);
       }
+      // Correlate the owned attempt: the wake-up custom message itself inside the settling run's
+      // branch. Idle-started runs expose an own before_agent_start event as well, but the entry plus
+      // settle correlation covers the accepted steering race without a second event required there.
+      if (!wakeupConsumed && pendingWakeup && isWakeupEntry(entry, pendingWakeup.attemptId)) {
+        wakeupConsumed = true;
+      }
     }
     runtime?.workerSettled(successful);
+    if (wakeupConsumed) {
+      pendingWakeup = undefined;
+      runtime?.reminderAttemptResolved();
+    }
+    runtime?.reminderSettled();
   });
   pi.on('message_update', (event, ctx) => {
     context = ctx;
@@ -277,6 +332,9 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   pi.on('before_agent_start', async (event, ctx) => {
     context = ctx;
     if (!runtime) return;
+    // A run invalidates the future deadline whether or not it started from a wake-up; the wake-up's
+    // own containing run settles through agent_settled like any run.
+    runtime.reminderActivity();
     const state = await runtime.state().catch(error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
@@ -292,7 +350,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
         signal?.throwIfAborted(); context = ctx;
         if (!runtime) throw new Error('PiIntercom not initialized; inspect startup error.');
         const current = runtime, started = generation;
-        const result = await current.tool(operation, args as Record<string, unknown>, _id, signal);
+        const result = await current.tool(operation, args as Record<string, unknown>, _id);
         if (operation === 'configure_worker') await ensureCoordinatorMonitor(current, ctx, started);
         const output = truncateHead(JSON.stringify(result, null, 2));
         return { content: [{ type: 'text', text: output.content + (output.truncated ? `\n[Truncated; full shared configuration: ${current.store.file}]` : '') }], details: {} };

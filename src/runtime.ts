@@ -12,7 +12,7 @@ import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose, type CloseProvider, type HandoffKind } from './handoff.js';
-import { CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, readReminderMinutesEnv, reminderIntervalMs, type ReminderClock } from './reminders.js';
+import { CoordinatorIdleReminders, DEFAULT_REMINDER_INTERVAL_MS, REMINDER_STOP_REASON, readReminderMinutesEnv, reminderIntervalMs, type ReminderClock } from './reminders.js';
 import { loadReminderContent, readReminderFileEnv, REMINDER_CONFIGURATION_DIAGNOSTIC, type ReminderContent, type ReminderFileSystem, type ReminderSubmission } from './reminder-content.js';
 import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, bootClaimEvidence, committedActiveClaimMatches, countBoards, projectsHome, stop, type AdoptionPhase, type CommandContext, type Result } from './adoption.js';
 
@@ -118,9 +118,7 @@ export class Intercom {
   private resolvedRole?: string;
   private handoff?: HandoffWorkflow;
   private readonly callbackEpoch = new AsyncLocalStorage<number>();
-  private reminders?: CoordinatorReminders;
-  private reminderRevision = 0;
-  private reminderInvocation = 0;
+  private reminders?: CoordinatorIdleReminders;
   /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
   private reminderIntervalMsCache = DEFAULT_REMINDER_INTERVAL_MS;
   /** Immutable reminder text snapshot for this runtime only; undefined disables reminders for it. */
@@ -185,7 +183,7 @@ export class Intercom {
   /** Close the local action epoch. Callers hold the returned value and fail once it changes. */
   private closeActionEpoch(detail = 'a coordinator transaction is in progress'): number {
     this.authorityReady = false;
-    this.reminders?.stop();
+    this.reminders?.suspend(); // wake-up loop suspends with authority; no stored disable bit exists
     this.authorityDetail = detail;
     return ++this.authorityEpoch;
   }
@@ -197,6 +195,8 @@ export class Intercom {
     this.observationEnabled = true;
     this.authorityDetail = 'coordinator action evidence is committed and this session is promoted';
     ++this.authorityEpoch;
+    // An authorization transition begins one fresh idle observation without any worker call.
+    if (this.authorityReady) this.reminders?.arm();
   }
   workerStarted(): void { this.handoff?.workerStarted(); }
   workerSettled(successfulToolCallIds: ReadonlySet<string>): void { this.handoff?.workerSettled(successfulToolCallIds); }
@@ -374,15 +374,27 @@ export class Intercom {
     this.host.notify(REMINDER_CONFIGURATION_DIAGNOSTIC);
     return undefined;
   }
+  /** Host-facing wake-up wiring. No-ops before services exist or for non-Orchestrator sessions. */
+  reminderActivity(): void { this.reminders?.activityStarted(); }
+  reminderSettled(): void { this.reminders?.activitySettled(); }
+  reminderAttemptResolved(): void { this.reminders?.attemptResolved(); }
   private startServices(assertValid: () => void): void {
     const content = this.reminderContent;
-    // Reminders exist only with valid content: an unavailable selection never arms or delivers any text.
-    this.reminders = content ? new CoordinatorReminders({
-      // Timer preparation checks only its captured epoch; deliver below owns the fresh final proof.
+    // Reminders exist only with valid content and only for a canonical Orchestrator launch: other
+    // roles, plain coordinators and workers never reach the #68 wake-up path.
+    this.reminders = content && this.orchestratorLaunch() ? new CoordinatorIdleReminders({
+      // Timer admission checks only its captured epoch; deliver below owns the fresh final proof.
       captureGuard: () => { const epoch = this.actionEpoch(); return () => { assertValid(); this.assertActionEpoch(epoch); }; },
-      isCoordinator: async () => { const fresh = await this.state(); assertValid(); return fresh.me?.coordinator === true; },
+      // Conjunctive wake-up gate, freshly read when an admitted expiry asks for it: canonical role,
+      // current coordinator entry, loaded responsibility and open action readiness.
+      eligible: async () => {
+        const fresh = await this.state();
+        assertValid();
+        return fresh.me?.coordinator === true && this.responsibilityLoaded() && this.orchestratorLaunch() && this.coordinatorActionReady();
+      },
       busy: () => this.host.busy(),
       deliver: (message, submission) => { assertValid(); this.assertActionReady(); this.host.deliver(message, false, submission); },
+      warn: message => { assertValid(); this.host.notify(message); },
     }, this.options.reminderClock, this.reminderIntervalMsCache, content) : undefined;
     this.handoff = new HandoffWorkflow({
       state: async () => { const state = await this.state(); if (state.me?.coordinator) this.assertActionReady(this.callbackEpoch.getStore()); return state; },
@@ -411,7 +423,6 @@ export class Intercom {
     this.active = false; this.generation++;
     this.probeController.abort();
     this.handoff?.dispose(); this.handoff = undefined;
-    this.reminderRevision = ++this.reminderInvocation;
     this.reminders?.dispose(); this.reminders = undefined;
     const endpoint = this.endpoint; this.endpoint = undefined;
     this.responsibility = undefined;
@@ -763,17 +774,8 @@ export class Intercom {
     }
     fail('unsupported control');
   }
-  async tool(operation: string, args: Record<string, unknown>, toolCallId?: string, reminderSignal?: AbortSignal): Promise<unknown> {
-    // Reserve invocation order before state/directory awaits, but only VALID
-    // reminder actions advance the accepted revision. Invalid/nonworker calls
-    // must not supersede a pending stop or suppress an older valid preflight.
-    const invocation = ++this.reminderInvocation;
-    const armReminder = () => {
-      if (invocation >= this.reminderRevision && !reminderSignal?.aborted) {
-        this.reminderRevision = invocation;
-        this.reminders?.arm(reminderSignal);
-      }
-    };
+  async tool(operation: string, args: Record<string, unknown>, toolCallId?: string): Promise<unknown> {
+    // Worker-directed calls no longer arm, reset or own the wake-up loop: it observes idle time only.
     const record = this.captureObserver();
     const lifecycle = this.validity(), epoch = this.actionEpoch();
     const { id, config, me } = await this.state();
@@ -814,14 +816,13 @@ export class Intercom {
       const recipient = named(config, args.to as string);
       text(args.message, 'message', 48000);
       if (this.handoff?.workerClosing || fencedClose(me.closeJob) || this.handoff?.isClosing(recipient.sessionId) || fencedClose(recipient.closeJob)) fail('worker close is active or uncertain; new Intercom work is fenced');
-      if (me.coordinator && !recipient.coordinator) armReminder();
       await this.transmit(args.to as string, 'message', { message: args.message }, assertCurrent); return { accepted: true, completion: 'not awaited' };
     }
     requireCoordinator(config, id);
     if (operation === 'stop_reminders') {
-      const current = invocation >= this.reminderRevision;
-      if (current) { this.reminderRevision = invocation; this.reminders?.stop(); }
-      return { stopped: current };
+      // Truthful non-stopping: the idle loop is never cancelled by an agent, and no disable bit exists.
+      // The name/schema stays so callers never see an unknown tool.
+      return { stopped: false, reason: REMINDER_STOP_REASON };
     }
     if (operation === 'stop_worker') fail(UNSUPPORTED_CANCELLATION);
     if (operation === 'configure_worker') {
@@ -844,7 +845,6 @@ export class Intercom {
       const values = { ...(args as unknown as Omit<Agent, 'coordinator'>) };
       delete values.role;
       if (choice.role) values.role = choice.role;
-      armReminder();
       await this.store.configure(id, values, this.configGuard(lifecycle, epoch, () => { if (this.handoff?.isClosing(args.sessionId as string) || this.resumeFences.has(args.sessionId as string)) fail('worker lifecycle operation is in flight; configuration is fenced'); }));
       record('config.changed', { operation: 'configure_worker', peerSessionId: args.sessionId as string, peerName: args.name as string, outcome: 'written', ...(choice.role ? { piRole: choice.role } : {}) });
       const saved = (await this.store.read()).agents.find(agent => agent.sessionId === candidate.sessionId);
@@ -859,7 +859,6 @@ export class Intercom {
       const relative = await directory(this.store.root, (args.projectDirectory as string | undefined) ?? '.');
       assertCurrent();
       const role = requestedRole(args.role);
-      armReminder();
       const launched = await this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), workspaceRoot: this.store.root, ...(role ? { role } : {}) }, assertValid);
       // The role is not durable until configure_worker saves it. Echo it so a restarted coordinator can pass it explicitly.
       return role && launched && typeof launched === 'object' ? { ...launched, role } : launched;
@@ -870,12 +869,10 @@ export class Intercom {
       if (!this.options.closeProvider || !this.handoff || config.multiplexer !== 'herdr') fail('Owned-pane close requires supported Linux Herdr provider; no closure attempted');
       if (this.resumeFences.has(target.sessionId)) fail('resume is in flight; close is fenced');
       if (fencedClose(target.closeJob) && !this.handoff.isClosing(target.sessionId)) fail('worker close is active or uncertain; close is fenced');
-      armReminder();
       return { job: await this.callbackEpoch.run(epoch, () => this.handoff!.request(target)), completion: 'not awaited', contract: 'best-effort owned-pane closure; not all-child-process termination' };
     }
     if (['reload_worker', 'resume_worker', 'remove_worker'].includes(operation) && (this.handoff?.isClosing(target.sessionId) || fencedClose(target.closeJob))) fail('worker close is active or uncertain; operation is fenced');
     if (operation === 'reload_worker' || operation === 'request_status') {
-      armReminder();
       await this.transmit(target.name, operation === 'reload_worker' ? 'reload' : 'request_status', {}, assertCurrent);
       return { accepted: true, completion: 'not awaited' };
     }
@@ -890,7 +887,6 @@ export class Intercom {
       if (this.handoff?.isClosing(target.sessionId)) fail('worker close is active or uncertain; resume is fenced');
       const fence = { inFlight: true, submitted: false, announced: false };
       this.resumeFences.set(target.sessionId, fence);
-      armReminder();
       let completed = false;
       try {
         const connection = await (this.options.probe ?? probeWorker)(target, { signal: this.probeController.signal });

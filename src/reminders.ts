@@ -34,6 +34,29 @@ export const BUILTIN_REMINDER_CONTENT: ReminderContent = Object.freeze({
   sha256: createHash('sha256').update(REMINDER_TEXT, 'utf8').digest('hex'),
 });
 
+/**
+ * Orchestrator idle wake-ups (Swactory #68): a reminder is sent once after one full idle interval of
+ * this authorized Orchestrator session — not after worker-directed operations. The custom message type
+ * below is reminder-only; ordinary Intercom delivery never uses it.
+ */
+export const WAKEUP_CUSTOM_TYPE = 'intercom-orchestrator-wakeup';
+/** One bounded observation of an unconfirmed attempt. No second attempt and no replay follow it. */
+export const ATTEMPT_WARNING_MS = 30_000;
+export const REMINDER_ATTEMPT_DIAGNOSTIC = 'Intercom orchestrator idle reminder: one submitted wake-up attempt has no confirmed processing. No automatic retry, replay or catch-up follows; resolve this explicitly or restart the process for a fresh schedule.';
+/** Truthful non-stopping stop-tool result. Wake-ups are never disabled by an agent or by absence of work. */
+export const REMINDER_STOP_REASON = 'idle_wakeups_are_automatic';
+
+/**
+ * True when a persisted session entry is exactly this identified wake-up message. Correlation uses the
+ * entry plus the containing run's settlement; identity, persistence, API return or display alone prove
+ * no model consumption. Public-kind inspection only: never message bodies or provider payloads.
+ */
+export function isWakeupEntry(entry: unknown, attemptId: string): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const shaped = entry as { type?: unknown; customType?: unknown; details?: { attemptId?: unknown } };
+  return shaped.type === 'custom_message' && shaped.customType === WAKEUP_CUSTOM_TYPE && shaped.details?.attemptId === attemptId;
+}
+
 export interface ReminderClock {
   schedule(callback: () => void, milliseconds: number): () => void;
 }
@@ -44,69 +67,185 @@ const clock: ReminderClock = {
     return () => clearTimeout(timer);
   },
 };
-interface ReminderHost {
+
+export interface IdleReminderHost {
+  /** Captured runtime/authority generation. A thrown closure stops the attempt without further effects. */
   captureGuard?(): () => void;
-  isCoordinator(): Promise<boolean>;
+  /** Full eligibility proof, awaited after the one idle sample and re-guarded before submission. */
+  eligible(): Promise<boolean>;
+  /** The single host idle sample for an expiry, arm or idle-observation decision. */
   busy(): boolean;
-  deliver(text: string, submission: ReminderSubmission): void;
+  /** Reminder-only submission. The outcome is unknown by definition; correlation decides processing. */
+  deliver(content: string, submission: ReminderSubmission): void;
+  /** The one bounded uncertainty warning for an attempt that stays unconfirmed. */
+  warn(message: string): void;
 }
-/** Ephemeral reminder only: never worker actions, network retries or a backlog. */
-export class CoordinatorReminders {
-  private generation = 0;
-  private tick = 0;
-  private checking = false;
-  private disposed = false;
+/**
+ * One idle-sampled wake-up loop per eligible session. Concretely:
+ * - `arm()` (fresh startup or an authorization transition) starts one full idle observation without
+ *   needing any worker call. A busy host waits for observed idle; busy time never counts as idle.
+ * - Every agent run, regardless of its trigger, invalidates the future deadline; a settled run starts
+ *   the next full interval. `agent_end` or tool end alone is not evidence of idle.
+ * - At a due deadline the host idle state is sampled exactly once. Busy means skip: nothing is sent,
+ *   nothing is queued, and observation restarts one full interval later. No backlog, no storm.
+ * - After an idle sample the attempt is admitted: the eligibility proof is awaited and re-guarded, but
+ *   host idle/activity and the possibly invalidated deadline are never rechecked for that admitted
+ *   attempt. Activity after the sample updates future scheduling only; Pi may defer or steer the
+ *   submitted message while busy. Idle suppression is therefore best effort.
+ * - Exactly one attempt slot exists. Delivery outcome is unknown by definition; an unconfirmed attempt
+ *   is warned about once with the same timer handle, then fenced until correlated completion or an
+ *   explicit operator reconciliation. No blind retry, no catch-up queue, no transcript replay.
+ */
+export class CoordinatorIdleReminders {
+  private timerEpoch = 0;
   private cancel?: () => void;
-  private detachOwner?: () => void;
+  private disposed = false;
+  /** Suspended: no scheduling and no admission. Authorization transitions re-arm; authority loss suspends. */
+  private suspended = true;
+  /** Serial admission window: one proof/attempt at a time. */
+  private checking = false;
+  private tooOld = false;
+  private attempt?: { attemptId: string; warned: boolean };
+
   /**
    * intervalMs comes from reminderIntervalMs(); the scheduler never revalidates operator input.
    * content is the immutable snapshot the runtime loaded at start; it is never reread here.
    */
-  constructor(private readonly host: ReminderHost, private readonly timer: ReminderClock = clock, private readonly intervalMs: number = DEFAULT_REMINDER_INTERVAL_MS, private readonly content: ReminderContent = BUILTIN_REMINDER_CONTENT) {}
-  arm(signal?: AbortSignal): void {
-    if (this.disposed || signal?.aborted) return;
-    this.stop();
-    const generation = this.generation;
-    if (signal) {
-      const abort = () => { if (this.generation === generation) this.stop(); };
-      signal.addEventListener('abort', abort, { once: true });
-      this.detachOwner = () => signal.removeEventListener('abort', abort);
+  constructor(private readonly host: IdleReminderHost, private readonly timer: ReminderClock = clock, private readonly intervalMs: number = DEFAULT_REMINDER_INTERVAL_MS, private readonly content: ReminderContent = BUILTIN_REMINDER_CONTENT) {}
+
+  /** Authorization open or fresh startup: begin one full idle observation of a fresh X, with no worker call. */
+  arm(): void {
+    if (this.disposed) return;
+    this.suspended = false;
+    this.scheduleIdleObservation();
+  }
+  /** Authority/root/session loss: cancel this loop's timer. Outstanding attempts stay fenced, never retried. */
+  suspend(): void {
+    this.stopTimer();
+    this.suspended = true;
+  }
+  dispose(): void {
+    this.stopTimer();
+    this.disposed = true;
+  }
+  /** Any agent run invalidates the future deadline, regardless of its trigger: human, worker, or reminder. */
+  activityStarted(): void {
+    if (this.disposed || this.suspended || this.attempt || this.checking) return;
+    // Conservative idle observation with the same handle: no permanent disarm, and earlier busy time is
+    // never counted as idle.
+    this.schedule(this.intervalMs, () => this.pollIdle());
+  }
+  /**
+   * A run settled: start one fresh full X from now. A run longer than X produces no queued and no
+   * immediate catch-up reminder; only the settle event re-arms.
+   */
+  activitySettled(): void {
+    if (this.disposed || this.suspended || this.attempt || this.checking) return;
+    this.schedule(this.intervalMs, () => this.due());
+  }
+  /**
+   * Correlated completion: the owned wake-up message entered an agent run and that containing run
+   * settled. Clears the single slot and starts the next full interval; no deadline of the past returns.
+   */
+  attemptResolved(): void {
+    if (!this.attempt) return;
+    this.attempt = undefined;
+    if (this.disposed || this.suspended || this.checking) return;
+    this.schedule(this.intervalMs, () => this.due());
+  }
+  /** Idle observation with the same handle; a pre-armed busy host waits for observed idle. */
+  private scheduleIdleObservation(): void {
+    if (!this.slotFree()) { this.schedule(this.intervalMs, () => this.pollIdle()); return; }
+    if (this.host.busy()) this.schedule(this.intervalMs, () => this.pollIdle());
+    else this.schedule(this.intervalMs, () => this.due());
+  }
+  /** One serial slot: an admission check or an outstanding attempt, never both. */
+  private slotFree(): boolean { return !this.attempt && !this.checking; }
+  /** Timer fires at a due deadline: ONE host idle sample for this expiry decision. */
+  private due(): void {
+    if (this.disposed) return;
+    // A busy change (an invalidation event gap) means the observed deadline is stale: no send, nothing
+    // queued, and a fresh observation replaces it.
+    if (this.host.busy()) { this.schedule(this.intervalMs, () => this.pollIdle()); return; }
+    if (!this.slotFree()) { this.schedule(this.intervalMs, () => this.pollIdle()); return; }
+    void this.admit();
+  }
+  /** Timer fires after busy time: one idle sample here establishes fresh X; nothing was queued meanwhile. */
+  private pollIdle(): void {
+    if (this.disposed) return;
+    if (this.host.busy()) { this.schedule(this.intervalMs, () => this.pollIdle()); return; }
+    if (!this.slotFree()) { this.schedule(this.intervalMs, () => this.pollIdle()); return; }
+    this.schedule(this.intervalMs, () => this.due());
+  }
+  /**
+   * The one expiry attempt. The host idle sample already admitted this window; the only remaining
+   * conditions are the independent eligibility proof and the runtime/authority guards. Host idle,
+   * activity and a changed deadline are deliberately not rechecked for the admitted attempt.
+   */
+  private async admit(): Promise<void> {
+    const guard = this.host.captureGuard?.();
+    if (guard) {
+      try { guard?.(); } catch { this.recover(); return; }
     }
-    this.schedule(generation);
+    this.checking = true;
+    this.tooOld = false;
+    let drained = false;
+    let unresolved = true;
+    // Bounded admission window: a proof that outlives one additional interval is suppressed as too old
+    // and drained before anything else. This is an age bound, not another idle test.
+    this.schedule(this.intervalMs, () => { if (this.checking) this.tooOld = true; else this.recover(); });
+    try {
+      try { guard?.(); } catch { drained = true; return; }
+      const eligible = await this.host.eligible();
+      unresolved = false;
+      if (this.disposed) return;
+      if (this.tooOld) { drained = true; return; } // drained: no submission, no immediate replay.
+      try { guard?.(); } catch { drained = true; return; }
+      if (!eligible) { this.suspend(); return; }
+      try { guard?.(); } catch { drained = true; return; }
+      if (this.tooOld) { drained = true; return; }
+      const submission: ReminderSubmission = { attemptId: randomUUID(), source: this.content.source, sha256: this.content.sha256 };
+      // Latch the single attempt before everything below; the warning covers every unresolved path.
+      this.attempt = { attemptId: submission.attemptId, warned: false };
+      this.checking = false;
+      this.schedule(ATTEMPT_WARNING_MS, () => this.warnCheck());
+      try { guard?.(); } catch { return; }
+      try { this.host.deliver(this.content.text, submission); } catch { /* Submission outcome unknown: correlation decides; no blind immediate replay. */ }
+    } catch {
+      // Unknown eligibility read/resolver outcome: no submission was promised; keep observing.
+    } finally {
+      const wasChecking = this.checking;
+      this.checking = false;
+      // A drained, unresolved or fenced proof must never leave the loop stalled or the slot stuck.
+      if (wasChecking && (drained || unresolved || this.tooOld) && !this.attempt) this.recover();
+    }
   }
-  stop(): void {
-    this.generation++; this.tick++;
-    this.cancel?.(); this.cancel = undefined;
-    this.detachOwner?.(); this.detachOwner = undefined;
+  /** The one bounded uncertainty warning, then fenced observation. No retry, resubmission or cancel API. */
+  private warnCheck(): void {
+    if (this.attempt && !this.attempt.warned) {
+      this.attempt.warned = true;
+      try { this.host.warn(REMINDER_ATTEMPT_DIAGNOSTIC); } catch { /* A warning failure cannot affect scheduling. */ }
+    }
+    if (this.attempt) this.schedule(this.intervalMs, () => this.pollIdle());
   }
-  dispose(): void { this.stop(); this.disposed = true; }
-  private current(generation: number, tick: number): boolean {
-    return !this.disposed && this.generation === generation && this.tick === tick;
+  /** Resume the idle observation loop after a drained or failed window. Same handle, no parallel checks. */
+  private recover(): void {
+    if (this.disposed || this.suspended || this.attempt || this.checking) return;
+    this.schedule(this.intervalMs, () => this.pollIdle());
   }
-  private schedule(generation: number): void {
-    const assertReady = this.host.captureGuard?.();
+  private stopTimer(): void {
+    this.timerEpoch++;
+    this.cancel?.();
+    this.cancel = undefined;
+  }
+  /** Exactly one pending timer exists at a time; stale callbacks are fenced by the epoch marker. */
+  private schedule(delay: number, action: () => void): void {
+    this.stopTimer();
+    const epoch = ++this.timerEpoch;
     this.cancel = this.timer.schedule(() => {
-      if (this.disposed || generation !== this.generation) return;
+      if (this.disposed || this.timerEpoch !== epoch) return;
       this.cancel = undefined;
-      const tick = ++this.tick;
-      this.schedule(generation);
-      // A slow role read never creates concurrent reads or a queued reminder.
-      // Advancing tick also invalidates any read from the preceding interval.
-      if (this.checking) return;
-      this.checking = true;
-      void (async () => {
-        try {
-          try { assertReady?.(); }
-          catch { if (this.current(generation, tick)) this.stop(); return; }
-          const coordinator = await this.host.isCoordinator();
-          if (!this.current(generation, tick)) return;
-          try { assertReady?.(); }
-          catch { if (this.current(generation, tick)) this.stop(); return; }
-          if (!coordinator) { this.stop(); return; }
-          if (!this.host.busy()) this.host.deliver(this.content.text, { attemptId: randomUUID(), source: this.content.source, sha256: this.content.sha256 });
-        } catch { /* Unknown role/read/delivery outcome: no blind immediate replay. */ }
-        finally { this.checking = false; }
-      })();
-    }, this.intervalMs);
+      action();
+    }, delay);
   }
 }

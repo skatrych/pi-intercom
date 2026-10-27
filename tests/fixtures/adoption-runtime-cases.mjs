@@ -34,9 +34,15 @@ async function blocked(f, runtime, timer) {
     assert.equal(result.status, 400, `${kind}: ${result.body}`);
     assert.match(result.body, /ADOPTION_NOT_READY/);
   }
-  runtime.reminders.arm(); timer.fire(); await turn(); await turn();
-  assert.equal(f.messages.length, messages);
-  assert.equal(timer.timers.filter(timer => timer.active).length, 0, 'closed-epoch timer has no deferred interval/replay');
+  assert.equal(timer.timers.filter(timer => timer.active).length, 0, 'no wake-up timer exists while the epoch is closed');
+  if (runtime.reminders) {
+    // Even an armed loop cannot deliver through a closed epoch; the fenced window leaves exactly the
+    // conservative observation handle, never a replay or a catch-up.
+    runtime.reminders.arm(); timer.fire(); await turn(); await turn();
+    assert.equal(f.messages.length, messages);
+    assert.equal(timer.timers.filter(timer => timer.active).length, 1, 'no deferred interval/replay)');
+    runtime.reminders.suspend();
+  }
   assert.equal(await f.board.read(), before);
   assert.deepEqual(await readWorkerReports(f.home, [IDS.workerOne]), reports);
   assert.deepEqual([...runtime.registeredRoles], cache);

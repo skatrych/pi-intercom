@@ -296,9 +296,9 @@ test('custom store cannot redirect validated root; create/resume launch root and
   await assert.rejects(good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'escape' }), /descendant/);
   assert.equal(good.events.launches.length, 2);
   await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'nested/worker' });
-  await good.instance.tool('stop_reminders', {});
+  // The truthful stop tool cancels nothing and stores no disable bit; the store is untouched either way.
+  assert.deepEqual(await good.instance.tool('stop_reminders', {}), { stopped: false, reason: 'idle_wakeups_are_automatic' });
   const before = await good.instance.store.read();
-  assert.equal(good.instance.reminders.cancel, undefined);
   assert.deepEqual(await good.instance.store.read(), before);
   assert.equal((await good.instance.tool('list', {})).agents.find(a => a.sessionId === 'w').projectDirectory, 'nested/worker');
   // A saved directory that has become an escaping link is refused before the fence, the probe or a launch.
