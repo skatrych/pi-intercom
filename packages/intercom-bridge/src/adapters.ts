@@ -50,7 +50,11 @@ export const cursor: Adapter = {
     for (const line of lines) {
       const e = obj(line); if (!e) continue;
       cliSessionId = str(e.session_id) ?? cliSessionId;
-      if (e.type === 'assistant') for (const part of obj(e.message)?.content ?? []) { if (part?.type === 'text' && typeof part.text === 'string') assistant.push(part.text); }
+      if (e.type === 'assistant') {
+        const content = obj(e.message)?.content;
+        if (content != null && !Array.isArray(content)) throw new Error('assistant message.content is not an array');
+        for (const part of content ?? []) { if (part?.type === 'text' && typeof part.text === 'string') assistant.push(part.text); }
+      }
       if (e.type === 'result') final = e;
     }
     if (!final) return { ok: false, text: assistant.join(''), cliSessionId, error: 'no result event in cursor-agent output' };

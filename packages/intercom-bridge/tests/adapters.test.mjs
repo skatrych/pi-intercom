@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cursor, agy, adapter } from '../dist/adapters.js';
-import { clip, envelope } from '../dist/wire.js';
+import { clip, clipBytes, envelope, BODY_LIMIT } from '../dist/wire.js';
 import { parse } from '../dist/cli.js';
 
 test('cursor args: print + stream-json, resume/model/force only when set, prompt after --', () => {
@@ -40,6 +40,10 @@ test('adapter lookup and CLI argument parsing', () => {
 test('wire: clip marks truncation within limit; envelope rejects bad shapes', () => {
   const c = clip('a'.repeat(100), 50); assert.equal(c.length, 50); assert.match(c, /truncated/);
   assert.equal(clip('short', 50), 'short');
+  const bytes = clipBytes('字'.repeat(5000), 200);
+  assert.ok(Buffer.byteLength(bytes, 'utf8') <= 200);
+  assert.match(bytes, /truncated/);
+  assert.ok(BODY_LIMIT === 64 * 1024);
   assert.throws(() => envelope({ version: 2, kind: 'message', from: 'a', to: 'b', payload: {} }), /version/);
   assert.throws(() => envelope({ version: 1, kind: 'message', from: 'a', to: 'b', payload: {} }), /message/);
 });

@@ -38,9 +38,42 @@ export function envelope(value: unknown): Envelope {
   return m;
 }
 
-/** Truncate to a wire limit, marking the cut so the reader knows text is missing. */
+/** Truncate to a character wire limit, marking the cut so the reader knows text is missing. */
 export function clip(value: string, max: number, note = '\n[truncated by intercom-bridge]'): string {
   return value.length <= max ? value : value.slice(0, Math.max(0, max - note.length)) + note;
+}
+
+/** Truncate so UTF-8 byte length stays within maxBytes (64 KiB body limit is byte-based). */
+export function clipBytes(value: string, maxBytes: number, note = '\n[truncated by intercom-bridge]'): string {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  const noteBytes = Buffer.byteLength(note, 'utf8');
+  const budget = Math.max(0, maxBytes - noteBytes);
+  let end = Math.min(value.length, budget);
+  while (end > 0 && Buffer.byteLength(value.slice(0, end), 'utf8') > budget) end--;
+  // Avoid splitting a multibyte code point: walk back while slice is invalid alone is unnecessary if we
+  // only shorten until byte length fits; slicing JS strings at code-unit boundaries can split surrogates.
+  if (end > 0 && (value.charCodeAt(end - 1) & 0xfc00) === 0xd800) end--;
+  return value.slice(0, end) + note;
+}
+
+/**
+ * Shrink a message string until the built envelope serializes to ≤ BODY_LIMIT bytes.
+ * Used so CJK/escaped text cannot make send() throw before a mandatory report is attempted.
+ */
+export function fitEnvelope(build: (message: string) => Envelope, text: string): Envelope {
+  let current = clip(text, MESSAGE_LIMIT);
+  for (let i = 0; i < 32; i++) {
+    const m = build(current);
+    if (Buffer.byteLength(JSON.stringify(m), 'utf8') <= BODY_LIMIT) return m;
+    const nextLen = Math.max(0, Math.floor(current.length * 0.8) - 1);
+    if (nextLen <= 0) {
+      const empty = build(clipBytes('', 1, '[truncated by intercom-bridge]'));
+      if (Buffer.byteLength(JSON.stringify(empty), 'utf8') <= BODY_LIMIT) return empty;
+      fail('message exceeds 64 KiB even after truncation');
+    }
+    current = clipBytes(current.slice(0, nextLen), Math.max(16, Math.floor(BODY_LIMIT * 0.7)));
+  }
+  fail('message exceeds 64 KiB even after truncation');
 }
 
 export interface Endpoint { port: number; close(): Promise<void> }

@@ -7,10 +7,16 @@ export interface RunOptions {
   timeoutMs: number;
   /** After a terminal result line, how long the CLI may linger before it is stopped (agy can stay alive). */
   lingerMs?: number;
+  /**
+   * After SIGTERM (timeout/linger/abort/output-limit), how long to wait for the child to exit before
+   * settling the turn as blocked/uncertain. No SIGKILL — Intercom cancellation stays soft.
+   */
+  settleMs?: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }
 const MAX_STDOUT = 16 * 1024 * 1024;
+const DEFAULT_SETTLE_MS = 2000;
 const isTerminal = (a: Adapter, line: any) => a.name === 'cursor' ? line?.type === 'result' : (line?.event === 'result' || (line?.event === undefined && typeof line?.status === 'string'));
 
 export function runTurn(adapter: Adapter, turn: TurnOptions, options: RunOptions): Promise<TurnResult> {
@@ -18,11 +24,26 @@ export function runTurn(adapter: Adapter, turn: TurnOptions, options: RunOptions
     const lines: unknown[] = [];
     let buffer = '', stderr = '', bytes = 0, settled = false, reason: string | undefined, terminalSeen = false;
     const child = spawn(options.bin, adapter.args(turn), { cwd: turn.cwd, env: options.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    const stop = (why: string) => { if (reason === undefined) reason = why; if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); };
+    let settleTimer: NodeJS.Timeout | undefined;
+    const settleBound = options.settleMs ?? DEFAULT_SETTLE_MS;
+    const detach = () => {
+      try { child.stdout.destroy(); child.stderr.destroy(); child.unref(); } catch { /* ignore */ }
+    };
+    const stop = (why: string) => {
+      if (reason === undefined) reason = why;
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      }
+      // Bound observation: if the child ignores SIGTERM (or inherited pipes keep it open), still settle.
+      if (!settleTimer && !settled) {
+        settleTimer = setTimeout(() => finish(child.exitCode, child.signalCode, undefined, true), settleBound);
+      }
+    };
     const timer = setTimeout(() => stop(`turn timed out after ${options.timeoutMs} ms`), options.timeoutMs);
     let linger: NodeJS.Timeout | undefined;
     const onAbort = () => stop('turn aborted (bridge shutting down)');
     options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
     const take = (raw: string) => {
       const trimmed = raw.trim(); if (!trimmed) return;
       try {
@@ -37,22 +58,40 @@ export function runTurn(adapter: Adapter, turn: TurnOptions, options: RunOptions
       while ((i = buffer.indexOf('\n')) >= 0) { take(buffer.slice(0, i)); buffer = buffer.slice(i + 1); }
     });
     child.stderr.setEncoding('utf8');
+    // Stderr is retained only for local diagnosis capacity; it is never copied into board-facing errors.
     child.stderr.on('data', (chunk: string) => { if (stderr.length < 4096) stderr += chunk; });
-    const finish = (code: number | null, signal: NodeJS.Signals | null, spawnError?: Error) => {
+    const finish = (code: number | null, signal: NodeJS.Signals | null, spawnError?: Error, forcedSettle = false) => {
       if (settled) return; settled = true;
-      clearTimeout(timer); if (linger) clearTimeout(linger); options.signal?.removeEventListener('abort', onAbort);
+      clearTimeout(timer); if (linger) clearTimeout(linger); if (settleTimer) clearTimeout(settleTimer);
+      options.signal?.removeEventListener('abort', onAbort);
       take(buffer);
-      const result = adapter.parse(lines);
+      if (forcedSettle) detach();
+      let result: TurnResult;
+      try { result = adapter.parse(lines); }
+      catch (e) {
+        resolve({ ok: false, text: '', error: `malformed CLI output (${e instanceof Error ? e.message : String(e)})` });
+        return;
+      }
       if (spawnError) { resolve({ ok: false, text: '', error: `could not start ${options.bin}: ${spawnError.message}` }); return; }
-      // A terminal result decides the outcome; stopping a lingering CLI afterwards is not a failure.
-      if (terminalSeen) { resolve(result); return; }
-      const detail = firstLine(stderr);
-      const why = reason ?? `${options.bin} exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
-      resolve({ ...result, ok: false, error: detail ? `${why}: ${detail}` : (result.error && reason === undefined ? `${why}: ${result.error}` : why) });
+
+      const cleanExit = code === 0 && signal === null && !forcedSettle;
+      // Accept parsed success only for a clean unaided exit, or the deliberate post-result linger stop.
+      // Timeout, output-limit, shutdown abort, nonzero exit, and unexpected signals stay blocked.
+      if (terminalSeen && result.ok) {
+        if (reason === undefined && cleanExit) { resolve(result); return; }
+        if (reason === 'cli lingered after result') { resolve(result); return; }
+      }
+
+      void stderr; // retained above for possible future local logging; never forwarded to the board
+      const publicWhy = forcedSettle && reason
+        ? `${reason}; process did not exit within ${settleBound} ms after SIGTERM (outcome uncertain)`
+        : (reason ?? (terminalSeen && result.ok
+          ? `${options.bin} emitted success but exited with ${signal ? `signal ${signal}` : `code ${code}`}`
+          : `${options.bin} exited with ${signal ? `signal ${signal}` : `code ${code}`}`));
+      const structured = (!reason && !(terminalSeen && result.ok) && result.error) ? `${publicWhy}: ${result.error}` : publicWhy;
+      resolve({ ...result, ok: false, error: structured });
     };
     child.on('error', e => finish(null, null, e));
     child.on('close', (code, signal) => finish(code, signal));
   });
 }
-/** First non-empty stderr line, bounded: enough to diagnose (e.g. "Authentication required") without dumping logs. */
-function firstLine(s: string): string { return (s.split(/\r?\n/).find(l => l.trim()) ?? '').trim().slice(0, 300); }

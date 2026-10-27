@@ -11,7 +11,7 @@ import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { adapter } from './adapters.js';
 import { Bridge } from './bridge.js';
-import { defaultStateDir } from './state.js';
+import { defaultStateDir, sanitizeId } from './state.js';
 
 const USAGE = `Usage: pi-intercom-bridge <run|spawn> --agent <cursor|agy> [--root <board root>] [--cwd <project dir>]
   [--session <id>] [--bin <cli path>] [--model <name>] [--auto-approve] [--turn-timeout <seconds>] [--state-dir <dir>]`;
@@ -36,8 +36,10 @@ async function main(argv: string[]) {
   const stateDir = path.resolve(values['state-dir'] ?? defaultStateDir());
   if (command === 'spawn') {
     const sessionId = values.session ?? `${agent.name}-bridge-${randomUUID()}`;
+    // Validate/normalize before any filesystem effect (same rules as state files).
+    const safe = sanitizeId(sessionId);
     mkdirSync(stateDir, { recursive: true });
-    const log = path.join(stateDir, `${sessionId}.log`);
+    const log = path.join(stateDir, `${safe}.log`);
     const fd = openSync(log, 'a');
     const rest = argv.slice(1).filter((a, i, all) => a !== '--session' && all[i - 1] !== '--session' && !a.startsWith('--session='));
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'run', ...rest, '--session', sessionId, '--root', root, '--state-dir', stateDir],
