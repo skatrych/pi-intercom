@@ -7,7 +7,7 @@
 // record, because the reviewed design gives every one of them zero influence. A test that needs a
 // hostile Git/claim environment creates it as an unrelated side effect, not as fixture infrastructure.
 
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -161,7 +161,9 @@ export async function bindEndpoint(sessionId, transport) {
 
 export async function createFixture(options = {}) {
   const { ConfigStore, sha256, validateConfig } = await dist('config.js');
-  const home = options.home ?? await mkdtemp(path.join(tmpdir(), 'intercom-adopt-'));
+  // os.tmpdir() can contain an 8.3 alias on Windows (or a symlink on Unix). The positive fixture uses
+  // the same canonical home as the production safety gates; an explicit home stays untouched.
+  const home = options.home ?? await realpath(await mkdtemp(path.join(tmpdir(), 'intercom-adopt-')));
   const outside = await mkdtemp(path.join(tmpdir(), 'intercom-adopt-outside-'));
   const endpoints = [];
   await mkdir(path.join(home, 'app', 'web'), { recursive: true });

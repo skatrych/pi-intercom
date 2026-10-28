@@ -2,17 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { appendFile, writeFile, rename, mkdir, symlink, readFile, lstat } from 'node:fs/promises';
-import { fixture, standalone, declineUI } from './fixtures/adoption-support.mjs';
+import { fixture, standalone, declineUI, barrier } from './fixtures/adoption-support.mjs';
 import { createFixture, configText, mockUi, IDS } from './fixtures/adoption-fixture.mjs';
 import { ConfigStore, ConfigPreviewChanged } from '../dist/config.js';
 import { ConfigLockContention, LegacyConfigLock } from '../dist/native-lock.js';
-
-const barrier = () => {
-  let release, arrived;
-  const reached = new Promise(resolve => { arrived = resolve; });
-  const resume = new Promise(resolve => { release = resolve; });
-  return { reached, release, wait: async () => { arrived(); await resume; } };
-};
 
 for (const damage of ['absent', 'dirty-valid', 'malformed', 'stale', 'symlink']) test(`legacy claim state has zero influence: ${damage}`, async t => {
   const f = await fixture();
@@ -91,7 +84,7 @@ test('nested transaction on another board still acquires that board lock', async
   assert.equal((await b.board.parsed()).multiplexer, 'herdr');
 });
 
-test('an old coordinator update queued before publication cannot publish after the replacement', async t => {
+test('an old coordinator update queued before publication cannot publish after the replacement', { timeout: 30_000 }, async t => {
   const f = await fixture();
   t.after(() => f.dispose());
   const gate = barrier();
@@ -109,7 +102,7 @@ test('an old coordinator update queued before publication cannot publish after t
   assert.equal((await f.board.parsed()).multiplexer, 'herdr');
 });
 
-test('outer queue precedes native acquisition, which precedes mutation; the guard is a regular file', async t => {
+test('outer queue precedes native acquisition, which precedes mutation; the guard is a regular file', { timeout: 30_000 }, async t => {
   const f = await createFixture();
   t.after(() => f.dispose());
   await f.board.write(configText('single', f.ports()));
@@ -124,11 +117,16 @@ test('outer queue precedes native acquisition, which precedes mutation; the guar
     order.push('mutate');
     config.multiplexer = 'none';
   });
-  await gate.reached;
-  await assert.rejects(lstat(store.lockFile), { code: 'ENOENT' });
-  gate.release();
-  await pending;
-  assert.deepEqual(order, ['outer', 'mutate']);
+  try {
+    await gate.until(pending);
+    await assert.rejects(lstat(store.lockFile), { code: 'ENOENT' });
+    gate.release();
+    await pending;
+    assert.deepEqual(order, ['outer', 'mutate']);
+  } finally {
+    // Release and drain before t.after removes the board, even if an assertion fails.
+    gate.release(); await Promise.allSettled([pending]);
+  }
 });
 
 test('two stores serialize through the process queue and both updates survive', async t => {

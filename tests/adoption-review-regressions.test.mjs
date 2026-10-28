@@ -130,13 +130,22 @@ test('a reminder is not delivered once the coordinator pair is replaced', async 
   let tick;
   const clock = { schedule: callback => { tick = callback; return () => {}; } };
   f.runtime.reminders.dispose();
-  // Re-create the scheduler with a controllable clock over the same runtime semantics.
-  const { CoordinatorReminders } = await import('../dist/reminders.js');
-  f.runtime.reminders = new CoordinatorReminders({
+  // Re-create the scheduler with a controllable clock over the same runtime evidence gates:
+  // eligible is the ADR 0025 exact-pair read, refusing a replaced coordinator and suspending the loop.
+  const { CoordinatorIdleReminders } = await import('../dist/reminders.js');
+  const { requireCoordinatorPair } = await import('../dist/config.js');
+  f.runtime.reminders = new CoordinatorIdleReminders({
     captureGuard: () => () => {},
-    isCoordinator: async () => (await f.runtime.state()).me?.coordinator === true,
+    eligible: async () => {
+      if (!f.runtime.endpoint || !f.runtime.responsibility?.coordinator) return false;
+      const fresh = await f.runtime.state();
+      try { requireCoordinatorPair(fresh.config, { sessionId: f.runtime.initialId, port: f.runtime.endpoint.port }); }
+      catch { return false; }
+      return fresh.me?.coordinator === true;
+    },
     busy: () => false,
-    deliver: message => { delivered.push(message); },
+    deliver: (message, submission) => { delivered.push(message); },
+    warn: () => {},
   }, clock, 60_000);
   f.runtime.reminders.arm();
   await writeFile(f.configPath(), replaced(await f.board.read(), 'another-coordinator', 43004));

@@ -11,7 +11,7 @@ import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose } from './handoff.js';
-import { CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, readReminderMinutesEnv, reminderIntervalMs } from './reminders.js';
+import { CoordinatorIdleReminders, DEFAULT_REMINDER_INTERVAL_MS, REMINDER_STOP_REASON, readReminderMinutesEnv, reminderIntervalMs } from './reminders.js';
 import { loadReminderContent, readReminderFileEnv, REMINDER_CONFIGURATION_DIAGNOSTIC } from './reminder-content.js';
 import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, countBoards, projectsHome, stop } from './adoption.js';
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
@@ -74,8 +74,6 @@ export class Intercom {
     resolvedRole;
     handoff;
     reminders;
-    reminderRevision = 0;
-    reminderInvocation = 0;
     /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
     reminderIntervalMsCache = DEFAULT_REMINDER_INTERVAL_MS;
     /** Immutable reminder text snapshot for this runtime only; undefined disables reminders for it. */
@@ -424,6 +422,10 @@ export class Intercom {
                 }
                 catch { /* No cleanup failure affects readiness. */ }
                 this.assertCoordinatorEffectSync({ responsibility: true });
+                // Authorization for this exact-pair coordinator is now open (ADR 0025): one fresh idle observation
+                // begins without any worker call. A later eligibility refusal suspends the loop until the pair is
+                // re-proven; no stored disable bit exists anywhere.
+                this.reminders?.arm();
                 this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
             }
             else {
@@ -481,14 +483,22 @@ export class Intercom {
         this.host.notify(REMINDER_CONFIGURATION_DIAGNOSTIC);
         return undefined;
     }
+    /** Host-facing wake-up wiring. No-ops before services exist or for non-Orchestrator sessions. */
+    reminderActivity() { this.reminders?.activityStarted(); }
+    reminderSettled() { this.reminders?.activitySettled(); }
+    reminderAttemptResolved() { this.reminders?.attemptResolved(); }
     startServices(assertValid) {
         const content = this.reminderContent;
-        // Reminders exist only with valid content: an unavailable selection never arms or delivers any text.
-        // Authority stays the current-config exact-pair proof (ADR 0025) on every boundary that can effect.
-        this.reminders = content ? new CoordinatorReminders({
-            // Timer preparation only checks the captured lifecycle; delivery owns the fresh current-config proof.
+        // Reminders exist only with valid content and only for a canonical Orchestrator launch: other
+        // roles, plain coordinators and workers never reach the #68 wake-up path. Authority stays the
+        // current-config exact-pair proof (ADR 0025) on every boundary that can effect: eligibility is the
+        // same fresh board-pair read, and delivery owns the synchronous pre-submission proof.
+        this.reminders = content && this.orchestratorLaunch() ? new CoordinatorIdleReminders({
+            // Timer admission checks only its captured lifecycle; delivery owns the fresh current-config proof.
             captureGuard: () => () => assertValid(),
-            isCoordinator: async () => {
+            // Conjunctive wake-up gate, freshly read when an admitted expiry asks for it: canonical role,
+            // loaded responsibility and the current exact coordinator pair on the board.
+            eligible: async () => {
                 if (this.bootHeld || !this.endpoint || !this.responsibility?.coordinator)
                     return false;
                 const fresh = await this.state();
@@ -502,6 +512,7 @@ export class Intercom {
             // The fresh final proof is owned here, synchronously immediately before the host submission, so no
             // await can reopen the gap between permission and effect.
             deliver: (message, submission) => { assertValid(); this.assertCoordinatorEffectSync({ responsibility: true }); this.host.deliver(message, false, submission); },
+            warn: message => { assertValid(); this.host.notify(message); },
         }, this.options.reminderClock, this.reminderIntervalMsCache, content) : undefined;
         this.handoff = new HandoffWorkflow({
             state: async () => this.state(),
@@ -662,7 +673,6 @@ export class Intercom {
         this.probeController.abort();
         this.handoff?.dispose();
         this.handoff = undefined;
-        this.reminderRevision = ++this.reminderInvocation;
         this.reminders?.dispose();
         this.reminders = undefined;
         const endpoint = this.endpoint;
@@ -739,6 +749,8 @@ export class Intercom {
             fail('promotion requires this session to be the coordinator entry on this board');
         this.responsibility = { ...me };
         assertValid();
+        // An authorization transition to this exact pair begins one fresh idle observation (Swactory #68).
+        this.reminders?.arm();
         record('config.reloaded', { role: 'coordinator', outcome: 'written' });
         this.host.notify(`Intercom responsibility loaded for ${me.name} as Coordinator; promotion is in place, with no extension reload, worker action, or work turn started.`);
     }
@@ -1073,17 +1085,8 @@ export class Intercom {
         }
         fail('unsupported control');
     }
-    async tool(operation, args, toolCallId, reminderSignal) {
-        // Reserve invocation order before state/directory awaits, but only VALID
-        // reminder actions advance the accepted revision. Invalid/nonworker calls
-        // must not supersede a pending stop or suppress an older valid preflight.
-        const invocation = ++this.reminderInvocation;
-        const armReminder = () => {
-            if (invocation >= this.reminderRevision && !reminderSignal?.aborted) {
-                this.reminderRevision = invocation;
-                this.reminders?.arm(reminderSignal);
-            }
-        };
+    async tool(operation, args, toolCallId) {
+        // Worker-directed calls no longer arm, reset or own the wake-up loop: it observes idle time only.
         const record = this.captureObserver();
         const lifecycle = this.validity();
         const { id, config, me } = await this.state();
@@ -1140,19 +1143,14 @@ export class Intercom {
             text(args.message, 'message', 48000);
             if (this.handoff?.workerClosing || fencedClose(me.closeJob) || this.handoff?.isClosing(recipient.sessionId) || fencedClose(recipient.closeJob))
                 fail('worker close is active or uncertain; new Intercom work is fenced');
-            if (me.coordinator && !recipient.coordinator)
-                armReminder();
             await this.transmit(args.to, 'message', { message: args.message }, assertCurrent);
             return { accepted: true, completion: 'not awaited' };
         }
         requireCoordinatorPair(config, this.caller());
         if (operation === 'stop_reminders') {
-            const current = invocation >= this.reminderRevision;
-            if (current) {
-                this.reminderRevision = invocation;
-                this.reminders?.stop();
-            }
-            return { stopped: current };
+            // Truthful non-stopping: the idle loop is never cancelled by an agent, and no disable bit exists.
+            // The name/schema stays so callers never see an unknown tool.
+            return { stopped: false, reason: REMINDER_STOP_REASON };
         }
         if (operation === 'stop_worker')
             fail(UNSUPPORTED_CANCELLATION);
@@ -1180,7 +1178,6 @@ export class Intercom {
             delete values.role;
             if (choice.role)
                 values.role = choice.role;
-            armReminder();
             await this.store.configure(this.caller(), values, () => {
                 assertValid();
                 if (this.handoff?.isClosing(args.sessionId) || this.resumeFences.has(args.sessionId))
@@ -1200,7 +1197,6 @@ export class Intercom {
             const relative = await directory(this.store.root, args.projectDirectory ?? '.');
             assertCurrent();
             const role = requestedRole(args.role);
-            armReminder();
             const launched = await this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), workspaceRoot: this.store.root, ...(role ? { role } : {}) }, assertValid);
             // The role is not durable until configure_worker saves it. Echo it so a restarted coordinator can pass it explicitly.
             return role && launched && typeof launched === 'object' ? { ...launched, role } : launched;
@@ -1215,13 +1211,11 @@ export class Intercom {
                 fail('resume is in flight; close is fenced');
             if (fencedClose(target.closeJob) && !this.handoff.isClosing(target.sessionId))
                 fail('worker close is active or uncertain; close is fenced');
-            armReminder();
             return { job: await this.handoff.request(target), completion: 'not awaited', contract: 'best-effort owned-pane closure; not all-child-process termination' };
         }
         if (['reload_worker', 'resume_worker', 'remove_worker'].includes(operation) && (this.handoff?.isClosing(target.sessionId) || fencedClose(target.closeJob)))
             fail('worker close is active or uncertain; operation is fenced');
         if (operation === 'reload_worker' || operation === 'request_status') {
-            armReminder();
             await this.transmit(target.name, operation === 'reload_worker' ? 'reload' : 'request_status', {}, assertCurrent);
             return { accepted: true, completion: 'not awaited' };
         }
@@ -1240,7 +1234,6 @@ export class Intercom {
                 fail('worker close is active or uncertain; resume is fenced');
             const fence = { inFlight: true, submitted: false, announced: false };
             this.resumeFences.set(target.sessionId, fence);
-            armReminder();
             let completed = false;
             try {
                 const connection = await (this.options.probe ?? probeWorker)(target, { signal: this.probeController.signal });

@@ -86,8 +86,6 @@ export declare class Intercom {
     private resolvedRole?;
     private handoff?;
     private reminders?;
-    private reminderRevision;
-    private reminderInvocation;
     /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
     private reminderIntervalMsCache;
     /** Immutable reminder text snapshot for this runtime only; undefined disables reminders for it. */
@@ -150,6 +148,10 @@ export declare class Intercom {
      * diagnostic and yields no content; the diagnostic carries no path, value, contents or raw error.
      */
     private loadReminderSnapshot;
+    /** Host-facing wake-up wiring. No-ops before services exist or for non-Orchestrator sessions. */
+    reminderActivity(): void;
+    reminderSettled(): void;
+    reminderAttemptResolved(): void;
     private startServices;
     /**
      * The private boot-only verified-port publication (ADR 0025 P3). Reachable only from this captured
@@ -212,6 +214,6 @@ export declare class Intercom {
     private reportedRole;
     receive(message: Envelope): Promise<void>;
     private handleReceive;
-    tool(operation: string, args: Record<string, unknown>, toolCallId?: string, reminderSignal?: AbortSignal): Promise<unknown>;
+    tool(operation: string, args: Record<string, unknown>, toolCallId?: string): Promise<unknown>;
     private launchObserved;
 }

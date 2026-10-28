@@ -19,6 +19,26 @@ export async function freePort() {
   return port;
 }
 
+export const barrier = () => {
+  let release, arrived;
+  const reached = new Promise(resolve => { arrived = resolve; });
+  const resume = new Promise(resolve => { release = resolve; });
+  return {
+    reached, release, wait: async () => { arrived(); await resume; },
+    // A workflow may return a refusal before it enters the requested phase. Waiting
+    // only for `reached` then strands the test and its fixture endpoint indefinitely.
+    async until(pending, timeoutMs = 5000) {
+      let timer;
+      try {
+        await Promise.race([
+          reached,
+          pending.then(result => { throw new Error(`workflow completed before barrier: ${result?.code ?? 'no result code'}`); }),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('workflow barrier not reached within bound')), timeoutMs); }),
+        ]);
+      } finally { clearTimeout(timer); }
+    },
+  };
+};
 /**
  * A real Intercom runtime on a disposable projects-home fixture, with the canonical Orchestrator launch
  * role and the real bounded loopback probe. Tests call the same public entry point production uses:

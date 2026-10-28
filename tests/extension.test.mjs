@@ -11,7 +11,8 @@ import { Intercom } from '../dist/runtime.js';
 import { listen, send } from '../dist/transport.js';
 import { readObservationSnapshot } from '../dist/snapshot.js';
 import { ADOPTION_CHANNEL, ADOPTION_PROTOCOL } from '../dist/index.js';
-import { REMINDER_TEXT } from '../dist/reminders.js';
+import { REMINDER_STOP_REASON, REMINDER_TEXT, WAKEUP_CUSTOM_TYPE } from '../dist/reminders.js';
+import { wakeupSubmission } from '../dist/index.js';
 import { REMINDER_CONFIGURATION_DIAGNOSTIC, REMINDER_FILE_ENV } from '../dist/reminder-content.js';
 
 // These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
@@ -198,7 +199,7 @@ test('single extension registers all agreed tools without starting resources in 
   assert.deepEqual([...channels.keys()], [ADOPTION_CHANNEL]);
   assert.equal(ADOPTION_CHANNEL, 'intercom:coordinator-adoption:v1');
   assert.equal(ADOPTION_PROTOCOL, 1);
-  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
+  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'session_before_compact', 'session_compact', 'session_compact_failed', 'session_before_tree', 'session_tree', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
   const create = tools.get('intercom_create_worker');
@@ -210,8 +211,7 @@ test('single extension registers all agreed tools without starting resources in 
   assert.match(create.description, /does not change PI_CODING_AGENT_DIR/);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
   assert.match(tools.get('intercom_reload_worker').description, /NOT Pi extension reload/);
-  assert.match(tools.get('intercom_stop_reminders').description, /Coordinator only/);
-  assert.deepEqual(Object.keys(tools.get('intercom_stop_reminders').parameters.properties), []);
+  assert.match(tools.get('intercom_stop_reminders').description, /not stoppable/);
   await assert.rejects(tools.get('intercom_list').execute('test', {}, undefined, undefined, {}), /not initialized/);
   // Before any session starts, discovery yields no runnable service, and a malformed payload is ignored.
   const beforeStart = { offers: [] };
@@ -225,23 +225,38 @@ test('single extension registers all agreed tools without starting resources in 
   await events.get('session_shutdown')();
 });
 
-test('reminder stop tool routes through runtime with the owning cancellation signal', supportedHost, async t => {
+test('reminder stop tool routes through runtime and returns the truthful non-stopping result', supportedHost, async t => {
   const a = await adapter(t); await a.start();
   const original = Intercom.prototype.tool;
   const controller = new AbortController();
   let received;
-  Intercom.prototype.tool = async function(operation, args, id, signal) {
-    received = { operation, args, id, signal };
-    return { stopped: true };
+  Intercom.prototype.tool = async function(operation, args, id) {
+    received = { operation, args, id };
+    return { stopped: false, reason: REMINDER_STOP_REASON };
   };
   t.after(() => { Intercom.prototype.tool = original; });
   const tool = a.tools.get('intercom_stop_reminders');
   const result = await tool.execute('stop-test', {}, controller.signal, undefined, a.ctx);
-  assert.deepEqual(received, { operation: 'stop_reminders', args: {}, id: 'stop-test', signal: controller.signal });
-  assert.deepEqual(JSON.parse(result.content[0].text), { stopped: true });
+  assert.deepEqual(received, { operation: 'stop_reminders', args: {}, id: 'stop-test' });
+  assert.deepEqual(JSON.parse(result.content[0].text), { stopped: false, reason: REMINDER_STOP_REASON });
   received = undefined; controller.abort();
   await assert.rejects(tool.execute('cancelled', {}, controller.signal, undefined, a.ctx), /abort/i);
   assert.equal(received, undefined, 'an already-cancelled tool must not reach runtime');
+});
+
+test('the reminder-only submission uses the supported custom-message API with the exact shape', supportedHost, async t => {
+  const submissions = [];
+  const fakePi = { sendMessage: (message, options) => submissions.push({ message, options }) };
+  wakeupSubmission(fakePi, 'Full reminder text.\n', { attemptId: 'attempt-1', source: 'file', sha256: 'a'.repeat(64) });
+  assert.deepEqual(submissions, [{
+    message: {
+      customType: WAKEUP_CUSTOM_TYPE,
+      content: 'Full reminder text.\n',
+      display: true,
+      details: { attemptId: 'attempt-1', reminderSource: 'file', reminderSha256: 'a'.repeat(64) },
+    },
+    options: { triggerTurn: true },
+  }], 'one triggerTurn custom message; no steering fallback, no UI-only or metadata-only path');
 });
 
 test('adapter rejects untrusted/noninteractive startup before creating config', supportedHost, async t => {
@@ -507,31 +522,22 @@ async function reminderAdapter(t, selector) {
   return { a, sent, waitFor, tick: () => t.mock.timers.tick(5 * 60 * 1000) };
 }
 
-test('adapter: a selected file is the exact model input, once per interval, with the steering delivery shape', supportedHost, async t => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'intercom-reminder-adapter-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const text = '  Generic check: list any stalled work.\n\nPlain text with trailing spaces.  \n';
-  const file = path.join(dir, 'reminder text.txt');
-  await writeFile(file, text);
-  const r = await reminderAdapter(t, file);
-  r.tick();
-  assert.equal(await r.waitFor(() => r.sent().length === 1), true, 'one reminder is submitted on the first full interval');
-  assert.equal(r.sent()[0].content, text, 'model input is the selected text, byte-for-byte');
-  assert.deepEqual(r.sent()[0].options, { deliverAs: 'steer' });
-  assert.equal(r.sent().filter(m => m.content === text).length, 1, 'never an appended or duplicated generic message');
-  assert.equal(r.sent().some(m => m.content === REMINDER_TEXT), false);
-  r.tick();
-  assert.equal(await r.waitFor(() => r.sent().length === 2), true);
-  assert.equal(r.sent()[1].content, text);
-  assert.equal(r.a.notices.filter(n => n.text === REMINDER_CONFIGURATION_DIAGNOSTIC).length, 0);
-});
-
-test('adapter: an unset selector keeps the built-in literal as the exact model input', supportedHost, async t => {
-  const r = await reminderAdapter(t, undefined);
-  r.tick();
-  assert.equal(await r.waitFor(() => r.sent().length === 1), true);
-  assert.equal(r.sent()[0].content, REMINDER_TEXT);
-  assert.deepEqual(r.sent()[0].options, { deliverAs: 'steer' });
+// Wake-ups belong to authorized Orchestrator sessions (real fixtures in tests/reminders.test.mjs and
+// tests/reminder-content-runtime.test.mjs). At the adapter level a plain coordinator session has no
+// wake-up loop at all: nothing arms it, tool calls must not, and the stop tool stays truthful there.
+test('adapter: a plain coordinator never delivers a reminder and its stop tool stays truthful', supportedHost, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const a = await adapter(t);
+  await a.start();
+  await a.invoke('configure_worker', { sessionId: 'worker-session', port: 1, projectDirectory: '.', name: 'Worker', description: 'Assigned scope' });
+  for (let i = 0; i < 3; i++) {
+    t.mock.timers.tick(5 * 60 * 1000);
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(a.messages.length, 0, 'no reminder is submitted: no Orchestrator identity exists');
+  assert.deepEqual(JSON.parse((await a.invoke('stop_reminders', {})).content[0].text), { stopped: false, reason: REMINDER_STOP_REASON });
+  assert.equal(a.messages.length, 0, 'the truthful stop tool stays truthful and changes nothing');
+  assert.equal(a.notices.filter(n => n.text === REMINDER_CONFIGURATION_DIAGNOSTIC).length, 0);
 });
 
 test('adapter: an invalid selection sends nothing and emits one fixed notice', supportedHost, async t => {
