@@ -35,7 +35,10 @@ This is test-fixture correction, not a change to reminder design or production s
 - `tests/fixture-portability.test.mjs` runs adoption-contract, reminders, reminder-content-runtime,
   wakeup-extension and wakeup-native-dispatcher in an isolated child under an aliased temporary
   root. Unix uses a directory symlink; Windows uses a privilege-free junction. The child has a
-  90-second outer bound and must finish with zero failures/cancellations/skips.
+  90-second outer bound and must finish with zero failures/cancellations. Skip accounting
+  requires exact names/reasons and matching totals: none on Linux; on Windows, only the
+  existing symlink-privilege, Linux-device and POSIX-FIFO cases in reminder-content-runtime.
+  An added/missing/replaced skip or changed reason fails, even with the same total.
 - A second child deliberately supplies a noncanonical cwd to the real workflow. It must report
   the missed phase with `BOARD_PATH`, fail that intentional test, **and exit naturally** with
   code 1 and no cancellations, signal or timeout. The production gate is still enforcing refusal.
@@ -45,19 +48,27 @@ This is test-fixture correction, not a change to reminder design or production s
 - Sensitivity: removing home canonicalization fails the aliased-root regression. Removing the
   early-completion branch fails the refused-child diagnostic regression (it reaches the bounded
   missing-phase error instead). Both mutations fail assertions with ordinary process exit, not
-  an external timeout; restore them before final validation.
+  an external timeout; restore them before final validation. Skip-accounting fixtures cover
+  Linux/Windows output, LF/CRLF, missing/extra/replaced skips, changed/missing reasons,
+  inconsistent totals and nonzero failures/cancellations. Replacing exact skip comparison
+  with count-only acceptance fails the same-count substitution case.
 
 ## Validation and remaining limits
 
-Linux x86_64, Node 24.21.0: full `npm test` **646 PASS / 0 FAIL / 0 CANCELLED / 0 SKIP**;
+Linux x86_64, Node 24.21.0: full `npm test` **647 PASS / 0 FAIL / 0 CANCELLED / 0 SKIP**;
 `npm run typecheck` passes; `npm run check:package` passes (packaged smoke **1 PASS**).
 Commands use finite external bounds and the suite's process-environment scrubber.
 Build output remains unchanged; this correction adds no production code or dependency.
 
-No Windows host was available for this correction. New-head Windows results must be inspected
-separately; Linux results and a portable junction/symlink fixture do not establish Windows PASS.
-The original baseline's other adoption/UX/roles failures are not independently repaired or
-reclassified here. Fixing this shared prerequisite may change their observed counts or expose
-other inherited failures. Do not infer general Windows/#18 acceptance or original CI-handle
-identity. No CI cancellation/rerun, production install/board, credential or provider operation
+No local Windows host was available. Final Windows CI at `f638dc8`,
+[run 40626255429](https://github.com/skatrych/pi-intercom/actions/runs/40626255429), naturally
+exited code 1 in ~356 seconds: **626 PASS / 10 FAIL / 0 CANCELLED / 10 SKIP**. All 15
+adoption-contract, five adapter and 11 native-dispatcher cases passed. One introduced wrapper
+failure incorrectly required zero skips despite existing Windows platform skips; this follow-up
+corrects only that accounting. The other nine failures are existing adoption/UX/roles surfaces,
+not repaired here; earlier prerequisite failures had masked several current error signatures.
+See the [read-only classification](https://github.com/skatrych/pi-intercom/pull/47#issuecomment-6459998039).
+Windows remains a failed CI gate, not green. New-head results must be inspected separately;
+Linux success and fabricated Windows TAP accounting do not establish actual Windows PASS.
+Do not infer general Windows/#18 acceptance or original CI-handle identity. No CI cancellation/rerun, production install/board, credential or provider operation
 is part of this correction. Real-host AC5 and source/installed/loaded/cutover gates remain open.

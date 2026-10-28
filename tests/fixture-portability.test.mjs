@@ -15,6 +15,21 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const childEnv = { ...process.env };
 delete childEnv.NODE_TEST_CONTEXT;
 const childOptions = { cwd: root, env: childEnv, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 };
+const windowsSkips = [
+  ['present-but-invalid selection (symlink to valid text) suppresses every reminder send with one sanitized diagnostic', 'symlink creation is privilege-dependent on Windows'],
+  ['a special device selection is refused before any open by the runtime', 'Linux device fixture'],
+  ['a FIFO selection is refused without blocking the runtime start', 'POSIX-only'],
+];
+
+function assertChildResults(stdout, platform) {
+  assert.match(stdout, /^# fail 0\r?$/m);
+  assert.match(stdout, /^# cancelled 0\r?$/m);
+  const expected = platform === 'win32' ? windowsSkips : [];
+  const actual = [...stdout.matchAll(/^ok \d+ - (.+) # SKIP(?: ([^\r\n]*))?\r?$/gm)].map(match => [match[1], match[2] ?? '']);
+  // Account for exact existing platform cases, not a blanket allowance for N skips.
+  assert.deepEqual(actual, expected, 'only the named platform skips and their reasons are allowed');
+  assert.match(stdout, new RegExp(`^# skipped ${expected.length}\\r?$`, 'm'));
+}
 
 test('canonical fixture homes support aliased temporary directories through actual wake-up adapters', { timeout: 100_000 }, async t => {
   const scratch = await realpath(await mkdtemp(path.join(tmpdir(), 'intercom-fixture-path-')));
@@ -31,9 +46,30 @@ test('canonical fixture homes support aliased temporary directories through actu
     'tests/reminder-content-runtime.test.mjs', 'tests/wakeup-extension.test.mjs',
     'tests/wakeup-native-dispatcher.test.mjs',
   ], { ...childOptions, env: { ...childEnv, TMPDIR: alias, TEMP: alias, TMP: alias } });
-  assert.match(stdout, /# fail 0\b/);
-  assert.match(stdout, /# cancelled 0\b/);
-  assert.match(stdout, /# skipped 0\b/);
+  assertChildResults(stdout, process.platform);
+  t.diagnostic(`Aliased-temp child: 0 failed, 0 cancelled, ${process.platform === 'win32' ? windowsSkips.length : 0} explicitly accounted platform skips`);
+});
+
+test('portable child accounting rejects missing, unexpected or changed skips and nonzero failures/cancellations', () => {
+  const output = (skips, { failed = 0, cancelled = 0, count = skips.length } = {}) => [
+    ...skips.map(([name, reason], index) => `ok ${index + 1} - ${name} # SKIP ${reason}`),
+    `# fail ${failed}`, `# cancelled ${cancelled}`, `# skipped ${count}`, '',
+  ].join('\n');
+  assertChildResults(output([]), 'linux');
+  assertChildResults(output(windowsSkips), 'win32');
+  assertChildResults(output(windowsSkips).replaceAll('\n', '\r\n'), 'win32');
+  const unexpected = ['newly skipped wake-up coverage', 'unexpected'];
+  for (const skips of [
+    [unexpected, ...windowsSkips.slice(1)], // same count cannot hide a replacement
+    windowsSkips.slice(1),
+    [...windowsSkips, unexpected],
+    [[windowsSkips[0][0], 'changed reason'], ...windowsSkips.slice(1)],
+    [[windowsSkips[0][0], ''], ...windowsSkips.slice(1)],
+  ]) assert.throws(() => assertChildResults(output(skips), 'win32'), /only the named platform skips/);
+  assert.throws(() => assertChildResults(output([unexpected]), 'linux'), /only the named platform skips/);
+  assert.throws(() => assertChildResults(output(windowsSkips, { count: 0 }), 'win32'));
+  assert.throws(() => assertChildResults(output(windowsSkips, { failed: 1 }), 'win32'));
+  assert.throws(() => assertChildResults(output(windowsSkips, { cancelled: 1 }), 'win32'));
 });
 
 test('early canonical-path refusal reports the missed barrier and naturally closes its child', { timeout: 20_000 }, async () => {
