@@ -48,6 +48,8 @@ export class Bridge {
   private readonly abort = new AbortController();
   private closed = false;
   private releaseOwnership?: () => Promise<void>;
+  /** CLI child that ignored SIGTERM past settleMs; blocks next turn and ownership release until exit. */
+  private unresolvedChild?: Promise<void>;
   private readonly log: (line: string) => void;
 
   constructor(readonly options: BridgeOptions) {
@@ -56,7 +58,7 @@ export class Bridge {
     this.log = options.log ?? (line => process.stderr.write(`${new Date().toISOString()} ${line}\n`));
   }
   get port(): number { if (!this.endpoint) fail('bridge not started'); return this.endpoint.port; }
-  get busy(): boolean { return this.running || this.queue.length > 0; }
+  get busy(): boolean { return this.running || this.queue.length > 0 || !!this.unresolvedChild; }
   get cliSessionId(): string | undefined { return this.state?.cliSessionId; }
 
   async start(): Promise<void> {
@@ -67,10 +69,14 @@ export class Bridge {
     try {
       const saved = await loadState(this.options.stateDir, this.sessionId);
       if (saved && saved.agent !== this.options.adapter.name) fail(`session ${this.sessionId} belongs to agent ${saved.agent}, not ${this.options.adapter.name}`);
-      // ENOENT → new mapping (first use). Corrupt existing state fails inside loadState.
+      const known = entryOf(board, this.sessionId);
+      // First use (not yet on the board) may create a mapping on ENOENT. An established configured
+      // identity with missing state is not first use — refuse silent remap / new conversation.
+      if (!saved && known) {
+        fail(`bridge state missing for configured worker ${this.sessionId}; refusing silent remap (restore state or use a new identity)`);
+      }
       this.state = saved ?? { version: 1, agent: this.options.adapter.name, sessionId: this.sessionId };
       await saveState(this.options.stateDir, this.state);
-      const known = entryOf(board, this.sessionId);
       this.endpoint = await listen(this.options.port ?? known?.port, m => this.receive(m), () => ({ version: 1, sessionId: this.sessionId }));
       this.log(`bridge ${this.sessionId} (${this.options.adapter.name}) listening on 127.0.0.1:${this.endpoint.port}`);
       try {
@@ -189,6 +195,10 @@ export class Bridge {
       signal: this.abort.signal,
     });
 
+    // Unresolved child (ignored SIGTERM): report below, but do not overlap another turn or release ownership.
+    const unresolved = result.unresolved;
+    if (unresolved) this.unresolvedChild = unresolved;
+
     // Continuity: bind on first success; refuse missing ID and ID drift (fail closed).
     if (result.ok) {
       if (!result.cliSessionId || !result.cliSessionId.trim()) {
@@ -199,14 +209,29 @@ export class Bridge {
           error: `CLI conversation ID drifted (expected ${this.state.cliSessionId}, got ${result.cliSessionId}); refusing silent remap`,
         };
       } else if (!this.state.cliSessionId) {
-        this.state = { ...this.state, cliSessionId: result.cliSessionId };
-        await saveState(this.options.stateDir, this.state).catch(e => this.log(`state save failed: ${String(e)}`));
+        // Persistence must succeed before continuity is established; in-memory-only ID is not restart-safe.
+        try {
+          const next = { ...this.state, cliSessionId: result.cliSessionId };
+          await saveState(this.options.stateDir, next);
+          this.state = next;
+        } catch (e) {
+          result = {
+            ok: false, text: result.text, cliSessionId: result.cliSessionId,
+            error: `failed to persist CLI conversation ID; refusing to establish restart continuity (${e instanceof Error ? e.message : String(e)})`,
+          };
+        }
       }
     }
     if (result.ok) this.contextSentFor = this.responsibilityKey;
     this.log(`turn ${result.ok ? 'succeeded' : 'failed'} (${result.text.length} chars${result.cliSessionId ? `, cli session ${result.cliSessionId}` : ''})${result.error ? `: ${result.error}` : ''}`);
     await this.deliver(work, result.ok, result.ok ? result.text : `${this.options.adapter.name} turn failed: ${result.error ?? 'unknown error'}${result.text ? `\n\nPartial output:\n${result.text}` : ''}`)
       .catch(e => this.log(`result delivery failed; no retry: ${String(e)}`));
+    // Honor one-CLI-turn-at-a-time: wait out an unsettled child before the pump dequeues another turn.
+    if (unresolved) {
+      this.log('waiting for unsettled CLI child to exit before next turn or ownership release');
+      await unresolved;
+      if (this.unresolvedChild === unresolved) this.unresolvedChild = undefined;
+    }
   }
 
   /**
@@ -254,6 +279,12 @@ export class Bridge {
     const dropped = this.queue.length; this.queue = [];
     this.abort.abort();
     await this.pump.catch(() => {});
+    // Keep exclusive ownership until any detached unsettled child actually exits (no SIGKILL).
+    if (this.unresolvedChild) {
+      this.log('close waiting for unsettled CLI child before releasing ownership');
+      await this.unresolvedChild.catch(() => {});
+      this.unresolvedChild = undefined;
+    }
     if (dropped) this.log(`dropped ${dropped} queued instruction(s) on shutdown`);
     await this.endpoint?.close();
     await this.releaseOwnership?.().catch(() => {});

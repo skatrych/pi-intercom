@@ -37,7 +37,7 @@ queue, result routing, long-result `message` + `report`, `status`/`request_statu
 
 ## 4. Tests and validation
 
-`npm run test:bridge` needs no credentials (13 tests). It uses a fake CLI (`tests/fixtures/fake-cli.mjs`) that emits
+`npm run test:bridge` needs no credentials (24+ tests). It uses a fake CLI (`tests/fixtures/fake-cli.mjs`) that emits
 each CLI's documented NDJSON, with failure, long, lingering and hanging modes.
 - `adapters.test.mjs`: argv mapping, NDJSON parsing, CLI flags, wire limits.
 - `bridge.test.mjs`: pi-intercom's own coordinator runtime (`dist/runtime.js`, no LLM) over real loopback HTTP.

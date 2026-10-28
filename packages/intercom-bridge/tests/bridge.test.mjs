@@ -179,6 +179,7 @@ test('CLI spawn: reports a started detached worker, and fails loudly when the wo
 // --- Review REQUEST CHANGES regressions (P1/P2) ---
 
 test('P1: SIGTERM settle is bounded when the child ignores it', { skip }, async () => {
+  // Fixture self-exits at 900ms by default (R4); assertion still requires settle well before that.
   const started = Date.now();
   const result = await runTurn(cursor, { prompt: 'IGNORE_TERM please', cwd: process.cwd() }, {
     bin: FAKE, timeoutMs: 100, settleMs: 150, lingerMs: 50,
@@ -186,7 +187,9 @@ test('P1: SIGTERM settle is bounded when the child ignores it', { skip }, async 
   const elapsed = Date.now() - started;
   assert.equal(result.ok, false);
   assert.match(result.error, /did not exit within 150 ms after SIGTERM/);
+  assert.ok(result.unresolved, 'forced settle must expose unresolved child waiter');
   assert.ok(elapsed < 700, `settled in ${elapsed} ms (must not wait for a late self-exit)`);
+  await result.unresolved; // owned cleanup — no orphan after the test
 });
 
 test('P1: terminal JSON success does not override nonzero exit; parse throws become blocked', { skip }, async () => {
@@ -320,4 +323,125 @@ test('P2: sanitizeId rejects pathy session names; state save round-trips', async
   t.after(() => rm(dir, { recursive: true, force: true }));
   await saveState(dir, { version: 1, agent: 'cursor', sessionId: 's1', cliSessionId: 'c1' });
   assert.deepEqual(await loadState(dir, 's1'), { version: 1, agent: 'cursor', sessionId: 's1', cliSessionId: 'c1' });
+});
+
+// --- Re-review REQUEST CHANGES regressions (R1–R4) ---
+
+test('R1: linger success requires observed expected termination (not forcedSettle / exit 9)', { skip }, async () => {
+  // success JSON → ignore SIGTERM past settle → must NOT promote to ok
+  const unsettled = await runTurn(cursor, { prompt: 'SUCCESS_IGNORE_TERM please', cwd: process.cwd() }, {
+    bin: FAKE, timeoutMs: 5000, settleMs: 150, lingerMs: 50,
+  });
+  assert.equal(unsettled.ok, false);
+  assert.match(unsettled.error, /lingered after result.*did not exit within 150 ms/);
+  assert.ok(unsettled.unresolved);
+  await unsettled.unresolved;
+
+  // success JSON → linger SIGTERM → exit 9 within observation → must NOT promote to ok
+  const exit9 = await runTurn(cursor, { prompt: 'LINGER_EXIT9 please', cwd: process.cwd() }, {
+    bin: FAKE, timeoutMs: 5000, settleMs: 500, lingerMs: 50,
+  });
+  assert.equal(exit9.ok, false);
+  assert.match(exit9.error, /emitted success but exited with code 9/);
+  assert.equal(exit9.unresolved, undefined);
+
+  // Supported linger: agy emits success, lingers, exits on SIGTERM → ok
+  const okLinger = await runTurn(agy, { prompt: 'LINGER then answer', cwd: process.cwd() }, {
+    bin: FAKE, timeoutMs: 5000, settleMs: 500, lingerMs: 50,
+  });
+  assert.equal(okLinger.ok, true);
+  assert.equal(okLinger.unresolved, undefined);
+});
+
+test('R2: unsettled child blocks overlapping turn and ownership reuse', { skip }, async t => {
+  const ctx = await board(t);
+  const logs = [];
+  const b = ctx.bridge(cursor, {
+    turnTimeoutMs: 100, settleMs: 150,
+    env: { ...process.env, FAKE_CLI_LOG: path.join(ctx.root, 'fake.log'), FAKE_CLI_SELF_EXIT_MS: '800' },
+    log: line => logs.push(line),
+  });
+  await enlist(b, ctx, 'Overlap1');
+
+  await ctx.coordinator.tool('send', { to: 'Overlap1', message: 'IGNORE_TERM first' });
+  await until(() => ctx.messages.find(m => m.includes('Report: blocked') && m.includes('did not exit')), 'blocked uncertain', 5000);
+  // Queue a second turn immediately; it must not spawn until the first child exits.
+  await ctx.coordinator.tool('send', { to: 'Overlap1', message: 'second after unsettled' });
+
+  await new Promise(r => setTimeout(r, 200));
+  let argv = await ctx.argv();
+  assert.equal(argv.filter(e => JSON.stringify(e.argv).includes('second after unsettled')).length, 0,
+    'second turn must not spawn while first child is unsettled');
+  assert.ok(logs.some(l => l.includes('waiting for unsettled')), 'must wait for unsettled child');
+
+  await until(async () => (await ctx.argv()).some(e => JSON.stringify(e.argv).includes('second after unsettled')), 'second spawn after settle', 5000);
+  await until(() => ctx.messages.find(m => m.includes('echo: second after unsettled')), 'second report', 5000);
+
+  // Ownership held across close until unsettled child exits.
+  const ctx2 = await board(t);
+  const sticky = ctx2.bridge(cursor, {
+    turnTimeoutMs: 100, settleMs: 100,
+    env: { ...process.env, FAKE_CLI_LOG: path.join(ctx2.root, 'fake.log'), FAKE_CLI_SELF_EXIT_MS: '600' },
+  });
+  await enlist(sticky, ctx2, 'Sticky1');
+  const stateDir = path.join(ctx2.root, 'state');
+  await ctx2.coordinator.tool('send', { to: 'Sticky1', message: 'IGNORE_TERM hold' });
+  await until(() => ctx2.messages.find(m => m.includes('did not exit')), 'sticky blocked', 5000);
+  const closing = sticky.close();
+  await new Promise(r => setTimeout(r, 50));
+  const usurper = ctx2.bridge(cursor, { sessionId: sticky.sessionId, stateDir });
+  await assert.rejects(usurper.start(), /already owned/);
+  await closing;
+  const again = ctx2.bridge(cursor, { sessionId: sticky.sessionId, stateDir });
+  await again.start();
+});
+
+test('R3: configured worker with missing state refuses start; save failure does not establish continuity', { skip }, async t => {
+  const ctx = await board(t);
+  const b = ctx.bridge(cursor);
+  await enlist(b, ctx, 'ContLoss');
+  await ctx.coordinator.tool('send', { to: 'ContLoss', message: 'bind first' });
+  await until(() => ctx.messages.find(m => m.includes('echo: bind first')), 'bound');
+  const sessionId = b.sessionId;
+  const stateDir = path.join(ctx.root, 'state');
+  const { sanitizeId } = await import('../dist/state.js');
+  const statePath = path.join(stateDir, `${sanitizeId(sessionId)}.json`);
+  await b.close();
+
+  // Remove only the mapping while the board entry remains → restart must refuse.
+  await rm(statePath);
+  const orphan = ctx.bridge(cursor, { sessionId, stateDir });
+  await assert.rejects(orphan.start(), /bridge state missing for configured worker|refusing silent remap/);
+
+  // Fresh first-use ENOENT (not on board) still creates mapping.
+  const fresh = ctx.bridge(cursor, { sessionId: 'brand-new-first-use', stateDir: path.join(ctx.root, 'fresh-state') });
+  await fresh.start();
+
+  // Save failure: replace the state file with a directory so persistence cannot publish the ID.
+  const ctx3 = await board(t);
+  const stateDir3 = path.join(ctx3.root, 'state');
+  const bad = ctx3.bridge(cursor, { sessionId: 'save-fail-worker', stateDir: stateDir3 });
+  await enlist(bad, ctx3, 'SaveFail');
+  const mapPath = path.join(stateDir3, 'save-fail-worker.json');
+  await rm(mapPath);
+  await mkdir(mapPath);
+  await ctx3.coordinator.tool('send', { to: 'SaveFail', message: 'first bind should fail persist' });
+  await until(() => ctx3.messages.find(m => m.includes('Report: blocked') && m.includes('failed to persist')), 'persist blocked', 8000);
+  assert.equal(bad.cliSessionId, undefined, 'in-memory ID must not be accepted when save failed');
+});
+
+test('R4: IGNORE_TERM fixture self-exits under stock test (no FAKE_CLI_SELF_EXIT_MS required)', { skip }, async () => {
+  // Allow shebang/node startup before the timeout fires so SIGTERM ignore is registered (80ms was racy).
+  const env = { ...process.env };
+  delete env.FAKE_CLI_SELF_EXIT_MS;
+  const started = Date.now();
+  const result = await runTurn(cursor, { prompt: 'IGNORE_TERM stock', cwd: process.cwd() }, {
+    bin: FAKE, timeoutMs: 150, settleMs: 150, lingerMs: 50, env,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /did not exit within 150 ms after SIGTERM/);
+  assert.ok(result.unresolved);
+  assert.ok(Date.now() - started < 700, `settled in ${Date.now() - started} ms before default 900ms self-exit`);
+  await result.unresolved;
+  assert.ok(Date.now() - started < 2000, 'default 900ms self-exit must complete without an external sweeper');
 });

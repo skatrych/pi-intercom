@@ -17,6 +17,11 @@ export interface TurnResult {
   /** CLI conversation ID observed in the output, used for the next turn's resume. */
   cliSessionId?: string;
   error?: string;
+  /**
+   * Present when the turn settled without an observed child exit (SIGTERM ignored past settleMs).
+   * Await before starting another CLI turn or releasing session ownership. No SIGKILL is used.
+   */
+  unresolved?: Promise<void>;
 }
 export interface Adapter {
   readonly name: 'cursor' | 'agy';

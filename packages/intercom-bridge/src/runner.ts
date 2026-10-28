@@ -19,6 +19,10 @@ const MAX_STDOUT = 16 * 1024 * 1024;
 const DEFAULT_SETTLE_MS = 2000;
 const isTerminal = (a: Adapter, line: any) => a.name === 'cursor' ? line?.type === 'result' : (line?.event === 'result' || (line?.event === undefined && typeof line?.status === 'string'));
 
+/** Expected termination after a deliberate post-result linger SIGTERM: clean exit 0 or SIGTERM delivery. */
+const expectedLingerExit = (code: number | null, signal: NodeJS.Signals | null) =>
+  (code === 0 && signal === null) || (code === null && signal === 'SIGTERM');
+
 export function runTurn(adapter: Adapter, turn: TurnOptions, options: RunOptions): Promise<TurnResult> {
   return new Promise(resolve => {
     const lines: unknown[] = [];
@@ -26,8 +30,16 @@ export function runTurn(adapter: Adapter, turn: TurnOptions, options: RunOptions
     const child = spawn(options.bin, adapter.args(turn), { cwd: turn.cwd, env: options.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let settleTimer: NodeJS.Timeout | undefined;
     const settleBound = options.settleMs ?? DEFAULT_SETTLE_MS;
-    const detach = () => {
-      try { child.stdout.destroy(); child.stderr.destroy(); child.unref(); } catch { /* ignore */ }
+    let unresolved: Promise<void> | undefined;
+    const trackUnresolved = () => {
+      if (unresolved) return;
+      unresolved = new Promise<void>(res => {
+        if (child.exitCode !== null || child.signalCode !== null) { res(); return; }
+        child.once('close', () => res());
+      });
+    };
+    const detachPipes = () => {
+      try { child.stdout.destroy(); child.stderr.destroy(); } catch { /* ignore */ }
     };
     const stop = (why: string) => {
       if (reason === undefined) reason = why;
@@ -65,31 +77,46 @@ export function runTurn(adapter: Adapter, turn: TurnOptions, options: RunOptions
       clearTimeout(timer); if (linger) clearTimeout(linger); if (settleTimer) clearTimeout(settleTimer);
       options.signal?.removeEventListener('abort', onAbort);
       take(buffer);
-      if (forcedSettle) detach();
+      if (forcedSettle) {
+        // Child still alive (or exit unobserved): keep a waiter for ownership/overlap gates; drop pipes only.
+        trackUnresolved();
+        detachPipes();
+        // Do not unref — the bridge holds `unresolved` until the child exits.
+      }
       let result: TurnResult;
       try { result = adapter.parse(lines); }
       catch (e) {
-        resolve({ ok: false, text: '', error: `malformed CLI output (${e instanceof Error ? e.message : String(e)})` });
+        resolve({ ok: false, text: '', error: `malformed CLI output (${e instanceof Error ? e.message : String(e)})`, ...(unresolved ? { unresolved } : {}) });
         return;
       }
-      if (spawnError) { resolve({ ok: false, text: '', error: `could not start ${options.bin}: ${spawnError.message}` }); return; }
+      if (spawnError) {
+        resolve({ ok: false, text: '', error: `could not start ${options.bin}: ${spawnError.message}`, ...(unresolved ? { unresolved } : {}) });
+        return;
+      }
 
       const cleanExit = code === 0 && signal === null && !forcedSettle;
-      // Accept parsed success only for a clean unaided exit, or the deliberate post-result linger stop.
-      // Timeout, output-limit, shutdown abort, nonzero exit, and unexpected signals stay blocked.
+      // Accept parsed success only for a clean unaided exit, or a deliberate post-result linger stop
+      // with observed expected termination (exit 0 or SIGTERM). Timeout/output-limit/abort, forced
+      // settle (still alive), nonzero exit (e.g. 9), and unexpected signals stay blocked.
       if (terminalSeen && result.ok) {
         if (reason === undefined && cleanExit) { resolve(result); return; }
-        if (reason === 'cli lingered after result') { resolve(result); return; }
+        if (reason === 'cli lingered after result' && !forcedSettle && expectedLingerExit(code, signal)) {
+          resolve(result); return;
+        }
       }
 
       void stderr; // retained above for possible future local logging; never forwarded to the board
-      const publicWhy = forcedSettle && reason
-        ? `${reason}; process did not exit within ${settleBound} ms after SIGTERM (outcome uncertain)`
-        : (reason ?? (terminalSeen && result.ok
-          ? `${options.bin} emitted success but exited with ${signal ? `signal ${signal}` : `code ${code}`}`
-          : `${options.bin} exited with ${signal ? `signal ${signal}` : `code ${code}`}`));
+      // Prefer concrete exit/signal over a bare linger label when success was not accepted.
+      let publicWhy: string;
+      if (forcedSettle && reason) {
+        publicWhy = `${reason}; process did not exit within ${settleBound} ms after SIGTERM (outcome uncertain)`;
+      } else if (terminalSeen && result.ok) {
+        publicWhy = `${options.bin} emitted success but exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
+      } else {
+        publicWhy = reason ?? `${options.bin} exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
+      }
       const structured = (!reason && !(terminalSeen && result.ok) && result.error) ? `${publicWhy}: ${result.error}` : publicWhy;
-      resolve({ ...result, ok: false, error: structured });
+      resolve({ ...result, ok: false, error: structured, ...(unresolved ? { unresolved } : {}) });
     };
     child.on('error', e => finish(null, null, e));
     child.on('close', (code, signal) => finish(code, signal));
