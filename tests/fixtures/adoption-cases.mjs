@@ -6,14 +6,15 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { CLOSE_JOBS, IDS, ROLES, bindEndpoint, commandContext, configText, createFixture, mockUi, recorder } from './adoption-fixture.mjs';
 // Nothing in this file is reachable from src/: it is a disposable proof harness.
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(HERE, '..', '..', 'dist');
-const load = async name => import(path.join(DIST, name));
+// Windows-safe ESM specifier: bare absolute paths (C:\...) are parsed as URL schemes.
+const load = async name => import(pathToFileURL(path.join(DIST, name)).href);
 const say = (...lines) => { for (const line of lines) console.log(line); };
 
 const OWN_PORTS = { coordinator: 41001, workerOne: 41002, workerTwo: 41003 };

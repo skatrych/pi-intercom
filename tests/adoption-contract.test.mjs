@@ -93,19 +93,26 @@ test('nested transaction on another board still acquires that board mutex', asyn
   assert.equal((await b.board.parsed()).multiplexer, 'herdr');
 });
 
-test('old-authority update already queued on the local store cannot publish after adoption', async t => {
+test('old-authority update already queued on the local store cannot publish after adoption', { timeout: 30_000 }, async t => {
   const f = await fixture(); t.after(f.dispose);
   const gate = barrier(), store = new ConfigStore(f.home);
   const workflow = f.workflow({ storeFor: () => store, phase: async phase => { if (phase === 'prepared-committed') await gate.wait(); } });
-  const adoption = workflow.run(f.context, 'adopt'); await gate.reached;
-  let mutated = false;
-  const old = store.update('gone-coordinator', () => { mutated = true; });
-  const refused = assert.rejects(old, /coordinator permission required/);
-  gate.release(); assert.equal((await adoption).ok, true); await refused;
-  assert.equal(mutated, false); assert.equal((await f.board.parsed()).multiplexer, 'herdr');
+  const adoption = workflow.run(f.context, 'adopt');
+  let refused;
+  try {
+    await gate.until(adoption);
+    let mutated = false;
+    const old = store.update('gone-coordinator', () => { mutated = true; });
+    refused = assert.rejects(old, /coordinator permission required/);
+    gate.release(); assert.equal((await adoption).ok, true); await refused;
+    assert.equal(mutated, false); assert.equal((await f.board.parsed()).multiplexer, 'herdr');
+  } finally {
+    // Release and drain before t.after removes the board, even if an assertion fails.
+    gate.release(); await Promise.allSettled([adoption, refused]);
+  }
 });
 
-test('outer queue precedes local filesystem acquisition, which precedes mutation', async t => {
+test('outer queue precedes local filesystem acquisition, which precedes mutation', { timeout: 30_000 }, async t => {
   const f = await fixture(); t.after(f.dispose); const gate = barrier(), order = [];
   class QueuedStore extends ConfigStore {
     async outerQueue(run) { await gate.wait(); order.push('outer'); return run(); }
@@ -115,8 +122,12 @@ test('outer queue precedes local filesystem acquisition, which precedes mutation
     assert.equal((await lstat(store.lockDirectory)).isDirectory(), true);
     order.push('mutate'); config.multiplexer = 'none';
   });
-  await gate.reached; await assert.rejects(lstat(store.lockDirectory), { code: 'ENOENT' });
-  gate.release(); await pending; assert.deepEqual(order, ['outer', 'mutate']);
+  try {
+    await gate.until(pending); await assert.rejects(lstat(store.lockDirectory), { code: 'ENOENT' });
+    gate.release(); await pending; assert.deepEqual(order, ['outer', 'mutate']);
+  } finally {
+    gate.release(); await Promise.allSettled([pending]);
+  }
 });
 
 test('supported repeated invocation binds confirmation to UUID/hash and timestamps after the yes', async t => {

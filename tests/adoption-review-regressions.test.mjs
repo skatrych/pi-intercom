@@ -200,7 +200,7 @@ for (const fault of ['missing', 'unreadable', 'schema', 'foreign']) test(`ordina
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   await saveWorkerReport(f.home, prior); c.pauseReport = true;
   const oldReport = b.track(r.receive({ ...statusMessage, kind: 'report', payload: payloads.report[1] })); await b.reportGate.reached;
-  const before = await f.board.read(), swaps = c.renames, epoch = r.actionEpoch(); r.reminders.arm();
+  const before = await f.board.read(), swaps = c.renames, epoch = r.actionEpoch(); // the loop armed itself at ready startup
   c.pauseRead = true; c.holdRelease = true;
   const pending = b.track(r.receive(statusMessage)); await b.readGate.reached;
   if (fault === 'missing') await unlink(r.store.file);
@@ -223,7 +223,7 @@ test('final store authority closes BEFORE temp cleanup when the newest claim is 
   const b = await boundaryFixture(t), { f, runtime: r, c } = b;
   const before = await f.board.read(), claim = await f.claim.read(), oldPort = r.endpoint.port, responsibility = r.responsibility, swaps = c.renames;
   const oldGit = process.env.GIT_DIR; t.after(() => { if (oldGit === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = oldGit; });
-  c.holdCleanup = true; r.reminders.arm();
+  c.holdCleanup = true; // the loop armed itself at ready startup
   c.stage = async () => {
     if (fault === 'malformed') await f.claim.write('malformed at final store boundary\n');
     if (fault === 'missing') await unlink(f.claimPath());
@@ -363,7 +363,7 @@ test('Windows simulated retry repeats local/store proof before another rename; c
     backoffs++; const raw = await b.f.claim.read(); await b.f.claim.write('malformed during EPERM backoff\n'); await b.f.claim.commit(); await b.f.claim.write(raw);
   } });
   const { f, runtime: r, c } = b, before = await f.board.read(), attempts = c.renames;
-  c.holdCleanup = true; c.renameAction = async () => { throw Object.assign(Error('fixture reader EPERM'), { code: 'EPERM' }); }; r.reminders.arm();
+  c.holdCleanup = true; c.renameAction = async () => { throw Object.assign(Error('fixture reader EPERM'), { code: 'EPERM' }); };
   const pending = b.track(r.tool('set_multiplexer', { multiplexer: 'none' })); await b.cleanupGate.reached;
   assert.equal(r.coordinatorActionReady(), false); assert.equal(c.stopped, 1); assert.equal(c.renames, attempts + 1); assert.equal(backoffs, 1); assert.equal(c.mutations, 1);
   assert.equal(await f.board.read(), before); c.holdCleanup = false; b.cleanupGate.release(); await assert.rejects(pending, /ADOPTION_NOT_READY/);

@@ -5,14 +5,15 @@
 // Pi worker, model turn, or cancellation is involved.
 
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const dist = async name => import(path.join(ROOT, 'dist', name));
+// Windows-safe ESM specifier: bare absolute paths (C:\...) are parsed as URL schemes.
+const dist = async name => import(pathToFileURL(path.join(ROOT, 'dist', name)).href);
 const execute = promisify(execFile);
 
 export const IDS = { gone: 'gone-coordinator', fresh: 'fresh-orchestrator', workerOne: 'worker-one', workerTwo: 'worker-two', other: 'another-session' };
@@ -144,7 +145,10 @@ export async function createFixture(options = {}) {
   const { renderClaim } = await dist('adoption.js');
   const { listen } = await dist('transport.js');
   const { probeWorker } = await dist('connections.js');
-  const home = options.home ?? await mkdtemp(path.join(tmpdir(), 'intercom-adopt-'));
+  // os.tmpdir() can contain an 8.3 alias on Windows (or a symlink on Unix). The
+  // positive fixture must use the same canonical home as the production safety gates.
+  // Explicit homes remain untouched so negative alias fixtures can still exercise refusal.
+  const home = options.home ?? await realpath(await mkdtemp(path.join(tmpdir(), 'intercom-adopt-')));
   const sessions = path.join(home, '.pi/default-sessions');
   const endpoints = [];
   const removed = [];
