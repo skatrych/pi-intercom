@@ -445,3 +445,87 @@ test('R4: IGNORE_TERM fixture self-exits under stock test (no FAKE_CLI_SELF_EXIT
   await result.unresolved;
   assert.ok(Date.now() - started < 2000, 'default 900ms self-exit must complete without an external sweeper');
 });
+
+// --- Re-review REQUEST CHANGES regressions (B1–B2 on 79868f5) ---
+
+test('B1: later abort or deadline after linger invalidates success (incl. Bridge.close)', { skip }, async t => {
+  // success → linger SIGTERM → delayed exit 0; abort after linger must not report ok
+  const ac = new AbortController();
+  const aborted = runTurn(cursor, { prompt: 'LINGER_DELAYED_EXIT0 abort-order', cwd: process.cwd() }, {
+    bin: FAKE, timeoutMs: 5000, settleMs: 800, lingerMs: 40,
+    env: { ...process.env, FAKE_CLI_DELAYED_EXIT_MS: '350' },
+    signal: ac.signal,
+  });
+  await new Promise(r => setTimeout(r, 120)); // after linger SIGTERM, before delayed exit 0
+  ac.abort();
+  const abortResult = await aborted;
+  assert.equal(abortResult.ok, false, 'abort after linger must not promote delayed exit 0 to success');
+  assert.match(abortResult.error, /aborted|shutting down/);
+
+  // same ordering with turn deadline instead of abort
+  const deadline = await runTurn(cursor, { prompt: 'LINGER_DELAYED_EXIT0 deadline-order', cwd: process.cwd() }, {
+    bin: FAKE, timeoutMs: 180, settleMs: 800, lingerMs: 40,
+    env: { ...process.env, FAKE_CLI_DELAYED_EXIT_MS: '400' },
+  });
+  assert.equal(deadline.ok, false, 'deadline after linger must not promote delayed exit 0 to success');
+  assert.match(deadline.error, /timed out after 180 ms/);
+
+  // Supported control: linger without later abort/deadline still succeeds
+  const okLinger = await runTurn(agy, { prompt: 'LINGER supported control', cwd: process.cwd() }, {
+    bin: FAKE, timeoutMs: 5000, settleMs: 500, lingerMs: 40,
+  });
+  assert.equal(okLinger.ok, true);
+
+  // Actual Bridge.close() after linger: report must be blocked, not ready_for_review
+  const ctx = await board(t);
+  const b = ctx.bridge(cursor, {
+    turnTimeoutMs: 5000, settleMs: 800, lingerMs: 40,
+    env: { ...process.env, FAKE_CLI_LOG: path.join(ctx.root, 'fake.log'), FAKE_CLI_DELAYED_EXIT_MS: '400' },
+  });
+  await enlist(b, ctx, 'B1Close');
+  await ctx.coordinator.tool('send', { to: 'B1Close', message: 'LINGER_DELAYED_EXIT0 then close' });
+  await new Promise(r => setTimeout(r, 120)); // linger stop has fired; delayed exit still pending
+  await b.close();
+  await until(() => ctx.wire.some(m => m.kind === 'report'), 'close-path report', 5000);
+  const reports = ctx.wire.filter(m => m.kind === 'report');
+  assert.ok(reports.length >= 1);
+  assert.equal(reports.every(m => m.payload.status === 'blocked'), true, 'Bridge.close after linger must not report ready_for_review');
+  assert.ok(reports.some(m => String(m.payload.summary).includes('aborted') || String(m.payload.summary).includes('shutting down')));
+});
+
+test('B2: failed first-ID publish fences next turn and restart (no silent fresh chat)', { skip }, async t => {
+  const ctx = await board(t);
+  const stateDir = path.join(ctx.root, 'state');
+  const sessionId = 'b2-save-fail-worker';
+  const b = ctx.bridge(cursor, { sessionId, stateDir });
+  await enlist(b, ctx, 'B2SaveFail');
+  const mapPath = path.join(stateDir, 'b2-save-fail-worker.json');
+  // Obstruct the saveState temp path (keeps the valid ID-less state file intact — review repro).
+  const tempObstruction = `${mapPath}.${process.pid}.tmp`;
+  await mkdir(tempObstruction);
+
+  await ctx.coordinator.tool('send', { to: 'B2SaveFail', message: 'first bind should fail persist' });
+  await until(() => ctx.messages.find(m => m.includes('Report: blocked') && m.includes('failed to persist')), 'persist blocked', 8000);
+  assert.equal(b.cliSessionId, undefined, 'in-memory ID must not be accepted when save failed');
+
+  // Remove only the publication obstruction.
+  await rm(tempObstruction, { recursive: true, force: true });
+
+  // (a) Second instruction same process must not spawn a fresh chat / report ready.
+  const before = (await ctx.argv()).length;
+  await ctx.coordinator.tool('send', { to: 'B2SaveFail', message: 'second must stay fenced' });
+  await until(() => ctx.messages.find(m => m.includes('Report: blocked') && m.includes('continuity bind previously failed')), 'second fenced', 8000);
+  const after = await ctx.argv();
+  assert.equal(after.filter(e => JSON.stringify(e.argv).includes('second must stay fenced')).length, 0,
+    'fenced turn must not spawn CLI');
+  assert.equal(after.length, before, 'no additional CLI spawn after continuity fence');
+
+  // (b) Clean close/restart same identity must refuse (not launch without --resume).
+  await b.close();
+  const again = ctx.bridge(cursor, { sessionId, stateDir });
+  await assert.rejects(again.start(), /continuity bind previously failed|refusing fresh-chat/);
+
+  // Genuine first-use ENOENT still creates mapping (no marker).
+  const fresh = ctx.bridge(cursor, { sessionId: 'b2-brand-new-first-use', stateDir: path.join(ctx.root, 'b2-fresh-state') });
+  await fresh.start();
+});

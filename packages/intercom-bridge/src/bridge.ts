@@ -8,7 +8,7 @@ import path from 'node:path';
 import { type Adapter } from './adapters.js';
 import { coordinatorOf, entryOf, fencedClose, projectDirectory, readBoard, type Agent } from './board.js';
 import { runTurn } from './runner.js';
-import { acquireOwnership, loadState, saveState, type BridgeState } from './state.js';
+import { acquireOwnership, clearContinuityBlocked, hasContinuityBlocked, loadState, markContinuityBlocked, saveState, type BridgeState } from './state.js';
 import { clip, fail, fitEnvelope, listen, MESSAGE_LIMIT, send, SUMMARY_LIMIT, type Endpoint, type Envelope, type Kind, type ReportStatus } from './wire.js';
 
 export interface BridgeOptions {
@@ -25,6 +25,8 @@ export interface BridgeOptions {
   turnTimeoutMs?: number;
   /** Bound child settlement after SIGTERM; see runner. */
   settleMs?: number;
+  /** After a terminal CLI result, how long to wait before linger SIGTERM; see runner. */
+  lingerMs?: number;
   stateDir: string;
   port?: number;
   maxQueue?: number;
@@ -50,6 +52,8 @@ export class Bridge {
   private releaseOwnership?: () => Promise<void>;
   /** CLI child that ignored SIGTERM past settleMs; blocks next turn and ownership release until exit. */
   private unresolvedChild?: Promise<void>;
+  /** First CLI ID publication failed under this identity; fence fresh-chat until bind or new identity. */
+  private continuityBlocked = false;
   private readonly log: (line: string) => void;
 
   constructor(readonly options: BridgeOptions) {
@@ -75,6 +79,14 @@ export class Bridge {
       if (!saved && known) {
         fail(`bridge state missing for configured worker ${this.sessionId}; refusing silent remap (restore state or use a new identity)`);
       }
+      // Prior failed first-ID publication: do not resume as a fresh chat under the same identity (B2).
+      // Genuine first-use ENOENT has no marker. Recovery: bind a cliSessionId mapping and clear the
+      // marker, or choose a new worker identity.
+      const blockedMarker = await hasContinuityBlocked(this.options.stateDir, this.sessionId);
+      if (blockedMarker && !saved?.cliSessionId) {
+        fail(`continuity bind previously failed for ${this.sessionId}; refusing fresh-chat continuation (restore a bound mapping and clear the continuity-blocked marker, or use a new identity)`);
+      }
+      this.continuityBlocked = blockedMarker && !saved?.cliSessionId;
       this.state = saved ?? { version: 1, agent: this.options.adapter.name, sessionId: this.sessionId };
       await saveState(this.options.stateDir, this.state);
       this.endpoint = await listen(this.options.port ?? known?.port, m => this.receive(m), () => ({ version: 1, sessionId: this.sessionId }));
@@ -182,6 +194,14 @@ export class Bridge {
         .catch(e => this.log(`result delivery failed; no retry: ${String(e)}`));
       return;
     }
+    // Same-process / durable fence after failed first-ID publication (B2).
+    if (this.continuityBlocked || (!this.state.cliSessionId && await hasContinuityBlocked(this.options.stateDir, this.sessionId))) {
+      this.continuityBlocked = true;
+      this.log('turn aborted before spawn: continuity bind previously failed; refusing fresh-chat continuation');
+      await this.deliver(work, false, `${this.options.adapter.name} turn failed: continuity bind previously failed; refusing fresh-chat continuation under this identity`)
+        .catch(e => this.log(`result delivery failed; no retry: ${String(e)}`));
+      return;
+    }
     this.load(me);
     const prompt = this.prompt(work, sender);
     let result = await runTurn(this.options.adapter, {
@@ -191,6 +211,7 @@ export class Bridge {
       bin: this.options.bin ?? this.options.adapter.defaultBin,
       timeoutMs: this.options.turnTimeoutMs ?? 30 * 60_000,
       settleMs: this.options.settleMs,
+      lingerMs: this.options.lingerMs,
       env: this.options.env,
       signal: this.abort.signal,
     });
@@ -214,7 +235,13 @@ export class Bridge {
           const next = { ...this.state, cliSessionId: result.cliSessionId };
           await saveState(this.options.stateDir, next);
           this.state = next;
+          this.continuityBlocked = false;
+          await clearContinuityBlocked(this.options.stateDir, this.sessionId);
         } catch (e) {
+          // Fence this identity against silent fresh-chat continuation (in-process and across restart).
+          this.continuityBlocked = true;
+          await markContinuityBlocked(this.options.stateDir, this.sessionId).catch(err =>
+            this.log(`continuity-blocked marker write failed: ${String(err)}`));
           result = {
             ok: false, text: result.text, cliSessionId: result.cliSessionId,
             error: `failed to persist CLI conversation ID; refusing to establish restart continuity (${e instanceof Error ? e.message : String(e)})`,

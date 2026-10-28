@@ -3,9 +3,10 @@
 // shapes. Prompt markers select behavior: FAIL (auth-style exit 1), LONG (3000-char answer),
 // LINGER (agy: stays alive after its result), HANG (never answers), IGNORE_TERM (ignore SIGTERM),
 // SUCCESS_IGNORE_TERM (success JSON then ignore SIGTERM), LINGER_EXIT9 (success, SIGTERM → exit 9),
-// EXIT9 (success JSON then exit 9), DRIFT_ID (return a different session than --resume),
-// NO_ID (success without conversation id), SECRET_STDERR (token on stderr then fail),
-// BAD_CONTENT (assistant content that makes the parser throw), CJK_HUGE (large multibyte result).
+// LINGER_DELAYED_EXIT0 (success, SIGTERM → exit 0 after delay; B1 ordering), EXIT9 (success JSON then exit 9),
+// DRIFT_ID (return a different session than --resume), NO_ID (success without conversation id),
+// SECRET_STDERR (token on stderr then fail), BAD_CONTENT (assistant content that makes the parser throw),
+// CJK_HUGE (large multibyte result).
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 const argv = process.argv.slice(2);
@@ -67,6 +68,12 @@ if (prompt.includes('IGNORE_TERM') && !prompt.includes('SUCCESS_IGNORE_TERM')) {
   } else if (prompt.includes('LINGER_EXIT9')) {
     // Stay alive until SIGTERM, then exit 9 within the observation window (R1).
     process.on('SIGTERM', () => process.exit(9));
+    setInterval(() => {}, 1000);
+  } else if (prompt.includes('LINGER_DELAYED_EXIT0')) {
+    // Success, then on first SIGTERM schedule a delayed clean exit (B1: later abort/deadline must still block).
+    const delay = Number(process.env.FAKE_CLI_DELAYED_EXIT_MS);
+    const ms = Number.isFinite(delay) && delay > 0 ? delay : 300;
+    process.on('SIGTERM', () => { setTimeout(() => process.exit(0), ms); });
     setInterval(() => {}, 1000);
   } else if (prompt.includes('LINGER')) {
     setInterval(() => {}, 1000);

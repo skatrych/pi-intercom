@@ -23,3 +23,11 @@ Real smoke run: `node packages/intercom-bridge/scripts/smoke.mjs cursor`.
 Live Pi coordinator run (tmux, OpenRouter key file read into the pi process env only):
 `OPENROUTER_KEY_FILE=<file> node packages/intercom-bridge/scripts/live-pi-smoke.mjs <model> <log>`.
 Sanitized logs are in [`smoke/`](smoke/).
+
+## Lifecycle limits
+
+Cancellation is soft (`SIGTERM` only, no `SIGKILL`). After settle, an **unresolved child that never
+exits** can keep the instruction pump and `Bridge.close()` waiting indefinitely while exclusive
+ownership is held. That wait is intentional (truthful ownership / no silent identity reuse); it is
+not a bounded-shutdown or process-tree termination guarantee. Operators must stop such children
+out-of-band if needed.
