@@ -11,15 +11,21 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return new ConfigStore(root);
 }
-const worker = (id = 'worker', name = 'Builder') => ({ sessionId: id, name, port: 12345, description: 'Build only assigned work', projectDirectory: '.' });
+/** The captured runtime pair an ordinary writer must carry (ADR 0025). Never an id alone. */
+const caller = (sessionId = 'coordinator', port = 12345) => ({ sessionId, port });
+const worker = (id = 'worker', name = 'Builder') => ({ sessionId: id, name, port: 12346, description: 'Build only assigned work', projectDirectory: '.' });
+const BOARD_FILES = ['config.json', 'config.lock'];
+
 test('atomic first creation publishes complete config: exactly one winner', async t => {
   const s = await fixture(t);
-  const results = await Promise.all(Array.from({ length: 12 }, (_, i) => new ConfigStore(s.root).initialize(`session-${i}`, 12345)));
+  const results = await Promise.all(Array.from({ length: 12 }, (_, i) => new ConfigStore(s.root).initialize(caller(`session-${i}`))));
   assert.equal(results.filter(Boolean).length, 1);
   assert.equal((await s.read()).agents.length, 1);
+  // The permanent guard survives every writer and is never unlinked by publication.
+  assert.deepEqual((await readdir(path.dirname(s.file))).sort(), BOARD_FILES);
 });
 test('exact-root discovery, ancestor-root admission and invalid config preservation', async t => {
-  const s = await fixture(t); await s.initialize('coordinator', 12345);
+  const s = await fixture(t); await s.initialize(caller());
   const child = path.join(s.root, 'a', 'b'); await mkdir(child, { recursive: true });
   assert.equal(await ConfigStore.discover(child), undefined);
   // An explicit board root may be the session cwd or one of its ancestors; discovery still stops below it.
@@ -35,24 +41,35 @@ test('exact-root discovery, ancestor-root admission and invalid config preservat
   await assert.rejects(ConfigStore.workspace(child, s.root));
   await assert.rejects(ConfigStore.workspace(s.root, s.root));
   await assert.rejects(ConfigStore.workspace(s.root, child), /one of its ancestors/);
-  await assert.rejects(s.update('coordinator', c => c.agents.pop()));
+  await assert.rejects(s.update(caller(), c => c.agents.pop()));
   assert.equal(await readFile(s.file, 'utf8'), '{broken');
 });
+test('ordinary writes require the exact current coordinator pair, not just the session id', async t => {
+  const s = await fixture(t); await s.initialize(caller());
+  await assert.rejects(s.update(caller('unknown'), c => { c.multiplexer = 'none'; }), /coordinator permission required/);
+  // Same session id, different bound port: the pair is the authority, so this is a refusal, not a repair.
+  await assert.rejects(s.update(caller('coordinator', 59999), c => { c.multiplexer = 'none'; }), /does not match the board/);
+  const before = await readFile(s.file, 'utf8');
+  assert.equal(await readFile(s.file, 'utf8'), before);
+  await assert.rejects(s.configure(caller('coordinator', 59999), worker()), /does not match the board/);
+  await s.update(caller(), c => { c.multiplexer = 'none'; });
+  assert.equal((await s.read()).multiplexer, 'none');
+});
 test('coordinator writes only, unique case-insensitive names, serialized writes', async t => {
-  const s = await fixture(t); await s.initialize('coordinator', 12345);
-  await assert.rejects(s.configure('unknown', worker()), /permission/);
-  await s.configure('coordinator', worker());
+  const s = await fixture(t); await s.initialize(caller());
+  await assert.rejects(s.configure(caller('unknown'), worker()), /permission/);
+  await s.configure(caller(), worker());
   assert.equal(named(await s.read(), 'bUiLdEr').name, 'Builder');
-  await assert.rejects(s.configure('coordinator', worker('other', 'builder')), /duplicate/);
-  await assert.rejects(s.configure('coordinator', worker('other', 'COORDINATOR')), /duplicate|reserved/);
-  await s.configure('coordinator', worker());
-  await Promise.all(Array.from({ length: 20 }, (_, i) => s.configure('coordinator', worker(`w${i}`, `Worker${i}`))));
+  await assert.rejects(s.configure(caller(), worker('other', 'builder')), /duplicate/);
+  await assert.rejects(s.configure(caller(), worker('other', 'COORDINATOR')), /duplicate|reserved/);
+  await s.configure(caller(), worker());
+  await Promise.all(Array.from({ length: 20 }, (_, i) => s.configure(caller(), worker(`w${i}`, `Worker${i}`))));
   assert.equal((await s.read()).agents.length, 22);
-  await assert.rejects(s.configure('coordinator', worker('coordinator')), /coordinator/);
+  await assert.rejects(s.configure(caller(), worker('coordinator')), /coordinator/);
 });
 test('worker role round-trips as a logical name and legacy workers stay valid', async t => {
-  const s = await fixture(t); await s.initialize('c', 12345);
-  await s.configure('c', worker());
+  const s = await fixture(t); await s.initialize(caller('c'));
+  await s.configure(caller('c'), worker());
   const saved = await s.read();
   assert.equal(saved.agents[1].role, undefined);
   assert.equal(saved.roles, undefined);
@@ -65,14 +82,14 @@ test('worker role round-trips as a logical name and legacy workers stay valid', 
   for (const role of ['sessions', 'credentials', 'auth.json', 'history', 'cache', 'a'.repeat(65)]) {
     assert.throws(() => validateConfig({ ...saved, agents: [...saved.agents, { ...worker(`bad-${role}`, `Bad-${role}`), coordinator: false, role }] }), /invalid role/);
   }
-  await s.configure('c', { ...worker('w2', 'Other'), role: 'developer' });
-  await s.configure('c', worker('w2', 'Renamed'));
+  await s.configure(caller('c'), { ...worker('w2', 'Other'), role: 'developer' });
+  await s.configure(caller('c'), worker('w2', 'Renamed'));
   const kept = (await s.read()).agents.find(agent => agent.sessionId === 'w2');
   assert.equal(kept.role, 'developer');
   assert.equal(kept.name, 'Renamed');
 });
 test('schema rejects malformed version, port, duplicate IDs, traversal', async t => {
-  const s = await fixture(t); await s.initialize('c', 12345);
+  const s = await fixture(t); await s.initialize(caller('c'));
   const c = await s.read();
   for (const patch of [{ version: 2 }, { multiplexer: 'tmux' }, { agents: [] }]) assert.throws(() => validateConfig({ ...c, ...patch }));
   for (const patch of [{ port: 0 }, { projectDirectory: '../elsewhere' }, { name: 'bad\nname' }]) {
@@ -81,8 +98,8 @@ test('schema rejects malformed version, port, duplicate IDs, traversal', async t
   assert.throws(() => envelope({ version: 1, kind: 'status', from: 'w', to: 'c', payload: { port: 1, busy: 'yes' } }));
 });
 test('optional dashboardPort accepts legacy/coordinator entries and rejects invalid or worker values without repair', async t => {
-  const s = await fixture(t); await s.initialize('c', 12345);
-  await s.configure('c', worker());
+  const s = await fixture(t); await s.initialize(caller('c'));
+  await s.configure(caller('c'), worker());
   const original = await s.read();
   assert.equal(validateConfig(original).agents[0].dashboardPort, undefined);
   for (const value of [1, 65535]) {
@@ -93,11 +110,11 @@ test('optional dashboardPort accepts legacy/coordinator entries and rejects inva
     const candidate = structuredClone(original); candidate.agents[0].dashboardPort = value;
     assert.throws(() => validateConfig(candidate), /invalid port/);
   }
-  const invalidWorker = structuredClone(original); invalidWorker.agents[1].dashboardPort = 12345;
+  const invalidWorker = structuredClone(original); invalidWorker.agents[1].dashboardPort = 12346;
   assert.throws(() => validateConfig(invalidWorker), /coordinator-only/);
   const invalidJson = JSON.stringify(invalidWorker);
   await writeFile(s.file, invalidJson);
-  await assert.rejects(s.update('c', c => { c.agents[0].dashboardPort = 54321; }), /coordinator-only/);
+  await assert.rejects(s.update(caller('c'), c => { c.agents[0].dashboardPort = 54321; }), /coordinator-only/);
   assert.equal(await readFile(s.file, 'utf8'), invalidJson);
 });
 test('loopback receipt, port fallback, rejection, body bound and no retry', async t => {
@@ -117,7 +134,7 @@ test('loopback receipt, port fallback, rejection, body bound and no retry', asyn
 });
 test('temporary write/sync/close failures preserve the original error and remove partial files', async t => {
   const base = await fixture(t);
-  await base.initialize('c', 12345);
+  await base.initialize(caller('c'));
   const original = await readFile(base.file, 'utf8');
   for (const stage of ['writeFile', 'sync', 'close']) {
     const failure = new Error(`injected ${stage} failure`);
@@ -132,22 +149,23 @@ test('temporary write/sync/close failures preserve the original error and remove
       }
     }
     const store = new FaultStore(base.root);
-    for (const operation of [() => store.update('c', c => { c.multiplexer = 'none'; }), () => store.initialize('other', 12346)]) {
+    for (const operation of [() => store.update(caller('c'), c => { c.multiplexer = 'none'; }), () => store.initialize(caller('other', 12346))]) {
       await assert.rejects(operation(), error => error === failure);
       assert.equal(await readFile(base.file, 'utf8'), original);
-      assert.deepEqual(await readdir(path.dirname(base.file)), ['config.json']);
+      // Only the permanent guard and the config remain: this call's own temp was removed.
+      assert.deepEqual((await readdir(path.dirname(base.file))).sort(), BOARD_FILES);
     }
   }
 });
 test('lifecycle guard rejects queued mutation and rejects publication after temporary creation', async t => {
-  const s = await fixture(t); await s.initialize('c', 12345);
+  const s = await fixture(t); await s.initialize(caller('c'));
   const original = await readFile(s.file, 'utf8');
   let valid = true, mutated = false, release, entered;
   const started = new Promise(resolve => { entered = resolve; });
-  const blocker = s.update('c', async () => { entered(); await new Promise(resolve => { release = resolve; }); });
+  const blocker = s.update(caller('c'), async () => { entered(); await new Promise(resolve => { release = resolve; }); });
   await started;
   const guard = () => { if (!valid) throw new Error('lifecycle invalid'); };
-  const queued = s.update('c', () => { mutated = true; }, guard);
+  const queued = s.update(caller('c'), () => { mutated = true; }, guard);
   const rejected = assert.rejects(queued, /lifecycle invalid/);
   valid = false; release(); await blocker; await rejected;
   assert.equal(mutated, false);
@@ -159,11 +177,11 @@ test('lifecycle guard rejects queued mutation and rejects publication after temp
   }
   const store = new InvalidateOnClose(s.root);
   valid = true;
-  await assert.rejects(store.update('c', c => { c.multiplexer = 'none'; }, guard), /lifecycle invalid/);
+  await assert.rejects(store.update(caller('c'), c => { c.multiplexer = 'none'; }, guard), /lifecycle invalid/);
   valid = true;
-  await assert.rejects(store.initialize('other', 12346, guard), /lifecycle invalid/);
+  await assert.rejects(store.initialize(caller('other', 12346), guard), /lifecycle invalid/);
   assert.equal(await readFile(s.file, 'utf8'), original);
-  assert.deepEqual(await readdir(path.dirname(s.file)), ['config.json']);
+  assert.deepEqual((await readdir(path.dirname(s.file))).sort(), BOARD_FILES);
 });
 test('receipt deadline bounds a stalled receiver and never retries', async t => {
   let count = 0;

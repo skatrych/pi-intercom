@@ -35,7 +35,7 @@ function noResources(events) {
 test('valid and malformed ancestor configs are ignored; fresh sessions initialize only exact cwd', async t => {
   for (const malformed of [false, true]) {
     const f = await fixture(t), ancestor = new ConfigStore(f.root);
-    await ancestor.initialize('ancestor', 12345);
+    await ancestor.initialize({ sessionId: 'ancestor', port: 12345 });
     if (malformed) await writeFile(ancestor.file, '{malformed ancestor');
     const before = await readFile(ancestor.file, 'utf8');
     assert.equal(await ConfigStore.discover(f.child), undefined);
@@ -47,13 +47,13 @@ test('valid and malformed ancestor configs are ignored; fresh sessions initializ
     assert.deepEqual(events.observers, [await realpath(f.child)]);
     assert.deepEqual(events.listens, [undefined]); assert.deepEqual(events.sends, []);
     assert.equal(await readFile(ancestor.file, 'utf8'), before);
-    assert.deepEqual(await readdir(path.dirname(ancestor.file)), ['config.json']);
+    assert.deepEqual((await readdir(path.dirname(ancestor.file))).sort(), ['config.json', 'config.lock']);
   }
 });
 
 test('local config is used; malformed local config rejects without ancestor fallback or startup resources', async t => {
-  const f = await fixture(t); await new ConfigStore(f.root).initialize('ancestor', 12345);
-  const local = new ConfigStore(f.child); await local.initialize('local', 23456);
+  const f = await fixture(t); await new ConfigStore(f.root).initialize({ sessionId: 'ancestor', port: 12345 });
+  const local = new ConfigStore(f.child); await local.initialize({ sessionId: 'local', port: 23456 });
   assert.equal((await ConfigStore.discover(f.child)).root, await realpath(f.child));
   const good = runtime(t, f.child); await good.instance.start();
   assert.deepEqual(good.events.listens, [23456]); await good.instance.close();
@@ -64,8 +64,8 @@ test('local config is used; malformed local config rejects without ancestor fall
 
 test('explicit ancestor root is admitted: it binds the ancestor board and never the child config', async t => {
   const f = await fixture(t), parent = new ConfigStore(f.root);
-  await parent.initialize('coordinator', 12345);
-  await parent.configure('coordinator', { sessionId: 'worker', name: 'Worker', description: 'Scoped work', port: 23456, projectDirectory: 'nested/worker' });
+  await parent.initialize({ sessionId: 'coordinator', port: 12345 });
+  await parent.configure({ sessionId: 'coordinator', port: 12345 }, { sessionId: 'worker', name: 'Worker', description: 'Scoped work', port: 23456, projectDirectory: 'nested/worker' });
   const childMetadata = path.join(f.child, '.pi-intercom');
   await mkdir(childMetadata); await writeFile(path.join(childMetadata, 'config.json'), '{nested unrelated');
   const before = await readFile(parent.file, 'utf8');
@@ -77,12 +77,13 @@ test('explicit ancestor root is admitted: it binds the ancestor board and never 
   assert.deepEqual(events.listens, [23456]); assert.equal(events.sends[0].port, 12345); assert.equal(events.sends[0].message.kind, 'status');
   assert.equal(await readFile(parent.file, 'utf8'), before);
   assert.equal(await readFile(path.join(childMetadata, 'config.json'), 'utf8'), '{nested unrelated');
+  // The child board was never opened by this runtime: no guard file appears there.
   assert.deepEqual(await readdir(childMetadata), ['config.json']);
 });
 
 test('explicit ancestor board that is malformed rejects before any listener, write or child fallback', async t => {
   const f = await fixture(t), parent = new ConfigStore(f.root);
-  await parent.initialize('coordinator', 12345);
+  await parent.initialize({ sessionId: 'coordinator', port: 12345 });
   await writeFile(parent.file, '{malformed parent');
   const childMetadata = path.join(f.child, '.pi-intercom');
   await mkdir(childMetadata); await writeFile(path.join(childMetadata, 'config.json'), '{nested unrelated');
@@ -91,14 +92,15 @@ test('explicit ancestor board that is malformed rejects before any listener, wri
   noResources(events);
   assert.equal(await readFile(parent.file, 'utf8'), '{malformed parent');
   assert.equal(await readFile(path.join(childMetadata, 'config.json'), 'utf8'), '{nested unrelated');
+  // The child board was never opened by this runtime: no guard file appears there.
   assert.deepEqual(await readdir(childMetadata), ['config.json']);
 });
 
 test('explicit unrelated root still rejects before any config read, startup resource or write', async t => {
   const f = await fixture(t), outside = new ConfigStore(f.outside);
-  await outside.initialize('outside-coordinator', 12345);
+  await outside.initialize({ sessionId: 'outside-coordinator', port: 12345 });
   const before = await readFile(outside.file, 'utf8');
-  await new ConfigStore(f.child).initialize('local', 23456); // Must not become a fallback.
+  await new ConfigStore(f.child).initialize({ sessionId: 'local', port: 23456 }); // Must not become a fallback.
   const read = ConfigStore.prototype.read;
   let configReads = 0;
   ConfigStore.prototype.read = async function () { configReads++; return read.call(this); };
@@ -111,8 +113,8 @@ test('explicit unrelated root still rejects before any config read, startup reso
 
 test('explicit same-cwd worker uses only its local root config', async t => {
   const f = await fixture(t), local = new ConfigStore(f.child);
-  await local.initialize('coordinator', 12345);
-  await local.configure('coordinator', { sessionId: 'worker', name: 'Worker', description: 'Scoped work', port: 23456, projectDirectory: '.' });
+  await local.initialize({ sessionId: 'coordinator', port: 12345 });
+  await local.configure({ sessionId: 'coordinator', port: 12345 }, { sessionId: 'worker', name: 'Worker', description: 'Scoped work', port: 23456, projectDirectory: '.' });
   const { instance, events } = runtime(t, f.child, { workspaceRoot: f.child }, 'worker');
   await instance.start();
   assert.equal(instance.store.root, await realpath(f.child)); assert.equal((await instance.state()).me.name, 'Worker');
@@ -122,7 +124,7 @@ test('explicit same-cwd worker uses only its local root config', async t => {
 
 test('explicit root missing config, malformed config, sibling-prefix escape and file root reject before resources', async t => {
   const f = await fixture(t);
-  await new ConfigStore(f.child).initialize('local', 23456); // Must not be a fallback.
+  await new ConfigStore(f.child).initialize({ sessionId: 'local', port: 23456 }); // Must not be a fallback.
   for (const root of [f.root, f.outside, path.join(f.base, 'missing')]) {
     const { instance, events } = runtime(t, root === f.root ? f.root : f.child, { workspaceRoot: root });
     await assert.rejects(instance.start()); noResources(events);
@@ -136,28 +138,28 @@ test('explicit root missing config, malformed config, sibling-prefix escape and 
 });
 
 test('escaping metadata junction/symlink rejects read/init/update and runtime before any outside writes', async t => {
-  const f = await fixture(t), outside = new ConfigStore(f.outside); await outside.initialize('outside', 12345);
+  const f = await fixture(t), outside = new ConfigStore(f.outside); await outside.initialize({ sessionId: 'outside', port: 12345 });
   const before = await readFile(outside.file, 'utf8');
   await symlink(path.dirname(outside.file), path.join(f.root, '.pi-intercom'), process.platform === 'win32' ? 'junction' : 'dir');
   const escaped = new ConfigStore(f.root);
   await assert.rejects(escaped.read(), /escapes session root/);
-  await assert.rejects(escaped.initialize('new', 23456), /escapes session root/);
-  await assert.rejects(escaped.update('outside', c => { c.agents[0].port = 23456; }), /escapes session root/);
+  await assert.rejects(escaped.initialize({ sessionId: 'new', port: 23456 }), /escapes session root/);
+  await assert.rejects(escaped.update({ sessionId: 'update', port: 12345 }, c => { c.agents[0].port = 23456; }), /escapes session root/);
   const bad = runtime(t, f.root); await assert.rejects(bad.instance.start(), /escapes session root/); noResources(bad.events);
   assert.equal(await readFile(outside.file, 'utf8'), before);
-  assert.deepEqual(await readdir(path.dirname(outside.file)), ['config.json']);
+  assert.deepEqual((await readdir(path.dirname(outside.file))).sort(), ['config.json', 'config.lock']);
 });
 
 test('dangling metadata link is not treated as a missing config eligible for initialization', async t => {
   const f = await fixture(t);
   await symlink(path.join(f.outside, 'missing'), path.join(f.root, '.pi-intercom'), process.platform === 'win32' ? 'junction' : 'dir');
   const bad = runtime(t, f.root); await assert.rejects(bad.instance.start(), /cannot be resolved safely/); noResources(bad.events);
-  await assert.rejects(new ConfigStore(f.root).initialize('local', 23456), /cannot be resolved safely/);
+  await assert.rejects(new ConfigStore(f.root).initialize({ sessionId: 'local', port: 23456 }), /cannot be resolved safely/);
   assert.deepEqual(await readdir(f.outside), []);
 });
 
 test('explicit cwd symlink/junction outside root rejects; canonical root aliases and internal metadata links work', async t => {
-  const f = await fixture(t); await new ConfigStore(f.root).initialize('coordinator', 12345);
+  const f = await fixture(t); await new ConfigStore(f.root).initialize({ sessionId: 'coordinator', port: 12345 });
   const escape = path.join(f.root, 'escape');
   await symlink(f.outside, escape, process.platform === 'win32' ? 'junction' : 'dir');
   const bad = runtime(t, escape, { workspaceRoot: f.root }); await assert.rejects(bad.instance.start(), /one of its ancestors/); noResources(bad.events);
@@ -177,7 +179,7 @@ test('external or dangling config-file symlinks fail closed without touching tar
   try { await symlink(target, file, 'file'); }
   catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('file symlinks require Windows privilege; directory junction escapes tested separately'); return; } throw error; }
   const store = new ConfigStore(f.root);
-  for (const operation of [() => store.read(), () => store.initialize('local', 23456), () => store.update('local', () => {})]) await assert.rejects(operation(), /escapes session root/);
+  for (const operation of [() => store.read(), () => store.initialize({ sessionId: 'local', port: 23456 }), () => store.update({ sessionId: 'update', port: 12345 }, () => {})]) await assert.rejects(operation(), /escapes session root/);
   assert.equal(await readFile(target, 'utf8'), '{private external');
   await unlink(target);
   await assert.rejects(ConfigStore.discover(f.root), /cannot be resolved safely/);
@@ -185,21 +187,21 @@ test('external or dangling config-file symlinks fail closed without touching tar
 
 test('validated root redirected between operations cannot adopt another config through a junction or symlink', async t => {
   const f = await fixture(t), store = new ConfigStore(f.root), external = new ConfigStore(f.outside);
-  await store.initialize('local', 12345); await external.initialize('external', 23456);
+  await store.initialize({ sessionId: 'local', port: 12345 }); await external.initialize({ sessionId: 'external', port: 23456 });
   const original = await readFile(external.file, 'utf8');
   const { instance } = runtime(t, f.root); await instance.start();
   const saved = path.join(f.base, 'saved-workspace'); await rename(f.root, saved);
   await symlink(f.outside, f.root, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(store.read(), /canonical location changed/);
-  await assert.rejects(store.update('external', config => { config.agents[0].port = 34567; }), /canonical location changed/);
-  await assert.rejects(store.initialize('replacement', 34567), /canonical location changed/);
+  await assert.rejects(store.update({ sessionId: 'update', port: 12345 }, config => { config.agents[0].port = 34567; }), /canonical location changed/);
+  await assert.rejects(store.initialize({ sessionId: 'replacement', port: 34567 }), /canonical location changed/);
   await assert.rejects(instance.state(), /canonical location changed/);
   assert.equal(await readFile(external.file, 'utf8'), original);
-  assert.deepEqual(await readdir(path.dirname(external.file)), ['config.json']);
+  assert.deepEqual((await readdir(path.dirname(external.file))).sort(), ['config.json', 'config.lock']);
 });
 
 test('default missing-config startup pins root before an asynchronous listener can observe a redirect', async t => {
-  const f = await fixture(t), external = new ConfigStore(f.outside); await external.initialize('external', 23456);
+  const f = await fixture(t), external = new ConfigStore(f.outside); await external.initialize({ sessionId: 'external', port: 23456 });
   const original = await readFile(external.file, 'utf8');
   let release, entered, closed = false;
   const gate = new Promise(resolve => { release = resolve; });
@@ -213,13 +215,13 @@ test('default missing-config startup pins root before an asynchronous listener c
   await symlink(f.outside, f.root, process.platform === 'win32' ? 'junction' : 'dir');
   release(); await rejected;
   assert.equal(closed, true); assert.equal(await readFile(external.file, 'utf8'), original);
-  assert.deepEqual(await readdir(path.dirname(external.file)), ['config.json']);
+  assert.deepEqual((await readdir(path.dirname(external.file))).sort(), ['config.json', 'config.lock']);
 });
 
 test('cleanup after stable root or metadata redirect preserves the original error and never unlinks outside files', async t => {
   for (const moveRoot of [false, true]) {
     const f = await fixture(t), external = new ConfigStore(f.outside);
-    await external.initialize('external', 23456);
+    await external.initialize({ sessionId: 'external', port: 23456 });
     const original = await readFile(external.file, 'utf8');
     const failure = new Error('injected close failure after redirect');
     let redirect = false, outsideTemp;
@@ -243,39 +245,38 @@ test('cleanup after stable root or metadata redirect preserves the original erro
         };
       }
     }
-    const store = new RedirectingStore(f.root); await store.initialize('local', 12345);
+    const store = new RedirectingStore(f.root); await store.initialize({ sessionId: 'local', port: 12345 });
     redirect = true;
-    await assert.rejects(store.update('local', config => { config.agents[0].port = 34567; }), error => error === failure);
+    await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, config => { config.agents[0].port = 34567; }), error => error === failure);
     assert.equal(await readFile(outsideTemp, 'utf8'), 'outside collision must survive cleanup');
     assert.equal(await readFile(external.file, 'utf8'), original);
   }
 });
 
-// Upstream's cleanup test above redirects while a TEMPORARY file is being closed. This one redirects the
-// metadata directory while a transaction lock is HELD, so the lock directory that release is asked to
-// remove still carries this call's own token. Token equality would authorize that deletion; only root
-// authority may. This is the case upstream's test does not cover, because it only checks file content.
-test('a transaction release never removes a same-token lock redirected outside the root', async t => {
+// The held guard is a permanent regular file in the board metadata directory, not an owned directory
+// token. If that directory is redirected while the transaction holds the lock, publication stays
+// fail-closed and release closes the handle without unlinking anything outside the validated root.
+test('a held guard redirected outside the root is never unlinked or replaced, and the next writer fails closed', async t => {
   const f = await fixture(t);
-  await new ConfigStore(f.root).initialize('local', 12345);
+  await new ConfigStore(f.root).initialize({ sessionId: 'local', port: 12345 });
   const store = new ConfigStore(f.root);
-  const outsideLock = path.join(f.outside, '.pi-intercom', 'config.lock');
-  await assert.rejects(store.update('local', async () => {
-    await rename(path.join(f.root, '.pi-intercom'), path.join(f.outside, '.pi-intercom'));
-    await symlink(path.join(f.outside, '.pi-intercom'), path.join(f.root, '.pi-intercom'),
+  const outsideMetadata = path.join(f.outside, '.pi-intercom');
+  const outsideLock = path.join(outsideMetadata, 'config.lock');
+  await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, async () => {
+    await rename(path.join(f.root, '.pi-intercom'), outsideMetadata);
+    await symlink(outsideMetadata, path.join(f.root, '.pi-intercom'),
       process.platform === 'win32' ? 'junction' : 'dir');
-    throw new Error('injected failure while the lock is redirected');
-  }), /injected failure while the lock is redirected/);
-  // Release must not follow the redirect: the token inside matches this call, and matching is not enough.
-  assert.ok(existsSync(path.join(outsideLock, 'owner.json')), 'same-token owner record survives');
-  // Fail-closed is the intended consequence: an unreachable lock is left for a human, so the next writer
-  // is refused outright instead of this call unlinking outside the validated root.
-  await assert.rejects(store.update('local', config => config), /escapes session root/);
-  assert.ok(existsSync(path.join(outsideLock, 'owner.json')), 'still untouched after the refused write');
+    throw new Error('injected failure while the guard is redirected');
+  }), /injected failure while the guard is redirected/);
+  // Release owns a handle, not a path: the moved metadata (config plus guard) survives exactly where it went.
+  assert.deepEqual((await readdir(outsideMetadata)).sort(), ['config.json', 'config.lock']);
+  // Fail-closed is the intended consequence: the redirected metadata path is refused outright.
+  await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, config => config), /escapes session root/);
+  assert.deepEqual((await readdir(outsideMetadata)).sort(), ['config.json', 'config.lock']);
 });
 
 test('custom store cannot redirect validated root; create/resume launch root and descendant workers', async t => {
-  const f = await fixture(t); await new ConfigStore(f.root).initialize('local', 12345);
+  const f = await fixture(t); await new ConfigStore(f.root).initialize({ sessionId: 'local', port: 12345 });
   const bad = runtime(t, f.root, { store: () => new ConfigStore(f.outside) });
   await assert.rejects(bad.instance.start(), /retain validated session root/);
   assert.deepEqual(bad.events.observers, []); assert.deepEqual(bad.events.listens, []);
@@ -302,7 +303,7 @@ test('custom store cannot redirect validated root; create/resume launch root and
   assert.deepEqual(await good.instance.store.read(), before);
   assert.equal((await good.instance.tool('list', {})).agents.find(a => a.sessionId === 'w').projectDirectory, 'nested/worker');
   // A saved directory that has become an escaping link is refused before the fence, the probe or a launch.
-  await good.instance.store.update('local', c => { c.agents.find(a => a.name === 'Worker').projectDirectory = 'escape'; });
+  await good.instance.store.update({ sessionId: 'local', port: 12345 }, c => { c.agents.find(a => a.name === 'Worker').projectDirectory = 'escape'; });
   await assert.rejects(good.instance.tool('resume_worker', { to: 'Worker', confirmClosed: true }), /descendant/);
   assert.equal(probes, 0); assert.equal(good.events.launches.length, 2);
   assert.equal(good.instance.resumeFences.size, 0);

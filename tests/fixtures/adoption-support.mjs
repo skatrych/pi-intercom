@@ -1,11 +1,23 @@
 // Disposable fixture helpers only, never a product/CLI writer.
-import assert from 'node:assert/strict';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
-import { mkdir, rm } from 'node:fs/promises';
-import { createFixture, configText, commandContext, mockUi, IDS } from './adoption-fixture.mjs';
-import { AdoptionWorkflow, leftUnchanged } from '../../dist/adoption.js';
+import { createFixture, configText, commandContext, mockUi, IDS, ROLES } from './adoption-fixture.mjs';
 import { listen } from '../../dist/transport.js';
+import { probeWorker } from '../../dist/connections.js';
 import { Intercom } from '../../dist/runtime.js';
+import { AdoptionWorkflow } from '../../dist/adoption.js';
+
+/** The affirmative default for the only adoption decision: one native yes/no. */
+export const yesUI = (onAsk) => mockUi({ adoptCoordinator: 'confirm', ...(onAsk ? { onAsk } : {}) });
+export const declineUI = () => mockUi({ adoptCoordinator: 'decline' });
+
+/** A free loopback port, reserved then released: never a guessed or hard-coded endpoint. */
+export async function freePort() {
+  const endpoint = await listen(0, async () => {});
+  const port = endpoint.port;
+  await endpoint.close();
+  return port;
+}
 
 export const barrier = () => {
   let release, arrived;
@@ -28,59 +40,87 @@ export const barrier = () => {
   };
 };
 /**
- * The affirmative default for every admissible branch: one yes/no per decision kind, nothing typed.
- * An unlisted kind is a decline, so a new decision cannot silently become an accepted path.
+ * A real Intercom runtime on a disposable projects-home fixture, with the canonical Orchestrator launch
+ * role and the real bounded loopback probe. Tests call the same public entry point production uses:
+ * `runtime.adoptCoordinator(context, 'adopt' | 'status')`.
  */
-export const yesUI = () => mockUi({
-  boardInitialize: 'confirm', firstCoordinatorDeclaration: 'confirm', adoptTransition: 'confirm',
-  renewAdoptionDecision: 'confirm', finalizeTransition: 'confirm',
-});
 export async function fixture(options = {}) {
   const f = await createFixture();
-  await mkdir(path.join(f.home, 'roles/orchestrator'), { recursive: true });
-  await mkdir(path.join(f.home, 'roles/developer'), { recursive: true });
-  const ports = [];
-  for (const id of ['old', IDS.workerOne, IDS.workerTwo]) {
-    const endpoint = await listen(0, async () => { throw new Error('fixture only'); }, () => ({ version: 1, sessionId: id }));
-    ports.push(endpoint.port); await endpoint.close();
-  }
-  if (!options.noBoard) await f.board.write(configText('full', { coordinator: ports[0], workerOne: ports[1], workerTwo: ports[2] }));
-  const id = options.self ? IDS.gone : IDS.fresh;
-  const sessionFile = await f.session.persist(id);
-  const ui = yesUI();
-  const context = commandContext(f, { sessionId: id, sessionFile, ui: ui.ui });
-  const state = { epoch: 0, ready: false, loaded: false, swaps: 0, promotions: 0 };
-  const runtimeList = [];
-  const baseDispose = f.dispose;
-  f.dispose = async () => { for (const runtime of runtimeList) await runtime.close(); await baseDispose(); await rm(f.home, { recursive: true, force: true }); };
-  const endpoint = options.runtime ? undefined : f.track(await listen(0, async () => { throw new Error('no worker traffic'); }, () => ({ version: 1, sessionId: id })));
-  if (options.self && !options.noBoard && endpoint) await f.board.write((await f.board.read()).replace(String(ports[0]), String(endpoint.port)));
-  const workflowOptions = {
-    roleDirectory: path.join(f.home, 'roles/orchestrator'), rolesDirectory: path.join(f.home, 'roles'), projectsHome: f.home,
-    storeFor: root => f.ConfigStoreFor(root), sessionId: () => id, busy: () => false,
-    endpointPort: () => endpoint?.port,
-    probe: (agent, opts) => f.probeWorker(agent, opts),
-    promote: async () => { state.promotions++; state.loaded = true; }, responsibilityLoaded: () => state.loaded,
-    readiness: { close: () => { state.ready = false; return ++state.epoch; }, current: () => state.epoch, ready: () => state.ready, open: () => { state.ready = true; return ++state.epoch; } },
-    listSessions: async () => [{ id, path: sessionFile }],
-  };
-  const workflow = overrides => new AdoptionWorkflow({ ...workflowOptions, ...overrides });
+  const roles = path.join(f.home, ROLES.directory);
+  const oldPort = options.oldPort ?? await freePort();
+  const ports = { coordinator: oldPort, workerOne: await freePort(), workerTwo: await freePort() };
+  if (!options.noBoard) await f.board.write(configText(options.style ?? 'full', ports));
+  const id = options.id ?? (options.self ? IDS.gone : IDS.fresh);
+  const cwd = options.cwd ?? (options.cwdRelative ? path.join(f.home, options.cwdRelative) : f.home);
+  const ui = options.ui ?? yesUI(options.onAsk);
+  const context = commandContext(f, { sessionId: id, ui: ui.ui, cwd, ...options.context });
   const messages = [], notices = [], sends = [];
-  const startRuntime = async overrides => {
-    const runtime = new Intercom({ cwd: f.home, sessionId: () => id, roleDirectory: path.join(f.home, 'roles/orchestrator'), rolesDirectory: path.join(f.home, 'roles'), workerRole: '', busy: () => false,
-      deliver: text => messages.push(text), notify: text => notices.push(text), setName: async () => assert.fail('adoption must not rename worker') },
-    { launch: async () => assert.fail('no worker launch'),
-      closeProvider: { getIdentity: async () => assert.fail('no pane identity'), inspect: async () => assert.fail('no pane inspect'), close: async () => assert.fail('no pane close') },
-      observe: () => ({ record() {}, close() {}, maintain() { assert.fail('no adoption maintenance'); } }),
-      send: async (...args) => { sends.push(args); throw new Error('fixture old endpoint unreachable'); },
-      adoption: { projectsHome: f.home, rolesDirectory: path.join(f.home, 'roles'), listSessions: workflowOptions.listSessions }, ...overrides });
-    runtimeList.push(runtime); await runtime.start(); return runtime;
+  const state = { loaded: false, promotions: 0 };
+  const launch = options.launch ?? 'orchestrator';
+  const roleDirectory = options.roleDirectory ?? (launch === 'metadata-only' ? '' : path.join(roles, launch === 'developer' ? ROLES.developer : ROLES.orchestrator));
+  const workerRole = options.workerRole ?? (launch === 'contradictory' ? ROLES.developer : '');
+  let runtime;
+  const host = {
+    cwd,
+    sessionId: () => (options.currentId?.() ?? id),
+    busy: () => Boolean(options.busy?.()),
+    roleDirectory,
+    rolesDirectory: roles,
+    workerRole,
+    deliver: text => messages.push(text),
+    notify: text => notices.push(text),
+    setName: async name => { notices.push(`renamed:${name}`); },
   };
-  const declaration = async (pair = { sessionId: id, port: endpoint.port }) => {
-    const scanned = await f.board.scan(), hash = f.sha256(scanned.raw);
-    return { schemaVersion: 1, transitionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', phase: 'active', boardRoot: f.home, coordinator: pair, date: '2026-10-16',
-      authority: { kind: 'first-coordinator declaration', record: 'fixture declaration', confirmedEndedAt: null, wording: 'fixture declaration' }, previous: null, previousRecordCommit: null,
-      configBeforeSha256: hash, configAfterSha256: hash, intentCommit: null, leftUnchanged: leftUnchanged(scanned), rebriefSource: 'handoff.md (open assignments)' };
+  const runtimeOptions = {
+    launch: async () => { throw new Error('adoption must not launch a worker'); },
+    probe: probeWorker,
+    send: async (port, message) => { sends.push({ port, message }); throw new Error('fixture has no destination endpoint'); },
+    observe: () => ({ record() {}, close() {}, maintain() { throw new Error('adoption must not run maintenance'); } }),
+    adoption: { projectsHome: f.home, rolesDirectory: roles },
+    ...options.runtime,
   };
-  return Object.assign(f, { id, context, ui, state, workflowOptions, workflow, endpoint, startRuntime, declaration, messages, notices, sends });
+  runtime = new Intercom(host, runtimeOptions);
+  await runtime.start();
+  const disposed = f.dispose;
+  f.dispose = async () => { await runtime.close().catch(() => {}); await disposed(); };
+  const adopt = (verb = 'adopt') => runtime.adoptCoordinator(context, verb);
+  const currentPair = async () => {
+    const config = await f.ConfigStoreFor(f.home).read();
+    const board = config.agents.find(agent => agent.coordinator);
+    return { sessionId: board.sessionId, port: board.port };
+  };
+  const boardConfig = async () => (await f.ConfigStoreFor(f.home).read());
+  return Object.assign(f, { id, context, ui, runtime, messages, notices, sends, ports, oldPort, state, adopt, currentPair, boardConfig });
+}
+
+/**
+ * The same workflow without a runtime, for cases that must control the captured identity/port, the
+ * promotion outcome or a lock/provider seam directly. Reads and writes still go through the real store.
+ */
+export function standalone(f, options = {}) {
+  const roles = path.join(f.home, ROLES.directory);
+  const id = options.id ?? IDS.fresh;
+  const port = options.port ?? 42123;
+  const ui = options.ui ?? yesUI();
+  const context = commandContext(f, { sessionId: id, ui: ui.ui });
+  const state = { loaded: Boolean(options.loaded) };
+  const workflow = new AdoptionWorkflow({
+    roleDirectory: options.roleDirectory ?? path.join(roles, ROLES.orchestrator),
+    rolesDirectory: roles, projectsHome: f.home,
+    storeFor: root => f.ConfigStoreFor(root, options.storeOptions),
+    sessionId: () => id, busy: () => false,
+    endpointPort: () => options.portValue?.() ?? port,
+    probe: options.probe ?? (async agent => ({ sessionId: agent.sessionId,
+      state: agent.sessionId === id && agent.port === (options.portValue?.() ?? port) ? 'connected' : 'disconnected',
+      checkedAt: null, reason: agent.sessionId === id && agent.port === (options.portValue?.() ?? port) ? 'verified' : 'refused' })),
+    promote: options.promote ?? (async () => { state.loaded = true; }),
+    responsibilityLoaded: () => state.loaded,
+    ...(options.phase ? { phase: options.phase } : {}),
+  });
+  return { workflow, context, ui, state, id, port };
+}
+
+/** Remove the board after a successful startup: the command-time "no config" case. */
+export async function removeBoard(f) {
+  await rm(path.join(f.home, '.pi-intercom'), { recursive: true, force: true });
 }

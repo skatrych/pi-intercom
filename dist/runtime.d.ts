@@ -7,7 +7,8 @@ import { type ReminderClock } from './reminders.js';
 import { type ReminderFileSystem, type ReminderSubmission } from './reminder-content.js';
 import { type AdoptionPhase, type CommandContext, type Result } from './adoption.js';
 export declare const UNSUPPORTED_CANCELLATION = "Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).";
-export declare const ADOPTION_NOT_READY = "ADOPTION_NOT_READY";
+/** Named refusal for an effect whose current-config permission no longer holds (ADR 0025). */
+export declare const COORDINATOR_NOT_AUTHORIZED = "COORDINATOR_NOT_AUTHORIZED";
 export interface Host {
     sessionId(): string;
     cwd: string;
@@ -57,10 +58,6 @@ export interface RuntimeOptions {
 export interface AdoptionDeps {
     projectsHome: string;
     rolesDirectory: string;
-    listSessions(cwd: string, sessionDir?: string): Promise<{
-        id: string;
-        path: string;
-    }[]>;
     phase(phase: AdoptionPhase): Promise<void>;
     reportPhase(phase: 'admitted' | 'before-save' | 'after-save'): Promise<void>;
 }
@@ -88,38 +85,53 @@ export declare class Intercom {
     private roleResolved;
     private resolvedRole?;
     private handoff?;
-    private readonly callbackEpoch;
     private reminders?;
     /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
     private reminderIntervalMsCache;
     /** Immutable reminder text snapshot for this runtime only; undefined disables reminders for it. */
     private reminderContent?;
     /**
-     * Coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
-     * projects-home board. It starts closed on unresolved evidence and opens only after committed active
-     * evidence and a successful write-free promotion. It gates coordinator tools, boot coordinator side
-     * effects, and this session's incoming registration/status/report/message/handoff effects, queued
-     * report persistence, notification, and reminder delivery. It never gates ordinary worker-targeted
-     * delivery, health, or read-only adoption status.
+     * Coordinator authority is the board config entry (ADR 0025): this runtime's native session id plus the
+     * port its endpoint actually bound, matched against the single coordinator entry. There is no claim
+     * file, evidence record, Git state, readiness generation, or authority epoch anywhere in this class.
+     * A cached flag is never permission: `assertCoordinatorEffect` re-reads the board at each real effect
+     * boundary, and `ConfigStore` independently repeats the exact-pair check at locked admission and at
+     * every publication attempt. Ordinary worker traffic keeps its own recipient/target/job rules and never
+     * acquires a coordinator-only gate.
      */
-    private authorityEnabled;
-    private authorityReady;
-    private authorityEpoch;
-    private authorityDetail;
-    private readyClaimBytes?;
     private adoption?;
-    /** Closed when an adoption or declaration transaction invalidated an earlier callback epoch. */
-    private actionEpoch;
-    /** Cheap preparation check, never external-evidence approval. An old epoch cannot revive. */
-    private assertActionEpoch;
-    /** Fresh runtime-local portion of authority; ConfigStore supplies Git in the same locked span. */
-    private assertActionAuthority;
-    private assertActionReady;
-    /** Existing synchronous store guard only: no proof delegation or asynchronous failure catch. */
-    private configGuard;
-    /** Close the local action epoch. Callers hold the returned value and fail once it changes. */
-    private closeActionEpoch;
-    private openActionEpoch;
+    /**
+     * True only while a canonical Orchestrator startup is inside the boot-only port recovery window (P3).
+     * The minimal bound health endpoint stays available; no responsibility load, handoff recovery, observer
+     * maintenance, reminder, registration/status/config callback, tool, or send may overtake verified
+     * publication plus an exact-pair responsibility load.
+     */
+    private bootHeld;
+    /** At most one port change may use the captured boot snapshot of one startup. */
+    private bootPortAttempted;
+    /** The counted board layout captured at startup: P3 may not publish across a changed ancestor chain. */
+    private startupHome?;
+    private startupCwd?;
+    private startupBoards;
+    /** This runtime's captured authority pair: native session id and the port actually bound. Never an argument. */
+    private caller;
+    /**
+     * The current-config permission that replaced every claim and epoch proof. It re-reads the board with
+     * the one strict reader and requires this runtime's exact coordinator pair, a valid lifecycle, and a
+     * bound root. Where an effect also needs the loaded role, it says so explicitly.
+     */
+    private assertCoordinatorEffect;
+    /**
+     * Permission for an effect that either role may own (a handoff send/delivery crosses both directions).
+     * A coordinator needs its exact pair; a configured worker needs to still be the worker entry it was
+     * admitted as. Neither may fall through anonymously, and neither gains the other's permission.
+     */
+    private assertEffectAllowed;
+    /** The same permission for a synchronous seam. Same strict reader, same refusal, no cache. */
+    private assertEffectAllowedSync;
+    private assertCoordinatorEffectSync;
+    /** Re-prove an admitted role after an await, so a former coordinator cannot fall through as worker traffic. */
+    private assertRoleUnchanged;
     workerStarted(): void;
     workerSettled(successfulToolCallIds: ReadonlySet<string>): void;
     private captureObserver;
@@ -141,19 +153,40 @@ export declare class Intercom {
     reminderSettled(): void;
     reminderAttemptResolved(): void;
     private startServices;
-    private bootEvidenceReady;
-    close(): Promise<void>;
     /**
-     * Orchestrator preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
-     * this process's captured configuration, never from a request. Counts `.pi-intercom` directories along
-     * cwd -> projects home before any write, then classifies and applies the claim gate. Returns a held
-     * reason when no board may be written, and throws when the board layout itself is unsafe.
+     * The private boot-only verified-port publication (ADR 0025 P3). Reachable only from this captured
+     * canonical Orchestrator startup that holds the initial strict config snapshot; never a tool, a status
+     * path, a command repair, or an id-only exemption on `update`. At most one port change may use the
+     * captured snapshot, and every refusal keeps the runtime held with no other coordinator effect.
+     *
+     * Returns 'recovered' or a human-readable held reason. It never retries a mutation automatically.
      */
-    private preflight;
+    private recoverBootPort;
+    /**
+     * The captured boot endpoint must still be the runtime's current endpoint. Binding a replacement
+     * listener and closing the old one during staging must refuse the publication, not publish a closed port.
+     */
+    private assertBoundEndpoint;
+    /** Root/board/path validity independent of any caller guard, re-proved after each boot await. */
+    private assertCoordinatorPaths;
+    /**
+     * The ancestor board chain counted at startup must be unchanged when P3 publishes: a second board
+     * appearing (or the counted one disappearing) during a boot probe invalidates the captured snapshot.
+     */
+    private assertStartupBoardLayout;
+    /** Final synchronous permission for an already-admitted coordinator effect (monitor pane operations). */
+    assertCoordinatorFinal(requirements?: {
+        responsibility?: boolean;
+    }): void;
+    close(): Promise<void>;
     /** Canonical launch role only: `<PI_ROLES_DIR or ~/.pi/roles>/orchestrator`, captured from this process. */
     private orchestratorLaunch;
-    /** True once the claim gate permits coordinator action, or when the gate does not apply to this session. */
-    coordinatorActionReady(): boolean;
+    /**
+     * A cheap, non-authorizing readiness view for UI surfaces such as the monitor. Permission is never
+     * decided here: every real effect re-reads the board at its own boundary, and `ConfigStore` re-proves
+     * the exact pair at locked admission and at every publication attempt.
+     */
+    coordinatorActionReady(): Promise<boolean>;
     responsibilityLoaded(): boolean;
     /**
      * In-place promotion. No `start`, `close`, `HandoffWorkflow.recover`, extension reload,

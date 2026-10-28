@@ -4,8 +4,6 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { createFixture, IDS } from './adoption-fixture.mjs';
-import { scanConfig } from '../../dist/config.js';
-import { leftUnchanged, renderClaim } from '../../dist/adoption.js';
 import { Intercom } from '../../dist/runtime.js';
 
 /** Fake clock: every scheduled delay is recorded, and advance runs due callbacks strictly by due time. */
@@ -37,7 +35,12 @@ export async function settled(reminders) {
   await settle();
 }
 
-/** Write a single-coordinator board on the fixture home and commit matching first-declaration evidence. */
+/**
+ * Write a single-coordinator board on the fixture home. Under the ADR 0025 design the board config
+ * entry is the whole coordinator authority: the entry's sessionId plus the actually bound port are
+ * everything the boot and every effect re-verify, and a batch of legacy or fresh claim artifacts has
+ * zero influence. The `claim` option is accepted and ignored so callers keep a uniform shape.
+ */
 export async function commitFirstDeclaration(f, { sessionId, port, claim = true }) {
   await f.board.write(`{
   "version": 1,
@@ -54,18 +57,6 @@ export async function commitFirstDeclaration(f, { sessionId, port, claim = true 
   ]
 }
 `);
-  if (!claim) return;
-  const scanned = await scanConfig(await f.board.read());
-  const hash = f.sha256(scanned.raw);
-  const record = {
-    schemaVersion: 1, transitionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', phase: 'active', boardRoot: f.home,
-    coordinator: { sessionId, port }, date: '2026-10-16',
-    authority: { kind: 'first-coordinator declaration', record: 'fixture declaration record', confirmedEndedAt: null, wording: 'fixture declaration wording' },
-    previous: null, previousRecordCommit: null,
-    configBeforeSha256: hash, configAfterSha256: hash, intentCommit: null,
-    leftUnchanged: leftUnchanged(scanned), rebriefSource: 'handoff.md (open assignments)',
-  };
-  await f.claim.writeAndCommit(record);
 }
 
 /**
@@ -86,7 +77,9 @@ export async function wakeupRuntime(t, options = {}) {
     endpoints.set(41001, accept);
     return { port: 41001, close: async () => { openListeners--; if (openListeners <= 0) endpoints.delete(41001); } };
   };
-  await commitFirstDeclaration(f, { sessionId: id, port: 41001, claim: (options.claim ?? 'ready') === 'ready' });
+  // boardPort names a port other than the bound 41001 exactly when a test wants a held authority:
+  // ADR 0025 makes a stale pair (not a missing claim artifact) the unauthorized shape.
+  await commitFirstDeclaration(f, { sessionId: id, port: options.boardPort ?? 41001, claim: (options.claim ?? 'ready') === 'ready' });
   const state = { busy: false };
   const deliveries = [], notices = [];
   const reads = { minutes: 0 };

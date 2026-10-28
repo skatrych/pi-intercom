@@ -1,11 +1,10 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { lstatSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError } from './observability.js';
-import { ConfigStore, WORKER_ROLE_ENV, coordinator, directory, fail, logicalRole, named, requireCoordinator, text, validateConfig } from './config.js';
+import { ConfigStore, WORKER_ROLE_ENV, coordinator, directory, fail, logicalRole, named, requireCoordinator, requireCoordinatorPair, sameCanonicalPath, text, validateConfig } from './config.js';
 import { listen, send, reportPayload } from './transport.js';
 import { ReportPublicationRefused, saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
@@ -14,9 +13,10 @@ import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose } from './handoff.js';
 import { CoordinatorIdleReminders, DEFAULT_REMINDER_INTERVAL_MS, REMINDER_STOP_REASON, readReminderMinutesEnv, reminderIntervalMs } from './reminders.js';
 import { loadReminderContent, readReminderFileEnv, REMINDER_CONFIGURATION_DIAGNOSTIC } from './reminder-content.js';
-import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, bootClaimEvidence, committedActiveClaimMatches, countBoards, projectsHome, stop } from './adoption.js';
+import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, countBoards, projectsHome, stop } from './adoption.js';
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
-export const ADOPTION_NOT_READY = 'ADOPTION_NOT_READY';
+/** Named refusal for an effect whose current-config permission no longer holds (ADR 0025). */
+export const COORDINATOR_NOT_AUTHORIZED = 'COORDINATOR_NOT_AUTHORIZED';
 function requestedRole(role) {
     if (role === undefined)
         return undefined;
@@ -73,99 +73,104 @@ export class Intercom {
     roleResolved = false;
     resolvedRole;
     handoff;
-    callbackEpoch = new AsyncLocalStorage();
     reminders;
     /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
     reminderIntervalMsCache = DEFAULT_REMINDER_INTERVAL_MS;
     /** Immutable reminder text snapshot for this runtime only; undefined disables reminders for it. */
     reminderContent;
     /**
-     * Coordinator action readiness. Enabled only for a canonical Orchestrator launch on the
-     * projects-home board. It starts closed on unresolved evidence and opens only after committed active
-     * evidence and a successful write-free promotion. It gates coordinator tools, boot coordinator side
-     * effects, and this session's incoming registration/status/report/message/handoff effects, queued
-     * report persistence, notification, and reminder delivery. It never gates ordinary worker-targeted
-     * delivery, health, or read-only adoption status.
+     * Coordinator authority is the board config entry (ADR 0025): this runtime's native session id plus the
+     * port its endpoint actually bound, matched against the single coordinator entry. There is no claim
+     * file, evidence record, Git state, readiness generation, or authority epoch anywhere in this class.
+     * A cached flag is never permission: `assertCoordinatorEffect` re-reads the board at each real effect
+     * boundary, and `ConfigStore` independently repeats the exact-pair check at locked admission and at
+     * every publication attempt. Ordinary worker traffic keeps its own recipient/target/job rules and never
+     * acquires a coordinator-only gate.
      */
-    authorityEnabled = false;
-    authorityReady = false;
-    authorityEpoch = 0;
-    authorityDetail = 'not applicable';
-    readyClaimBytes;
     adoption;
-    /** Closed when an adoption or declaration transaction invalidated an earlier callback epoch. */
-    actionEpoch() { return this.authorityEpoch; }
-    /** Cheap preparation check, never external-evidence approval. An old epoch cannot revive. */
-    assertActionEpoch(epoch) {
-        if (epoch !== undefined && epoch !== this.authorityEpoch)
-            fail(`${ADOPTION_NOT_READY}: the action-readiness epoch changed; this callback stops without further effects`);
-        if (this.authorityEnabled && !this.authorityReady)
-            fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}; coordinator action readiness is closed`);
+    /**
+     * True only while a canonical Orchestrator startup is inside the boot-only port recovery window (P3).
+     * The minimal bound health endpoint stays available; no responsibility load, handoff recovery, observer
+     * maintenance, reminder, registration/status/config callback, tool, or send may overtake verified
+     * publication plus an exact-pair responsibility load.
+     */
+    bootHeld = false;
+    /** At most one port change may use the captured boot snapshot of one startup. */
+    bootPortAttempted = false;
+    /** The counted board layout captured at startup: P3 may not publish across a changed ancestor chain. */
+    startupHome;
+    startupCwd;
+    startupBoards = [];
+    /** This runtime's captured authority pair: native session id and the port actually bound. Never an argument. */
+    caller() {
+        const sessionId = this.id();
+        if (this.endpoint === undefined)
+            fail('this runtime has no bound endpoint; a port is never guessed');
+        return { sessionId, port: this.endpoint.port };
     }
-    /** Fresh runtime-local portion of authority; ConfigStore supplies Git in the same locked span. */
-    assertActionAuthority(epoch) {
-        this.assertActionEpoch(epoch);
-        if (!this.authorityEnabled)
+    /**
+     * The current-config permission that replaced every claim and epoch proof. It re-reads the board with
+     * the one strict reader and requires this runtime's exact coordinator pair, a valid lifecycle, and a
+     * bound root. Where an effect also needs the loaded role, it says so explicitly.
+     */
+    async assertCoordinatorEffect(assertValid, requirements = {}) {
+        return this.assertEffectAllowed(assertValid, { ...requirements, coordinator: true });
+    }
+    /**
+     * Permission for an effect that either role may own (a handoff send/delivery crosses both directions).
+     * A coordinator needs its exact pair; a configured worker needs to still be the worker entry it was
+     * admitted as. Neither may fall through anonymously, and neither gains the other's permission.
+     */
+    async assertEffectAllowed(assertValid, requirements = {}) {
+        assertValid();
+        const caller = this.caller();
+        const config = await this.store.read();
+        assertValid();
+        const entry = config.agents.find(agent => agent.sessionId === caller.sessionId);
+        if (!entry)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: this session is no longer a configured entry; no effect may use a stale role`);
+        if (entry.coordinator)
+            requireCoordinatorPair(config, caller);
+        else if (requirements.coordinator)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: coordinator permission required`);
+        if (this.bootHeld)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: the boot port boundary is not verified; no coordinator effect may overtake it`);
+        if (requirements.responsibility && !this.responsibility)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: responsibility is not loaded`);
+        return config;
+    }
+    /** The same permission for a synchronous seam. Same strict reader, same refusal, no cache. */
+    assertEffectAllowedSync(requirements = {}) {
+        const caller = this.caller();
+        const config = this.store.readDocumentSync().config;
+        const entry = config.agents.find(agent => agent.sessionId === caller.sessionId);
+        if (!entry)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: this session is no longer a configured entry`);
+        if (entry.coordinator)
+            requireCoordinatorPair(config, caller);
+        else if (requirements.coordinator)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: coordinator permission required`);
+        if (this.bootHeld)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: the boot port boundary is not verified`);
+        if (requirements.responsibility && !this.responsibility)
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: responsibility is not loaded`);
+    }
+    assertCoordinatorEffectSync(requirements = {}) {
+        this.assertEffectAllowedSync({ ...requirements, coordinator: true });
+    }
+    /** Re-prove an admitted role after an await, so a former coordinator cannot fall through as worker traffic. */
+    async assertRoleUnchanged(admitted, assertValid) {
+        if (admitted.coordinator) {
+            await this.assertCoordinatorEffect(assertValid);
             return;
-        if (this.authorityReady) {
-            try {
-                if (realpathSync(this.store.root) !== this.store.root || !lstatSync(path.join(this.store.root, '.pi-intercom')).isDirectory()
-                    || !lstatSync(path.join(this.store.root, 'coordinator-claim.md')).isFile() || !lstatSync(this.store.file).isFile())
-                    throw Error('unsafe authority path');
-                const raw = readFileSync(path.join(this.store.root, 'coordinator-claim.md'), 'utf8');
-                const config = validateConfig(JSON.parse(readFileSync(this.store.file, 'utf8')));
-                const board = coordinator(config);
-                if (raw === this.readyClaimBytes && board.sessionId === this.initialId && board.port === this.endpoint?.port && this.responsibility?.coordinator)
-                    return raw;
-            }
-            catch { /* Changed or unavailable evidence closes authority, never approves it. */ }
-            this.closeActionEpoch('committed claim/board pair or local responsibility changed; explicitly reconcile before acting');
         }
-        fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}; no successful receipt, report persistence, registration change, reminder, or model turn is claimed for it`);
-    }
-    assertActionReady(epoch) {
-        const raw = this.assertActionAuthority(epoch);
-        if (raw !== undefined && !committedActiveClaimMatches(this.store.root, raw)) {
-            this.closeActionEpoch('committed evidence changed or became unavailable; explicitly reconcile before acting');
-            fail(`${ADOPTION_NOT_READY}: ${this.authorityDetail}`);
+        if (!admitted.configured)
+            return; // an anonymous session stays anonymous: it acquires no new permission either way
+        const config = await this.store.read();
+        assertValid();
+        if (!config.agents.some(agent => agent.sessionId === this.initialId && !agent.coordinator)) {
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: this session is no longer the configured worker it was admitted as`);
         }
-    }
-    /** Existing synchronous store guard only: no proof delegation or asynchronous failure catch. */
-    configGuard(lifecycle, epoch = this.actionEpoch(), caller) {
-        return phase => {
-            lifecycle();
-            this.assertActionEpoch(epoch);
-            if (phase === 'authority-refused') {
-                if (this.authorityEnabled)
-                    this.closeActionEpoch('ordinary config authority admission/publication refused; explicitly reconcile before acting');
-                return;
-            }
-            caller?.();
-            if (phase === 'authority')
-                this.assertActionAuthority(epoch);
-        };
-    }
-    /** Close the local action epoch. Callers hold the returned value and fail once it changes. */
-    closeActionEpoch(detail = 'a coordinator transaction is in progress') {
-        this.authorityReady = false;
-        this.reminders?.suspend(); // wake-up loop suspends with authority; no stored disable bit exists
-        this.authorityDetail = detail;
-        return ++this.authorityEpoch;
-    }
-    openActionEpoch() {
-        if (this.authorityReady) {
-            this.assertActionReady();
-            return;
-        }
-        this.readyClaimBytes = readFileSync(path.join(this.store.root, 'coordinator-claim.md'), 'utf8');
-        this.authorityReady = true;
-        this.assertActionReady(); // close again if committed evidence changed across the promotion awaits
-        this.observationEnabled = true;
-        this.authorityDetail = 'coordinator action evidence is committed and this session is promoted';
-        ++this.authorityEpoch;
-        // An authorization transition begins one fresh idle observation without any worker call.
-        if (this.authorityReady)
-            this.reminders?.arm();
     }
     workerStarted() { this.handoff?.workerStarted(); }
     workerSettled(successfulToolCallIds) { this.handoff?.workerSettled(successfulToolCallIds); }
@@ -195,11 +200,9 @@ export class Intercom {
         if (!this.active || id !== this.initialId)
             fail('session is inactive or replaced');
         if (this.configuredRoot !== undefined && (this.store.root !== this.configuredRoot || this.store.file !== this.configuredFile)) {
-            // Upstream's boundary pin refuses the operation. It is checked here, before any store guard runs,
-            // so also drop this fork's coordinator action authority: a store whose validated root changed can
-            // neither write safely now nor be trusted by a later coordinator action.
-            if (this.authorityReady)
-                this.closeActionEpoch('config store boundary changed; explicitly reconcile before acting');
+            // Upstream's boundary pin refuses the operation. It is checked here, before any store guard runs:
+            // a store whose validated root changed can neither write safely now nor be trusted by a later
+            // coordinator effect, because every effect re-reads the board through this same store.
             fail('config store boundary changed');
         }
         return id;
@@ -227,11 +230,10 @@ export class Intercom {
         this.registeredRoles.clear();
         this.roleResolved = false;
         this.resolvedRole = undefined;
-        this.authorityEnabled = false;
-        this.authorityReady = false;
-        this.authorityDetail = 'not applicable';
-        this.readyClaimBytes = undefined;
-        this.bootEvidenceReady = false;
+        this.bootHeld = false;
+        this.bootPortAttempted = false;
+        this.responsibility = undefined;
+        // The reminder text snapshot belongs to this runtime lifecycle only; a replacement loads its own.
         this.reminderContent = undefined;
         this.observationEnabled = !this.orchestratorLaunch();
         const generation = ++this.generation, assertValid = this.validity();
@@ -247,12 +249,20 @@ export class Intercom {
                 const home = projectsHome({ projectsHome: this.options.adoption?.projectsHome ?? process.env[PROJECTS_HOME_ENV], homeDirectory: homedir() });
                 const cwd = await realpath(this.host.cwd), root = await realpath(home);
                 const relative = path.relative(root, cwd);
-                if (cwd !== path.resolve(this.host.cwd) || root !== path.resolve(home) || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+                // Compare the canonical result with the original input: a canonical path may differ only in case on
+                // Windows, while a symlink/alias still differs and is refused.
+                if (!sameCanonicalPath(cwd, this.host.cwd) || !sameCanonicalPath(root, home) || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
                     fail('unsafe Orchestrator projects-home/cwd path');
                 const boards = await countBoards(cwd, root);
-                if (boards.length > 1 || (boards.length === 1 && boards[0] !== root))
-                    fail('BOARD_COUNT: second or wrong board; stop, never cleanup');
-                this.authorityEnabled = true;
+                this.startupHome = root;
+                this.startupCwd = cwd;
+                this.startupBoards = [...boards];
+                // Board isolation, not traceability: an empty or malformed extra board still stops, and every
+                // refusal names the offending path, the expected root, and the one human-safe remediation.
+                if (boards.length > 1)
+                    fail(`BOARD_COUNT: a second board at ${path.join(boards[1], '.pi-intercom')} is a creation-time failure, not a cleanup item; the expected root is ${path.join(root, '.pi-intercom')} and the boards found are ${boards.join(', ')}; a human may remove a confirmed empty, unintended stray directory and retry, and populated or malformed board data needs separate inspection, never recursive deletion`);
+                if (boards.length === 1 && boards[0] !== root)
+                    fail(`BOARD_COUNT: the only board is at ${path.join(boards[0], '.pi-intercom')}, not the projects home ${path.join(root, '.pi-intercom')}; stop, and never discover above the projects home`);
                 countedRoot = root;
                 countedBoard = boards.length === 1;
             }
@@ -278,18 +288,33 @@ export class Intercom {
             await this.store.validateRoot(root);
             assertValid();
             this.observationEnabled = !countedRoot || countedBoard;
-            const previous = discovered ? await this.store.read() : undefined;
+            // Absence means a missing config (ENOENT), never a parse, permission or path failure: an existing
+            // empty root metadata directory is allowed, and initialization can fill it in.
+            let previousDocument;
+            if (discovered !== undefined) {
+                try {
+                    previousDocument = await this.store.readDocument();
+                }
+                catch (error) {
+                    if (error.code !== 'ENOENT')
+                        throw error;
+                }
+            }
+            const previous = previousDocument?.config;
             assertValid();
+            // Construction is inert: a LocalObserver writes only when it records, and every record is gated by
+            // observationEnabled, which stays closed across the boot boundary below.
             try {
                 this.observer = this.options.observe ? this.options.observe(this.store.root, this.initialId) : new LocalObserver(this.store.root, this.initialId);
             }
             catch { /* Logging is optional on failure. */ }
             record = this.captureObserver();
-            record('runtime.starting');
             // Reminder text is loaded once for this runtime before any reminder can exist; failure disables only reminders.
+            // The load happens before the endpoint binds, so a lifecycle/endpoint failure across it can never
+            // leave a half-started runtime, and the snapshot belongs to exactly this start.
             this.reminderContent = await this.loadReminderSnapshot(assertValid);
             assertValid();
-            const own = previous?.agents.find(a => a.sessionId === this.id());
+            const own = previous?.agents.find(a => a.sessionId === this.initialId);
             const endpoint = await (this.options.listen ?? listen)(own?.port, m => { assertValid(); return this.receive(m); }, () => {
                 assertValid();
                 return { version: 1, sessionId: this.initialId };
@@ -302,28 +327,61 @@ export class Intercom {
                 throw error;
             }
             this.endpoint = endpoint;
-            // An Orchestrator launch counts the board and can hold here, before any board write or
-            // coordinator side effect. Binding a health endpoint is not an authority grant, and a held session
-            // still answers read-only `/intercom-adopt status`.
-            const held = await this.preflight(previous, assertValid);
-            this.startServices(assertValid);
-            if (held !== undefined) {
-                record('runtime.ready', { port: endpoint.port, role: 'anonymous', outcome: 'ready' });
-                this.host.notify(`Intercom Orchestrator held at 127.0.0.1:${endpoint.port}; ${held} Enter /intercom-adopt status.`);
-                return;
-            }
-            if (!previous) {
-                const initialized = await this.store.initialize(this.id(), this.endpoint.port, assertValid);
+            // Up to here only a health endpoint was bound: no board write, no service, no responsibility load,
+            // and no coordinator effect. Binding a port is never an authority grant, and a held session still
+            // answers read-only `/intercom-adopt status`.
+            const board = previous ? coordinator(previous) : undefined;
+            const bootPending = board !== undefined && board.sessionId === this.initialId && board.port !== endpoint.port && previousDocument !== undefined;
+            // Coordinator-startup observer records are held back until responsibility is loaded (ADR 0025 P3).
+            const deferredRecords = [];
+            if (previousDocument === undefined) {
+                // ---- first board: ordinary runtime startup, zero questions, zero claims --------------------
+                // A canonical Orchestrator launch creates the first board only at the projects home: a child
+                // directory never receives a private board, and the empty root metadata directory it may have is
+                // an allowed absence. Any other session preserves upstream behavior at its own resolved root.
+                // First-board creation is allowed only at the canonical projects-home cwd itself, including when
+                // an empty metadata directory already exists there. A child cwd is always held, never initialized.
+                if (countedRoot !== undefined && !sameCanonicalPath(await realpath(this.host.cwd), countedRoot)) {
+                    record('runtime.ready', { port: endpoint.port, role: 'anonymous', outcome: 'ready' });
+                    this.host.notify(`Intercom Orchestrator held at 127.0.0.1:${endpoint.port}; no board exists between ${this.host.cwd} and ${countedRoot}, and a private board is never created in a child directory. Enter /intercom-adopt status.`);
+                    return;
+                }
+                const caller = this.caller();
+                const initialized = await this.store.initialize(caller, assertValid);
+                assertValid();
+                const winner = await this.store.read();
+                assertValid();
+                const won = coordinator(winner);
+                this.observationEnabled = true;
                 if (initialized)
-                    record('config.changed', { operation: 'initialize', outcome: 'written' });
+                    deferredRecords.push({ event: 'config.changed', metadata: { operation: 'initialize', outcome: 'written' } });
+                if (won.sessionId !== caller.sessionId || won.port !== caller.port) {
+                    // A competing initializer won the no-replace publication. Its board is read normally, and it
+                    // grants this runtime nothing: no replacement, no question, and no coordinator effect.
+                    record('runtime.ready', { port: endpoint.port, role: 'anonymous', outcome: 'ready' });
+                    this.host.notify(`Intercom Orchestrator held at 127.0.0.1:${endpoint.port}; another initializer created the board as ${won.sessionId}/${won.port}, which does not name this runtime pair ${caller.sessionId}/${caller.port}, so no authority is claimed and no replacement is attempted at startup. Enter /intercom-adopt status.`);
+                    return;
+                }
             }
             const config = await this.store.read();
             assertValid();
-            const me = config.agents.find(a => a.sessionId === this.id());
+            const me = config.agents.find(a => a.sessionId === this.initialId);
             if (me?.coordinator) {
-                // Responsibility load is write-free and always runs, so an unresolved-claim coordinator still has
-                // its identity. Recovery, observer maintenance and the port refresh are config writes and stay
-                // behind coordinator action readiness.
+                // ---- boot boundary (ADR 0025 P3) ---------------------------------------------------------
+                // A configured coordinator whose saved port fell back publishes the verified port here, and only
+                // here, before responsibility load, handoff recovery, observer maintenance, reminders, config
+                // callbacks, tools, or sends. A same-port startup performs no redundant port write.
+                if (me.port !== this.endpoint.port) {
+                    const outcome = await this.recoverBootPort(previousDocument, assertValid);
+                    if (outcome !== 'recovered') {
+                        record('runtime.ready', { port: endpoint.port, role: 'anonymous', outcome: 'ready' });
+                        this.host.notify(`Intercom Coordinator held at 127.0.0.1:${endpoint.port}; ${outcome}. Only the read-only health endpoint and /intercom-adopt status are available; no other coordinator effect ran and nothing was repaired or retried. Restart this session on a non-conflicting port.`);
+                        return;
+                    }
+                    deferredRecords.push({ event: 'config.changed', metadata: { operation: 'port_update', outcome: 'written', port: this.endpoint.port } });
+                }
+                // Verified exact pair: responsibility loads in place, write-free, with no worker action, reload,
+                // job recovery, report clearing, or model turn.
                 try {
                     await this.reload();
                 }
@@ -332,24 +390,43 @@ export class Intercom {
                     this.host.notify(`Name/responsibility synchronization failed: ${String(e)}`);
                 }
                 assertValid();
-                if (this.authorityEnabled && this.bootEvidenceReady && this.responsibilityLoaded())
-                    this.openActionEpoch();
-                if (this.authorityEnabled && !this.authorityReady) {
+                try {
+                    await this.assertCoordinatorEffect(assertValid, { responsibility: true });
+                }
+                catch (error) {
+                    assertValid();
                     record('host.submission', { outcome: 'blocked', errorCode: 'operation_failed' });
-                    this.host.notify(`Intercom Coordinator endpoint at 127.0.0.1:${this.endpoint.port}; ${this.authorityDetail}; coordinator tools, close recovery, observer maintenance and the port refresh are fenced until /intercom-adopt resolves it.`);
+                    this.host.notify(`Intercom Coordinator endpoint at 127.0.0.1:${this.endpoint.port}; ${String(error)}; coordinator tools, close recovery and observer maintenance stay refused until the board names this exact pair.`);
+                    return;
                 }
-                else {
-                    await this.handoff.recover();
-                    assertValid();
-                    try {
-                        this.observer?.maintain?.();
-                    }
-                    catch { /* No cleanup failure affects readiness. */ }
-                    await this.store.update(this.id(), c => { requireCoordinator(c, this.id()).port = this.endpoint.port; }, this.configGuard(assertValid));
-                    assertValid();
-                    record('config.changed', { operation: 'port_update', outcome: 'written', port: this.endpoint.port });
-                    this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
+                // Only now, with the exact pair and loaded responsibility, may the observer see coordinator events.
+                this.observationEnabled = true;
+                record('runtime.starting');
+                for (const deferred of deferredRecords)
+                    record(deferred.event, deferred.metadata);
+                this.startServices(assertValid);
+                await this.handoff.recover();
+                assertValid();
+                // Recovery awaits: re-prove the exact pair and loaded role before maintenance and the ready notice.
+                try {
+                    await this.assertCoordinatorEffect(assertValid, { responsibility: true });
                 }
+                catch (error) {
+                    assertValid();
+                    record('host.submission', { outcome: 'blocked', errorCode: 'operation_failed' });
+                    this.host.notify(`Intercom Coordinator held at 127.0.0.1:${this.endpoint.port}; the board stopped naming this exact pair during boot recovery (${String(error)}); observer maintenance and the ready notice were not run. Restart with the current board entry.`);
+                    return;
+                }
+                try {
+                    this.observer?.maintain?.();
+                }
+                catch { /* No cleanup failure affects readiness. */ }
+                this.assertCoordinatorEffectSync({ responsibility: true });
+                // Authorization for this exact-pair coordinator is now open (ADR 0025): one fresh idle observation
+                // begins without any worker call. A later eligibility refusal suspends the loop until the pair is
+                // re-proven; no stored disable bit exists anywhere.
+                this.reminders?.arm();
+                this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
             }
             else {
                 if (me) {
@@ -362,6 +439,11 @@ export class Intercom {
                     }
                 }
                 assertValid();
+                if (!bootPending)
+                    record('runtime.starting');
+                for (const deferred of deferredRecords)
+                    record(deferred.event, deferred.metadata);
+                this.startServices(assertValid);
                 const role = me?.coordinator ? undefined : this.reportedRole();
                 try {
                     if (me)
@@ -408,45 +490,178 @@ export class Intercom {
     startServices(assertValid) {
         const content = this.reminderContent;
         // Reminders exist only with valid content and only for a canonical Orchestrator launch: other
-        // roles, plain coordinators and workers never reach the #68 wake-up path.
+        // roles, plain coordinators and workers never reach the #68 wake-up path. Authority stays the
+        // current-config exact-pair proof (ADR 0025) on every boundary that can effect: eligibility is the
+        // same fresh board-pair read, and delivery owns the synchronous pre-submission proof.
         this.reminders = content && this.orchestratorLaunch() ? new CoordinatorIdleReminders({
-            // Timer admission checks only its captured epoch; deliver below owns the fresh final proof.
-            captureGuard: () => { const epoch = this.actionEpoch(); return () => { assertValid(); this.assertActionEpoch(epoch); }; },
+            // Timer admission checks only its captured lifecycle; delivery owns the fresh current-config proof.
+            captureGuard: () => () => assertValid(),
             // Conjunctive wake-up gate, freshly read when an admitted expiry asks for it: canonical role,
-            // current coordinator entry, loaded responsibility and open action readiness.
+            // loaded responsibility and the current exact coordinator pair on the board.
             eligible: async () => {
+                if (this.bootHeld || !this.endpoint || !this.responsibility?.coordinator)
+                    return false;
                 const fresh = await this.state();
                 assertValid();
-                return fresh.me?.coordinator === true && this.responsibilityLoaded() && this.orchestratorLaunch() && this.coordinatorActionReady();
+                if (!fresh.me?.coordinator)
+                    return false;
+                const board = coordinator(fresh.config);
+                return board.sessionId === this.initialId && board.port === this.endpoint?.port;
             },
             busy: () => this.host.busy(),
-            deliver: (message, submission) => { assertValid(); this.assertActionReady(); this.host.deliver(message, false, submission); },
+            // The fresh final proof is owned here, synchronously immediately before the host submission, so no
+            // await can reopen the gap between permission and effect.
+            deliver: (message, submission) => { assertValid(); this.assertCoordinatorEffectSync({ responsibility: true }); this.host.deliver(message, false, submission); },
             warn: message => { assertValid(); this.host.notify(message); },
         }, this.options.reminderClock, this.reminderIntervalMsCache, content) : undefined;
         this.handoff = new HandoffWorkflow({
-            state: async () => { const state = await this.state(); if (state.me?.coordinator)
-                this.assertActionReady(this.callbackEpoch.getStore()); return state; },
-            assertCurrent: () => { assertValid(); this.assertActionReady(this.callbackEpoch.getStore()); },
+            state: async () => this.state(),
+            // Provider inspection/closure guards call this final callback: retain role-appropriate current
+            // config permission alongside lifecycle/job/target guards, so a revoked pair blocks the pane effect.
+            assertCurrent: () => { assertValid(); this.assertEffectAllowedSync({ responsibility: true }); },
             update: async (mutate, guard) => {
-                const epoch = this.callbackEpoch.getStore() ?? this.actionEpoch();
-                await this.store.update(this.initialId, mutate, this.configGuard(assertValid, epoch, guard));
+                // The store re-proves the exact pair at locked admission and at every publication attempt; this
+                // guard keeps the caller's own target/lifecycle predicates in front of each mutation.
+                await this.store.update(this.caller(), mutate, () => { assertValid(); guard?.(); });
             },
             send: async (sessionId, kind, payload) => {
-                const epoch = this.callbackEpoch.getStore() ?? this.actionEpoch();
                 const state = await this.state();
                 assertValid();
-                this.assertActionReady(epoch);
                 const target = state.config.agents.find(a => a.sessionId === sessionId);
                 if (!target)
                     fail('handoff recipient no longer configured');
+                // Handoff traffic runs in both directions, so each side proves its own current role synchronously
+                // immediately before the send, with no await between the proof and the effect.
+                this.assertEffectAllowedSync({ responsibility: true });
                 await (this.options.send ?? send)(target.port, { version: 1, kind, from: state.id, to: sessionId, payload, correlationId: randomUUID() });
                 assertValid();
             },
-            deliver: message => { assertValid(); this.assertActionReady(this.callbackEpoch.getStore()); this.host.deliver(message, this.host.busy()); },
+            deliver: message => { assertValid(); this.assertEffectAllowedSync({ responsibility: true }); this.host.deliver(message, this.host.busy()); },
             busy: () => this.host.busy(), provider: this.options.closeProvider, timeoutMs: this.options.closeTimeoutMs,
         });
     }
-    bootEvidenceReady = false;
+    /**
+     * The private boot-only verified-port publication (ADR 0025 P3). Reachable only from this captured
+     * canonical Orchestrator startup that holds the initial strict config snapshot; never a tool, a status
+     * path, a command repair, or an id-only exemption on `update`. At most one port change may use the
+     * captured snapshot, and every refusal keeps the runtime held with no other coordinator effect.
+     *
+     * Returns 'recovered' or a human-readable held reason. It never retries a mutation automatically.
+     */
+    async recoverBootPort(initial, assertValid) {
+        const saved = coordinator(initial.config);
+        const endpoint = this.endpoint;
+        // Freeze the numeric port and the wrapper identity separately before any boot await. The wrapper's
+        // `port` property is mutable and must never be used as its own snapshot.
+        const bootPort = endpoint.port;
+        const pair = `saved ${saved.sessionId}/${saved.port}, actual ${this.initialId}/${bootPort}`;
+        if (!this.orchestratorLaunch()) {
+            this.bootHeld = false;
+            return `this session is not the canonical Orchestrator launch, so no boot port recovery is permitted for ${pair} on the board at ${this.store.file}`;
+        }
+        if (this.bootPortAttempted)
+            return `this startup already used its one boot port publication for ${pair}; restart Pi to begin a fresh boot`;
+        this.bootPortAttempted = true;
+        this.bootHeld = true;
+        // No observer write, service side effect, or coordinator effect may overtake the boundary.
+        this.observationEnabled = false;
+        const probe = this.options.probe ?? probeWorker;
+        const verifyOwnEndpoint = async () => {
+            assertValid();
+            const own = await probe({ sessionId: this.initialId, port: bootPort }, { timeoutMs: 2000 });
+            assertValid();
+            if (own.state !== 'connected')
+                fail(`${COORDINATOR_NOT_AUTHORIZED}: this bound endpoint did not verify session ${this.initialId} (${own.reason}); a port is never guessed and the boot publication stops`);
+        };
+        try {
+            // Verify this own endpoint before lock acquisition, then again after every await inside the store.
+            await verifyOwnEndpoint();
+            await this.store.publishCoordinatorPort({
+                sessionId: this.initialId,
+                expectedRaw: initial.raw,
+                savedPort: saved.port,
+                newPort: bootPort,
+                recheck: async () => {
+                    this.assertBoundEndpoint(endpoint, bootPort);
+                    await verifyOwnEndpoint();
+                    // A bounded observation of the saved pair, never a liveness fence against a later reconnect: a
+                    // matching live identity refuses; disconnected/unknown proceeds under the accepted P3 risk.
+                    const old = await probe({ sessionId: saved.sessionId, port: saved.port }, { timeoutMs: 2000 });
+                    assertValid();
+                    if (old.state === 'connected')
+                        fail(`${COORDINATOR_NOT_AUTHORIZED}: the saved pair ${saved.sessionId}/${saved.port} still answers at its endpoint, so the boot publication refuses rather than rebinding a live coordinator`);
+                    await this.store.validateRoot(this.store.root);
+                    assertValid();
+                },
+                assertValid: () => { assertValid(); this.assertBoundEndpoint(endpoint, bootPort); this.assertCoordinatorPaths(); },
+            });
+            const published = this.store.readDocumentSync();
+            // Post-publication verification uses the runtime's current endpoint, never only the captured one.
+            requireCoordinatorPair(published.config, this.caller());
+            this.bootHeld = false;
+            // Observation stays closed until responsibility is loaded after the guarded publication.
+            return 'recovered';
+        }
+        catch (error) {
+            assertValid();
+            this.bootHeld = false;
+            this.observationEnabled = false;
+            return `the guarded boot port recovery for ${pair} on the board at ${this.store.file} stopped: ${String(error)}`;
+        }
+    }
+    /**
+     * The captured boot endpoint must still be the runtime's current endpoint. Binding a replacement
+     * listener and closing the old one during staging must refuse the publication, not publish a closed port.
+     */
+    assertBoundEndpoint(expected, capturedPort) {
+        // Compare the immutable numeric snapshot, not a property read back from the mutable wrapper: a
+        // retained Endpoint object can be rebound with Object.assign while still being the same object.
+        if (this.endpoint !== expected || this.endpoint?.port !== capturedPort) {
+            fail(`${COORDINATOR_NOT_AUTHORIZED}: this runtime's bound endpoint changed during boot publication (captured ${capturedPort}, current ${this.endpoint?.port ?? 'none'}); the saved port is not published from a closed or replaced endpoint`);
+        }
+    }
+    /** Root/board/path validity independent of any caller guard, re-proved after each boot await. */
+    assertCoordinatorPaths() {
+        if (this.configuredRoot !== undefined && (this.store.root !== this.configuredRoot || this.store.file !== this.configuredFile))
+            fail('config store boundary changed');
+        if (realpathSync(this.store.root) !== this.store.root)
+            fail('config store root is aliased');
+        this.assertStartupBoardLayout();
+    }
+    /**
+     * The ancestor board chain counted at startup must be unchanged when P3 publishes: a second board
+     * appearing (or the counted one disappearing) during a boot probe invalidates the captured snapshot.
+     */
+    assertStartupBoardLayout() {
+        if (this.startupHome === undefined || this.startupCwd === undefined)
+            return;
+        const seen = [];
+        let at = this.startupCwd;
+        for (;;) {
+            const board = path.join(at, '.pi-intercom');
+            try {
+                const info = lstatSync(board);
+                if (!info.isDirectory() || info.isSymbolicLink())
+                    fail(`BOARD_COUNT: unsafe board directory at ${board}; the boot port publication stops`);
+                seen.push(at);
+            }
+            catch (error) {
+                if (error.code !== 'ENOENT')
+                    throw error;
+            }
+            if (at === this.startupHome)
+                break;
+            const parent = path.dirname(at);
+            if (parent === at)
+                break;
+            at = parent;
+        }
+        if (seen.join('\n') !== this.startupBoards.join('\n')) {
+            fail(`BOARD_COUNT: the ancestor board layout changed during boot (was ${this.startupBoards.join(', ') || 'none'}, now ${seen.join(', ') || 'none'}); the boot port publication stops`);
+        }
+    }
+    /** Final synchronous permission for an already-admitted coordinator effect (monitor pane operations). */
+    assertCoordinatorFinal(requirements = {}) { this.assertCoordinatorEffectSync(requirements); }
     async close() {
         if (this.closing)
             return this.closing;
@@ -494,52 +709,6 @@ export class Intercom {
                 this.closing = undefined;
         }
     }
-    /**
-     * Orchestrator preflight. Applies only to a canonical Orchestrator launch: the launch role is read from
-     * this process's captured configuration, never from a request. Counts `.pi-intercom` directories along
-     * cwd -> projects home before any write, then classifies and applies the claim gate. Returns a held
-     * reason when no board may be written, and throws when the board layout itself is unsafe.
-     */
-    async preflight(previous, assertValid) {
-        if (!this.orchestratorLaunch())
-            return undefined;
-        const home = projectsHome({ projectsHome: this.options.adoption?.projectsHome ?? process.env[PROJECTS_HOME_ENV], homeDirectory: homedir() });
-        const cwd = await realpath(this.host.cwd), canonicalHome = await realpath(home);
-        const relative = path.relative(canonicalHome, cwd);
-        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-            throw new Error(`PiIntercom: cwd ${cwd} is outside projects home ${canonicalHome}; an Orchestrator session reads or writes no board`);
-        }
-        const boards = await countBoards(cwd, canonicalHome);
-        if (boards.length > 1) {
-            throw new Error(`PiIntercom: a second board at ${boards[1]} is a creation-time failure, not a cleanup item; nothing was read or written`);
-        }
-        if (boards.length === 1 && boards[0] !== canonicalHome) {
-            throw new Error(`PiIntercom: the only board is at ${boards[0]}, not the projects home ${canonicalHome}; stop`);
-        }
-        this.authorityEnabled = true;
-        if (boards.length === 0) {
-            assertValid();
-            return cwd === canonicalHome
-                ? 'no board exists at the projects home; first-board initialization happens only as an explicit /intercom-adopt decision'
-                : `no board exists between ${cwd} and ${canonicalHome}; a private board is never created in a child directory`;
-        }
-        const own = previous?.agents.find(agent => agent.sessionId === this.id());
-        const board = previous ? previous.agents.find(agent => agent.coordinator) : undefined;
-        if (board && own?.sessionId === board.sessionId) {
-            const evidence = await bootClaimEvidence({ home: canonicalHome, identity: { sessionId: this.id(), port: this.endpoint.port } });
-            this.bootEvidenceReady = evidence.ready;
-            if (evidence.ready)
-                return undefined;
-            this.closeActionEpoch(evidence.detail);
-            return undefined;
-        }
-        if (own && !own.coordinator)
-            this.authorityEnabled = false; // ordinary worker-targeted delivery remains unchanged
-        this.closeActionEpoch(own && !own.coordinator
-            ? `this session is registered as worker ${own.name}: a registered worker is never promoted, and adoption needs a fresh session id`
-            : 'this session is an anonymous worker on this board: adoption is required, and no declaration or coordinator action is permitted without it');
-        return undefined;
-    }
     /** Canonical launch role only: `<PI_ROLES_DIR or ~/.pi/roles>/orchestrator`, captured from this process. */
     orchestratorLaunch() {
         const configured = this.launchRoleDirectory;
@@ -547,8 +716,22 @@ export class Intercom {
             return false;
         return path.resolve(configured) === path.resolve(this.launchRolesDirectory, ORCHESTRATOR_ROLE);
     }
-    /** True once the claim gate permits coordinator action, or when the gate does not apply to this session. */
-    coordinatorActionReady() { return !this.authorityEnabled || this.authorityReady; }
+    /**
+     * A cheap, non-authorizing readiness view for UI surfaces such as the monitor. Permission is never
+     * decided here: every real effect re-reads the board at its own boundary, and `ConfigStore` re-proves
+     * the exact pair at locked admission and at every publication attempt.
+     */
+    async coordinatorActionReady() {
+        if (!this.active || this.endpoint === undefined || this.bootHeld || this.responsibility?.coordinator !== true)
+            return false;
+        try {
+            const board = coordinator(await this.store.read());
+            return board.sessionId === this.initialId && board.port === this.endpoint.port;
+        }
+        catch {
+            return false;
+        }
+    }
     responsibilityLoaded() { return this.responsibility !== undefined; }
     /**
      * In-place promotion. No `start`, `close`, `HandoffWorkflow.recover`, extension reload,
@@ -557,13 +740,17 @@ export class Intercom {
      */
     async promoteCoordinator() {
         const record = this.captureObserver(), assertValid = this.validity();
+        await this.assertCoordinatorEffect(assertValid);
         const { me } = await this.state();
         assertValid();
+        // The board, not the caller, decides: only the current exact coordinator pair may be loaded here.
+        requireCoordinatorPair(await this.store.read(), this.caller());
         if (!me?.coordinator)
             fail('promotion requires this session to be the coordinator entry on this board');
         this.responsibility = { ...me };
-        this.authorityEnabled = true;
         assertValid();
+        // An authorization transition to this exact pair begins one fresh idle observation (Swactory #68).
+        this.reminders?.arm();
         record('config.reloaded', { role: 'coordinator', outcome: 'written' });
         this.host.notify(`Intercom responsibility loaded for ${me.name} as Coordinator; promotion is in place, with no extension reload, worker action, or work turn started.`);
     }
@@ -592,26 +779,14 @@ export class Intercom {
             busy: () => this.host.busy(),
             endpointPort: () => this.endpoint?.port,
             probe: (agent, options) => (this.options.probe ?? probeWorker)(agent, { signal: this.probeController.signal, ...options }),
-            promote: () => this.promoteCoordinator(),
+            promote: async () => { try {
+                await this.promoteCoordinator();
+                return undefined;
+            }
+            catch (error) {
+                return String(error);
+            } },
             responsibilityLoaded: () => this.responsibilityLoaded(),
-            // The workflow owns epoch transitions: it closes before preparing intent and opens only after
-            // committed active evidence plus a successful write-free promotion. A read-only `status` never
-            // closes it, so a resolved coordinator cannot lose readiness by looking at its own board.
-            readiness: {
-                close: detail => this.closeActionEpoch(detail),
-                current: () => this.actionEpoch(),
-                ready: () => this.coordinatorActionReady(),
-                // Readiness is a claim about verified state, not a flag to raise: it opens only once this session
-                // actually holds the coordinator responsibility the committed evidence names. A failed promotion
-                // therefore leaves it closed, and PROMOTION_PENDING stays not-ready.
-                open: () => {
-                    if (!this.responsibilityLoaded())
-                        fail(`${ADOPTION_NOT_READY}: promotion is incomplete, so coordinator action readiness stays closed`);
-                    this.openActionEpoch();
-                    return this.authorityEpoch;
-                },
-            },
-            listSessions: this.options.adoption?.listSessions ?? (async () => { throw new Error('no Pi session store is wired'); }),
             ...(this.options.adoption?.phase ? { phase: this.options.adoption.phase } : {}),
         });
         return workflow.run(context, verb, args);
@@ -624,13 +799,13 @@ export class Intercom {
     }
     /** Accept old configs, but retire the removed browser dashboard's discovery metadata. */
     async retireDashboardMetadata() {
-        const record = this.captureObserver(), assertValid = this.validity(), epoch = this.actionEpoch();
+        const record = this.captureObserver(), assertValid = this.validity();
+        await this.assertCoordinatorEffect(assertValid, { responsibility: true });
         const { id, config } = await this.state();
         assertValid();
-        this.assertActionReady(epoch);
         if (requireCoordinator(config, id).dashboardPort === undefined)
             return;
-        await this.store.update(id, c => { delete requireCoordinator(c, id).dashboardPort; }, this.configGuard(assertValid, epoch));
+        await this.store.update(this.caller(), c => { delete requireCoordinator(c, id).dashboardPort; }, () => assertValid());
         record('config.changed', { outcome: 'written' });
     }
     async reload() {
@@ -650,21 +825,21 @@ export class Intercom {
     }
     async transmit(to, kind, payload = {}, guard = () => { }) {
         const record = this.captureObserver();
-        const assertValid = this.validity(), epoch = this.actionEpoch();
+        const assertValid = this.validity();
         const { id, config, me } = await this.state();
+        const admitted = { coordinator: me?.coordinator === true, configured: me !== undefined };
         assertValid();
         guard();
-        if (me?.coordinator)
-            this.assertActionEpoch(epoch);
         const target = named(config, to), correlationId = randomUUID();
         if (['message', 'reload'].includes(kind) && (this.handoff?.isClosing(target.sessionId) || fencedClose(target.closeJob)))
             fail('worker close is active or uncertain; new Intercom work is fenced');
         const metadata = { peerSessionId: target.sessionId, peerName: target.name, correlationId, kind };
         record('transport.send', { ...metadata, outcome: 'attempted' });
         try {
+            // Re-prove the admitted role after the awaits and immediately before the dispatch: a coordinator
+            // replaced meanwhile cannot keep sending, and cannot fall through as ordinary worker traffic either.
             assertValid();
-            if (me?.coordinator)
-                this.assertActionReady(epoch);
+            await this.assertRoleUnchanged(admitted, assertValid);
             await (this.options.send ?? send)(target.port, { version: 1, from: id, to: target.sessionId, kind, payload, correlationId });
             record('transport.receipt', { ...metadata, outcome: 'http_receipt' });
         }
@@ -716,25 +891,25 @@ export class Intercom {
     async handleReceive(message) {
         const record = this.captureObserver();
         const assertValid = this.validity();
-        // An incoming callback binds the epoch it was admitted in. A callback that crosses a closed
-        // readiness epoch stops at its next side effect, with no buffered or replayed delivery later.
-        const epoch = this.actionEpoch();
-        const assertCurrent = () => { assertValid(); this.assertActionEpoch(epoch); };
-        const assertReady = () => { assertValid(); this.assertActionReady(epoch); };
+        // An incoming callback binds the role it was admitted in. A callback that crosses a config
+        // replacement stops at its next side effect, with no buffered or replayed delivery later.
         const receivedFence = message.kind === 'status' ? this.resumeFences.get(message.from) : undefined;
         const eligibleAnnouncement = receivedFence?.submitted ? receivedFence : undefined;
         const { id, config, me } = await this.state();
+        const admitted = { coordinator: me?.coordinator === true, configured: me !== undefined };
         assertValid();
-        assertReady();
         if (message.to !== id)
             fail('recipient session ID mismatch (stale endpoint)');
         const sender = config.agents.find(a => a.sessionId === message.from);
         const busy = this.host.busy();
         const metadata = { peerSessionId: message.from, peerName: sender?.name, correlationId: message.correlationId, kind: message.kind, busy };
-        const notify = (purpose, content) => {
+        const assertAdmitted = () => { assertValid(); if (admitted.coordinator)
+            this.assertCoordinatorEffectSync(); };
+        const notify = async (purpose, content) => {
             record('host.submission', { ...metadata, outcome: 'attempted' });
             try {
-                assertReady();
+                // Fresh current-config proof immediately before the host submission, never from a cached role.
+                await this.assertRoleUnchanged(admitted, assertValid);
                 this.host.deliver(`[Intercom ${purpose} from ${sender?.name ?? 'unconfigured worker'} (${message.from})]\n${content}`, busy);
                 // A synchronous return is not Pi queue acceptance or model completion.
                 record('host.submission', { ...metadata, outcome: 'returned' });
@@ -747,41 +922,41 @@ export class Intercom {
         if (HANDOFF_KINDS.includes(message.kind)) {
             if (!this.handoff || !me || (!me.coordinator && !this.responsibility))
                 fail('handoff requires a configured, responsibility-loaded worker');
-            assertCurrent();
-            await this.callbackEpoch.run(epoch, () => this.handoff.receive(message.kind, message.from, message.payload));
+            assertValid();
+            await this.handoff.receive(message.kind, message.from, message.payload);
             return;
         }
         if (message.kind === 'registration' || message.kind === 'status') {
-            requireCoordinator(config, id);
+            requireCoordinatorPair(config, this.caller());
             if (sender?.coordinator)
                 fail('coordinator cannot report as worker');
             if (message.kind === 'registration') {
                 const projectDirectory = await directory(this.store.root, message.payload.projectDirectory);
-                assertCurrent();
+                assertAdmitted();
                 // No agent entry or placeholder. A reported role is remembered only until explicit configure stores it.
                 if (message.payload.role !== undefined) {
                     if (!logicalRole(message.payload.role))
                         fail('invalid role');
-                    assertReady();
+                    await this.assertCoordinatorEffect(assertValid);
                     this.registeredRoles.set(message.from, message.payload.role);
                 }
                 const reportedRole = typeof message.payload.role === 'string' ? message.payload.role : undefined;
                 record('registration.received', { ...metadata, port: message.payload.port, ...(reportedRole ? { piRole: reportedRole } : {}) });
-                notify('registration', JSON.stringify({ sessionId: message.from, port: message.payload.port, projectDirectory, ...(reportedRole ? { role: reportedRole } : {}) }) + '\nThis is connection information, not a work assignment. Configure explicitly, then reload separately.');
+                await notify('registration', JSON.stringify({ sessionId: message.from, port: message.payload.port, projectDirectory, ...(reportedRole ? { role: reportedRole } : {}) }) + '\nThis is connection information, not a work assignment. Configure explicitly, then reload separately.');
             }
             else {
                 if (sender) {
-                    assertCurrent();
-                    await this.store.update(id, c => {
+                    assertAdmitted();
+                    await this.store.update(this.caller(), c => {
                         const entry = c.agents.find(a => a.sessionId === message.from && !a.coordinator);
                         if (entry)
                             entry.port = message.payload.port;
-                    }, this.configGuard(assertValid, epoch));
+                    }, () => assertValid());
                 }
-                assertCurrent();
+                assertAdmitted();
                 const fence = sender && this.resumeFences.get(sender.sessionId);
                 if (fence && fence === eligibleAnnouncement) {
-                    assertReady();
+                    await this.assertCoordinatorEffect(assertValid);
                     fence.announced = true;
                     if (!fence.inFlight)
                         this.resumeFences.delete(sender.sessionId);
@@ -799,12 +974,12 @@ export class Intercom {
                 record('status.received', { ...metadata, busy: message.payload.busy, port: message.payload.port, ...(reportedRole ? { piRole: reportedRole } : {}) });
                 if (sender)
                     record('config.changed', { operation: 'port_update', peerSessionId: message.from, port: message.payload.port, outcome: 'written' });
-                notify('status', JSON.stringify({ sessionId: message.from, port: message.payload.port, busy: message.payload.busy, configured: !!sender, ...(reportedRole ? { role: reportedRole } : {}), ...(roleNote ? { roleNote } : {}) }));
+                await notify('status', JSON.stringify({ sessionId: message.from, port: message.payload.port, busy: message.payload.busy, configured: !!sender, ...(reportedRole ? { role: reportedRole } : {}), ...(roleNote ? { roleNote } : {}) }));
             }
             return;
         }
         if (message.kind === 'report') {
-            requireCoordinator(config, id);
+            requireCoordinatorPair(config, this.caller());
             if (!sender || sender.coordinator)
                 fail('work reports require a configured worker sender');
             const payload = reportPayload(message.payload);
@@ -812,41 +987,43 @@ export class Intercom {
                 fail('report queue full; no report stored');
             // Admission is refused before anything is stored, cleared, or acknowledged: no successful receipt
             // for unsaved evidence, and no accept-and-buffer.
-            assertCurrent();
+            assertAdmitted();
             if (this.options.adoption?.reportPhase)
                 await this.options.adoption.reportPhase('admitted');
-            assertCurrent();
+            assertAdmitted();
             this.pendingReports++;
             const pending = this.reportWrites.then(async () => {
-                assertCurrent();
+                assertValid();
+                // Fresh state and exact pair before persistence: a queued report from a worker still needs the
+                // current coordinator to admit it, and this read is the same serialized boundary as before.
                 const fresh = await this.state();
-                requireCoordinator(fresh.config, id);
-                assertCurrent();
+                assertValid();
+                requireCoordinatorPair(fresh.config, this.caller());
                 if (!fresh.config.agents.some(agent => agent.sessionId === message.from && !agent.coordinator))
                     fail('reporting worker is no longer configured');
                 if (this.options.adoption?.reportPhase)
                     await this.options.adoption.reportPhase('before-save');
-                assertCurrent();
+                assertAdmitted();
                 await saveWorkerReport(this.store.root, { version: 1, sessionId: message.from, ...payload, updatedAt: new Date().toISOString() }, phase => {
                     try {
                         if (phase === 'publish')
-                            assertReady();
+                            assertAdmitted();
                         else
-                            assertCurrent();
+                            assertValid();
                     }
                     catch {
-                        throw new ReportPublicationRefused(`${ADOPTION_NOT_READY}: report publication refused before persistence; no report stored or cleared`);
+                        throw new ReportPublicationRefused(`${COORDINATOR_NOT_AUTHORIZED}: report publication refused before persistence; no report stored or cleared`);
                     }
                 });
                 try {
                     if (this.options.adoption?.reportPhase)
                         await this.options.adoption.reportPhase('after-save');
-                    notify('worker report', `Report: ${payload.status}\n${payload.summary}\nThis is a worker-authored public report, not approval or verified completion. Evaluate it before deciding any next step. Clearing retires the report only; it does not resume or complete work.`);
+                    await notify('worker report', `Report: ${payload.status}\n${payload.summary}\nThis is a worker-authored public report, not approval or verified completion. Evaluate it before deciding any next step. Clearing retires the report only; it does not resume or complete work.`);
                 }
                 catch (error) {
                     // Saved bytes are never rolled back or cleared, and a blocked notification is never reported as
                     // a delivery, an unsaved report, or an approval. It stays visible through stored-report reads.
-                    if (String(error).includes(ADOPTION_NOT_READY)) {
+                    if (String(error).includes(COORDINATOR_NOT_AUTHORIZED)) {
                         record('host.submission', { ...metadata, outcome: 'blocked' });
                         fail('Report stored; coordinator notification blocked/not submitted; inspect stored report before any resend');
                     }
@@ -864,7 +1041,7 @@ export class Intercom {
                 fail('worker must load responsibility before receiving work');
             if (this.handoff?.workerClosing || fencedClose(me.closeJob))
                 fail('worker close is active or uncertain; new Intercom work is fenced');
-            notify('agent message', message.payload.message);
+            await notify('agent message', message.payload.message);
             return;
         }
         if (!sender?.coordinator)
@@ -876,6 +1053,12 @@ export class Intercom {
         if (message.kind === 'reload') {
             if (this.handoff?.workerClosing || fencedClose(me?.closeJob))
                 fail('worker close is active or uncertain; reload is fenced');
+            // The sender must still be the current coordinator entry when the reload actually happens.
+            const now = await this.store.read();
+            assertValid();
+            const currentSender = now.agents.find(agent => agent.sessionId === message.from);
+            if (!currentSender?.coordinator)
+                fail('control sender is no longer the configured coordinator');
             await this.reload();
             return;
         }
@@ -905,14 +1088,17 @@ export class Intercom {
     async tool(operation, args, toolCallId) {
         // Worker-directed calls no longer arm, reset or own the wake-up loop: it observes idle time only.
         const record = this.captureObserver();
-        const lifecycle = this.validity(), epoch = this.actionEpoch();
+        const lifecycle = this.validity();
         const { id, config, me } = await this.state();
-        const assertCurrent = () => { lifecycle(); if (me?.coordinator)
-            this.assertActionEpoch(epoch); };
-        const assertValid = () => { lifecycle(); if (me?.coordinator)
-            this.assertActionReady(epoch); };
+        const admitted = { coordinator: me?.coordinator === true, configured: me !== undefined };
+        // Each boundary re-reads the board with the one strict reader: a cached role is never permission, and
+        // an admitted coordinator that has become unconfigured cannot fall through as worker traffic.
+        const assertCurrent = () => { lifecycle(); if (admitted.coordinator)
+            this.assertCoordinatorEffectSync(); };
+        const assertValid = assertCurrent;
         // Admission is also list's final proof: no await or callback intervenes before its result.
-        assertValid();
+        if (admitted.coordinator)
+            await this.assertCoordinatorEffect(lifecycle);
         if (operation === 'worker_status') {
             if (!me)
                 fail('worker_status requires a configured session');
@@ -960,7 +1146,7 @@ export class Intercom {
             await this.transmit(args.to, 'message', { message: args.message }, assertCurrent);
             return { accepted: true, completion: 'not awaited' };
         }
-        requireCoordinator(config, id);
+        requireCoordinatorPair(config, this.caller());
         if (operation === 'stop_reminders') {
             // Truthful non-stopping: the idle loop is never cancelled by an agent, and no disable bit exists.
             // The name/schema stays so callers never see an unknown tool.
@@ -992,15 +1178,18 @@ export class Intercom {
             delete values.role;
             if (choice.role)
                 values.role = choice.role;
-            await this.store.configure(id, values, this.configGuard(lifecycle, epoch, () => { if (this.handoff?.isClosing(args.sessionId) || this.resumeFences.has(args.sessionId))
-                fail('worker lifecycle operation is in flight; configuration is fenced'); }));
+            await this.store.configure(this.caller(), values, () => {
+                assertValid();
+                if (this.handoff?.isClosing(args.sessionId) || this.resumeFences.has(args.sessionId))
+                    fail('worker lifecycle operation is in flight; configuration is fenced');
+            });
             record('config.changed', { operation: 'configure_worker', peerSessionId: args.sessionId, peerName: args.name, outcome: 'written', ...(choice.role ? { piRole: choice.role } : {}) });
             const saved = (await this.store.read()).agents.find(agent => agent.sessionId === candidate.sessionId);
             assertValid();
             return { written: true, reloaded: false, ...(saved?.role ? { role: saved.role } : {}), ...(choice.roleNote ? { roleNote: choice.roleNote } : {}) };
         }
         if (operation === 'set_multiplexer') {
-            await this.store.update(id, c => { c.multiplexer = args.multiplexer; }, this.configGuard(lifecycle, epoch));
+            await this.store.update(this.caller(), c => { c.multiplexer = args.multiplexer; }, () => assertValid());
             record('config.changed', { operation: 'set_multiplexer', outcome: 'written' });
             return { written: true };
         }
@@ -1022,7 +1211,7 @@ export class Intercom {
                 fail('resume is in flight; close is fenced');
             if (fencedClose(target.closeJob) && !this.handoff.isClosing(target.sessionId))
                 fail('worker close is active or uncertain; close is fenced');
-            return { job: await this.callbackEpoch.run(epoch, () => this.handoff.request(target)), completion: 'not awaited', contract: 'best-effort owned-pane closure; not all-child-process termination' };
+            return { job: await this.handoff.request(target), completion: 'not awaited', contract: 'best-effort owned-pane closure; not all-child-process termination' };
         }
         if (['reload_worker', 'resume_worker', 'remove_worker'].includes(operation) && (this.handoff?.isClosing(target.sessionId) || fencedClose(target.closeJob)))
             fail('worker close is active or uncertain; operation is fenced');
@@ -1053,7 +1242,7 @@ export class Intercom {
                     fail('Worker endpoint is still connected; refusing to resume the same session twice.');
                 const fresh = await this.state();
                 assertCurrent();
-                requireCoordinator(fresh.config, id);
+                requireCoordinatorPair(fresh.config, this.caller());
                 const current = fresh.config.agents.find(agent => agent.sessionId === target.sessionId && !agent.coordinator);
                 if (!current || current.port !== target.port || current.projectDirectory !== target.projectDirectory || current.role !== target.role)
                     fail('Worker configuration changed during resume check; no launch submitted.');
@@ -1073,12 +1262,12 @@ export class Intercom {
         }
         if (operation === 'remove_worker') {
             // No live process claim: the caller must explicitly ensure closure first.
-            await this.store.update(id, c => {
+            await this.store.update(this.caller(), c => {
                 const current = c.agents.find(a => a.sessionId === target.sessionId);
                 if (this.handoff?.isClosing(target.sessionId) || this.resumeFences.has(target.sessionId) || fencedClose(current?.closeJob))
                     fail('worker lifecycle operation is active or uncertain; removal is fenced');
                 c.agents = c.agents.filter(a => a.sessionId !== target.sessionId);
-            }, this.configGuard(lifecycle, epoch));
+            }, () => assertValid());
             record('config.changed', { operation: 'remove_worker', peerSessionId: target.sessionId, peerName: target.name, outcome: 'removed' });
             return { removed: true, processStopped: false, sessionDeleted: false };
         }
@@ -1092,7 +1281,7 @@ export class Intercom {
         };
         record('launch.result', { ...metadata, outcome: 'attempted' });
         try {
-            // The original operation's epoch, not a newly captured one. Observation may be reentrant.
+            // The original dispatch is one admitted composite adapter operation. Observation may be reentrant.
             // This dispatch admits one existing composite adapter operation, not cancellable subcommands.
             assertDispatch();
             const result = await this.options.launch(request);

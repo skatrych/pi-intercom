@@ -13,7 +13,7 @@ const CREDENTIAL = 'PRIVATE_ERROR_CREDENTIAL_MUST_NOT_BE_LOGGED';
 async function fixture(t, createObserver = (root, id) => new LocalObserver(root, id)) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-observation-'));
   // Isolate discovery from real ancestor projects; startup replaces this saved test port.
-  await new ConfigStore(root).initialize('coordinator', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'coordinator', port: 12345 });
   const runtimes = [], observers = [];
   t.after(async () => {
     for (const runtime of runtimes) await runtime.close();

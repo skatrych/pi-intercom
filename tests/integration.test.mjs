@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, rename, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, rename, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
@@ -13,7 +13,11 @@ async function setup(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-integration-'));
   // Keep runtime discovery in this fixture instead of adopting a real ancestor config.
   // The fake listener's actual port replaces this test-only saved endpoint at startup.
-  await new ConfigStore(root).initialize('c', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'c', port: 12345 });
+  // The board root doubles as the projects home, and this session is a canonical Orchestrator launch:
+  // that is what makes the private boot port publication available to the configured coordinator.
+  const roles = path.join(root, 'roles');
+  await mkdir(path.join(roles, 'orchestrator'), { recursive: true });
   let nextPort = 30000;
   const endpoints = new Map(), all = [], wire = [], launches = [];
   const options = {
@@ -27,11 +31,16 @@ async function setup(t) {
       await accept(message);
     },
     launch: async r => { launches.push(r); return { launched: true }; },
-    probe: async agent => ({ sessionId: agent.sessionId, state: 'disconnected', checkedAt: new Date().toISOString(), reason: 'refused' }),
+    // Bound endpoints verify; everything else is refused. Boot recovery needs the own endpoint to answer
+    // for this exact native session, and the saved-old pair to be unreachable.
+    probe: async agent => endpoints.has(agent.port)
+      ? { sessionId: agent.sessionId, state: 'connected', checkedAt: new Date().toISOString(), reason: 'verified' }
+      : { sessionId: agent.sessionId, state: 'disconnected', checkedAt: new Date().toISOString(), reason: 'refused' },
+    adoption: { projectsHome: root, rolesDirectory: roles },
   };
   async function start(id) {
     const messages = [], notices = [], names = [];
-    const host = { cwd: root, sessionId: () => id, busy: () => false,
+    const host = { cwd: root, sessionId: () => id, busy: () => false, roleDirectory: path.join(roles, 'orchestrator'), workerRole: '',
       deliver: (text, busy) => messages.push({ text, busy }), setName: async name => { names.push(name); }, notify: text => notices.push(text),
       abort: () => assert.fail('must not abort'), shutdown: () => assert.fail('must not shutdown') };
     const runtime = new Intercom(host, options); all.push(runtime); await runtime.start();
@@ -40,6 +49,13 @@ async function setup(t) {
   t.after(async () => { for (const r of all) await r.close(); await rm(root, { recursive: true, force: true }); });
   return { start, endpoints, wire, launches, root };
 }
+/** The exact current coordinator pair, as an ordinary writer must carry it (ADR 0025). */
+async function callerFor(store) {
+  const config = await store.read();
+  const board = config.agents.find(agent => agent.coordinator);
+  return { sessionId: board.sessionId, port: board.port };
+}
+
 async function publicationFixture(t, options) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-publication-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -55,13 +71,13 @@ async function publicationFixture(t, options) {
     }
   }
   const store = new CountingStore(root, options);
-  await store.initialize('c', 12345);
+  await store.initialize({ sessionId: 'c', port: 12345 });
   counts.writes = counts.syncs = counts.closes = 0;
   const original = await readFile(store.file, 'utf8');
   const mutate = config => { counts.mutations++; config.agents[0].description = 'updated'; };
   const assertOriginalAndClean = async () => {
     assert.equal(await readFile(store.file, 'utf8'), original);
-    assert.deepEqual(await readdir(path.dirname(store.file)), ['config.json']);
+    assert.deepEqual((await readdir(path.dirname(store.file))).sort(), ['config.json', 'config.lock']);
   };
   return { store, counts, mutate, assertOriginalAndClean };
 }
@@ -85,12 +101,12 @@ test('Windows EPERM publication retries only the same closed temp with fresh gua
       await rename(from, to);
     },
   });
-  await f.store.update('c', f.mutate, () => events.push('guard'));
+  await f.store.update(await callerFor(f.store), f.mutate, () => events.push('guard'));
   assert.equal(calls.length, 3);
   assert.ok(calls.every(call => call[0] === calls[0][0] && call[1] === f.store.file));
   assert.deepEqual(delays, [10, 20]);
   assert.equal((await f.store.read()).agents[0].description, 'updated');
-  assert.deepEqual(await readdir(path.dirname(f.store.file)), ['config.json']);
+  assert.deepEqual((await readdir(path.dirname(f.store.file))).sort(), ['config.json', 'config.lock']);
 });
 
 test('Windows permanent EPERM exhausts five attempts and preserves original config/error with temp cleanup', async t => {
@@ -101,7 +117,7 @@ test('Windows permanent EPERM exhausts five attempts and preserves original conf
     delay: async ms => { delays.push(ms); clock += ms; },
     rename: async () => { attempts++; throw attempts === 1 ? original : Object.assign(new Error('later conflict'), { code: 'EPERM' }); },
   });
-  await assert.rejects(f.store.update('c', f.mutate), error => error === original);
+  await assert.rejects(f.store.update(await callerFor(f.store), f.mutate), error => error === original);
   assert.equal(attempts, 5); assert.deepEqual(delays, [10, 20, 40, 80]);
   assert.deepEqual(f.counts, { writes: 1, syncs: 1, closes: 1, mutations: 1 });
   await f.assertOriginalAndClean();
@@ -114,7 +130,7 @@ test('publication never retries non-EPERM errors or non-Windows EPERM', async t 
     const f = await publicationFixture(t, { platform,
       rename: async () => { attempts++; throw failure; }, delay: async () => assert.fail('must not back off'),
     });
-    await assert.rejects(f.store.update('c', f.mutate), error => error === failure);
+    await assert.rejects(f.store.update(await callerFor(f.store), f.mutate), error => error === failure);
     assert.equal(attempts, 1); await f.assertOriginalAndClean();
   }
 });
@@ -126,7 +142,7 @@ test('lifecycle guard invalidated during publication backoff prevents the next a
     rename: async () => { attempts++; throw Object.assign(new Error('sharing conflict'), { code: 'EPERM' }); },
     delay: async ms => { clock += ms; active = false; },
   });
-  await assert.rejects(f.store.update('c', f.mutate, () => { if (!active) throw lifecycle; }), error => error === lifecycle);
+  await assert.rejects(f.store.update(await callerFor(f.store), f.mutate, () => { if (!active) throw lifecycle; }), error => error === lifecycle);
   assert.equal(attempts, 1); await f.assertOriginalAndClean();
 });
 
@@ -137,7 +153,7 @@ test('publication retry elapsed budget prevents another rename after an overslep
     rename: async () => { attempts++; throw failure; },
     delay: async () => { delays++; clock += 300; },
   });
-  await assert.rejects(f.store.update('c', f.mutate), error => error === failure);
+  await assert.rejects(f.store.update(await callerFor(f.store), f.mutate), error => error === failure);
   assert.equal(attempts, 1); assert.equal(delays, 1); await f.assertOriginalAndClean();
 });
 
@@ -165,7 +181,7 @@ test('real concurrent config readers see complete files; publication succeeds or
   try {
     await started;
     assert.equal(readerError, undefined);
-    try { await f.store.update('c', f.mutate); } catch (error) { updateError = error; }
+    try { await f.store.update(await callerFor(f.store), f.mutate); } catch (error) { updateError = error; }
   } finally {
     clearTimeout(readerTimer); stopped = true; abort.abort(); await reader;
   }
@@ -176,7 +192,7 @@ test('real concurrent config readers see complete files; publication succeeds or
     await f.assertOriginalAndClean();
   } else {
     assert.deepEqual(await f.store.read(), updated);
-    assert.deepEqual(await readdir(path.dirname(f.store.file)), ['config.json']);
+    assert.deepEqual((await readdir(path.dirname(f.store.file))).sort(), ['config.json', 'config.lock']);
   }
   // Exact attempt/budget bounds are asserted in the deterministic tests above;
   // this test makes no availability promise under real continuous contention.
@@ -189,7 +205,7 @@ test('a distinct non-EPERM during retry immediately propagates without further a
     rename: async () => { attempts++; throw attempts === 1 ? Object.assign(new Error('sharing conflict'), { code: 'EPERM' }) : finalError; },
     delay: async ms => { clock += ms; },
   });
-  await assert.rejects(f.store.update('c', f.mutate), error => error === finalError);
+  await assert.rejects(f.store.update(await callerFor(f.store), f.mutate), error => error === finalError);
   assert.equal(attempts, 2); await f.assertOriginalAndClean();
 });
 
@@ -300,7 +316,7 @@ test('report updates serialize, ignore payload identity and keep stored report i
 test('retired dashboard metadata migrates only as coordinator and is never advertised by list', async t => {
   const { c, w, wire } = await configured(t);
   const original = await c.runtime.store.read(), before = wire.length;
-  await c.runtime.store.update('c', config => { config.agents.find(a => a.coordinator).dashboardPort = 42000; });
+  await c.runtime.store.update(await callerFor(c.runtime.store), config => { config.agents.find(a => a.coordinator).dashboardPort = 42000; });
   for (const runtime of [c.runtime, w.runtime]) assert.deepEqual(await runtime.tool('list', {}), original);
   await assert.rejects(w.runtime.retireDashboardMetadata(), /permission/);
   assert.equal((await c.runtime.store.read()).agents[0].dashboardPort, 42000);
@@ -445,17 +461,19 @@ test('a delayed preflight status write is not a post-launch announcement', async
 test('worker removal during directory resolution is rechecked before resume launch', async t => {
   const { c, launches } = await configured(t);
   const store = c.runtime.store, root = store.root, state = c.runtime.state.bind(c.runtime);
+  const caller = await callerFor(store);
   const probe = c.runtime.options.probe;
   let pending, triggered = false, armed = false;
   c.runtime.options.probe = async (...args) => {
     const result = await probe(...args);
     armed = true; // Target lookup and probe must finish before injecting removal.
-    return result;
+    // This fixture models an unreachable old worker endpoint, which is what a resume attempt expects.
+    return { ...result, state: 'disconnected', reason: 'refused' };
   };
   Object.defineProperty(store, 'root', { get() {
     if (armed && !triggered) {
       triggered = true;
-      pending = store.update('c', config => { config.agents = config.agents.filter(a => a.sessionId !== 'w'); });
+      pending = store.update(caller, config => { config.agents = config.agents.filter(a => a.sessionId !== 'w'); });
     }
     return root;
   } });
@@ -467,7 +485,7 @@ test('worker removal during directory resolution is rechecked before resume laun
 test('changed worker endpoint during resume check prevents launch', async t => {
   const { c, launches } = await configured(t);
   c.runtime.options.probe = async agent => {
-    await c.runtime.store.update('c', config => { config.agents.find(a => a.sessionId === agent.sessionId).port++; });
+    await c.runtime.store.update(await callerFor(c.runtime.store), config => { config.agents.find(a => a.sessionId === agent.sessionId).port++; });
     return {sessionId:agent.sessionId,state:'disconnected',checkedAt:new Date().toISOString(),reason:'refused'};
   };
   await assert.rejects(c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true}), /configuration changed/);
@@ -511,11 +529,11 @@ test('close invalidates queued coordinator tool and status writes', async t => {
   for (const operation of ['configure_worker', 'set_multiplexer', 'remove_worker', 'status', 'dashboard_port']) {
     const { c } = await configured(t);
     const store = c.runtime.store;
-    if (operation === 'dashboard_port') await store.update('c', config => { config.agents[0].dashboardPort = 42000; });
+    if (operation === 'dashboard_port') await store.update(await callerFor(store), config => { config.agents[0].dashboardPort = 42000; });
     const original = await store.read();
     let release, entered, queued;
     const started = new Promise(resolve => { entered = resolve; });
-    const blocker = store.update('c', async () => { entered(); await new Promise(resolve => { release = resolve; }); });
+    const blocker = store.update(await callerFor(store), async () => { entered(); await new Promise(resolve => { release = resolve; }); });
     await started;
     const reachedQueue = new Promise(resolve => { queued = resolve; });
     const update = store.update.bind(store);

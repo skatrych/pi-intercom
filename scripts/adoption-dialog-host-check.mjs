@@ -15,7 +15,7 @@ const child = spawnSync(process.execPath, [path.join(root, 'tests/fixtures/adopt
 if (child.error || child.status !== 0) throw new Error(`question capture failed: ${child.error ?? child.stderr}`);
 const questions = [...child.stdout.matchAll(/^QUESTION BEGIN (\w+)\n([\s\S]*?)\nQUESTION END \1$/gm)]
   .map(match => ({ kind: match[1], prompt: match[2] }));
-if (questions.length !== 7) throw new Error(`expected seven branch previews; got ${questions.length}`);
+if (questions.length !== 1) throw new Error(`expected exactly one adoption question; got ${questions.length}`);
 const normalize = value => value.replace(/\s/g, '');
 for (const [index, question] of questions.entries()) {
   for (const [columns, rows] of [[100, 30], [60, 18], [40, 12]]) {
@@ -36,7 +36,7 @@ for (const [index, question] of questions.entries()) {
     if (normalize(recovered) !== normalize(text)) throw new Error(`lost context: branch ${index}, ${columns}x${rows}`);
   }
 }
-console.log('PASS component viewport: seven branches, 100x30/60x18/40x12; bounded rows, every question character retrievable. Not real-host evidence.');
+console.log('PASS component viewport: one adoption question, 100x30/60x18/40x12; bounded rows, every question character retrievable. Not real-host evidence.');
 if (process.argv.includes('--real')) {
   const hostRoot = process.env.PI_ADOPTION_HOST_ROOT;
   if (!hostRoot) throw new Error('--real requires explicit PI_ADOPTION_HOST_ROOT; no host/version guess');

@@ -5,7 +5,7 @@ import {
   REMINDER_ADMISSION_DIAGNOSTIC, REMINDER_ATTEMPT_DIAGNOSTIC, REMINDER_MINUTES_ENV, REMINDER_STOP_REASON,
   REMINDER_TEXT, isWakeupEntry, reminderIntervalMs, WAKEUP_CUSTOM_TYPE,
 } from '../dist/reminders.js';
-import { recordingClock, settled, wakeupRuntime } from './fixtures/wakeup-fixture.mjs';
+import { commitFirstDeclaration, recordingClock, settled, wakeupRuntime } from './fixtures/wakeup-fixture.mjs';
 
 const INTERVAL = DEFAULT_REMINDER_INTERVAL_MS;
 
@@ -367,7 +367,7 @@ test('an eligible zero-worker Orchestrator startup arms one fresh interval witho
   const f = await wakeupRuntime(t);
   assert.equal(f.clock.pending.size, 0, 'nothing armed before start');
   await f.runtime.start();
-  assert.equal(f.runtime.coordinatorActionReady(), true);
+  assert.equal(await f.runtime.coordinatorActionReady(), true);
   assert.deepEqual(f.clock.delays, [DEFAULT_REMINDER_INTERVAL_MS]);
   await f.tick();
   assert.equal(f.reminders().length, 1);
@@ -383,9 +383,11 @@ test('a non-Orchestrator or unauthorized session never schedules a wake-up', asy
   await developer.runtime.start();
   assert.equal(developer.clock.pending.size, 0, 'a plain coordinator session has no wake-up path');
 
-  const held = await wakeupRuntime(t, { claim: 'absent' });
+  // ADR 0025: an unauthorized session is exactly a stale pair. A coordinator entry naming a port the
+  // endpoint cannot bind keeps the runtime held with no wake-up path; alpha claim files change nothing.
+  const held = await wakeupRuntime(t, { boardPort: 41002, claim: 'absent' });
   await held.runtime.start();
-  assert.equal(held.runtime.coordinatorActionReady(), false);
+  assert.equal(await held.runtime.coordinatorActionReady(), false);
   assert.equal(held.clock.pending.size, 0);
 });
 
@@ -406,13 +408,17 @@ test('authority loss suspends the wake-up loop; reopened authorization arms a fr
   const f = await wakeupRuntime(t);
   await f.runtime.start();
   assert.deepEqual(f.clock.delays, [DEFAULT_REMINDER_INTERVAL_MS]);
-  // A coordinator transaction closes readiness through real paths; stage it as adoption tests do.
-  const epoch = f.runtime.closeActionEpoch('fixture: independent authority check closed');
-  assert.equal(typeof epoch, 'number');
-  assert.equal(f.clock.pending.size, 0, 'suspension cancels the loop timer');
+  // ADR 0025: the board entry is the whole authority. Replacing the coordinator entry with a port the
+  // bound endpoint does not hold is a real authority loss; the next admitted expiry refuses eligibility
+  // and suspends itself — no timer survives and nothing is submitted.
+  await commitFirstDeclaration(f.f, { sessionId: f.id, port: 42222 });
   f.clock.advance(5 * DEFAULT_REMINDER_INTERVAL_MS); await settled(f.runtime.reminders);
   assert.equal(f.reminders().length, 0);
-  f.runtime.openActionEpoch(); // the promotion/adoption-open path of the runtime
+  assert.equal(f.clock.pending.size, 0, 'suspension cancels the loop timer');
+  // Reauthorization is the real promotion boundary of the runtime: the entry matches the bound pair
+  // again, and the promotion reloads responsibility and arms one fresh interval.
+  await commitFirstDeclaration(f.f, { sessionId: f.id, port: 41001 });
+  await f.runtime.promoteCoordinator();
   assert.deepEqual(f.clock.delays.at(-1), DEFAULT_REMINDER_INTERVAL_MS, 'reauthorization arms fresh; nothing restored');
   await f.tick();
   assert.equal(f.reminders().length, 1);
