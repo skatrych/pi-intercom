@@ -12,6 +12,7 @@ import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose, type CloseProvider, type HandoffKind } from './handoff.js';
 import { CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, readReminderMinutesEnv, reminderIntervalMs, type ReminderClock } from './reminders.js';
+import { loadReminderContent, readReminderFileEnv, REMINDER_CONFIGURATION_DIAGNOSTIC, type ReminderContent, type ReminderFileSystem, type ReminderSubmission } from './reminder-content.js';
 import { AdoptionFailure, AdoptionWorkflow, ORCHESTRATOR_ROLE, PROJECTS_HOME_ENV, countBoards, projectsHome, stop, type AdoptionPhase, type CommandContext, type Result } from './adoption.js';
 
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
@@ -21,7 +22,8 @@ export interface Host {
   sessionId(): string;
   cwd: string;
   busy(): boolean;
-  deliver(text: string, busy: boolean): void;
+  /** reminder carries kind/hash/attempt metadata for reminder text only; ordinary delivery omits it. */
+  deliver(text: string, busy: boolean, reminder?: ReminderSubmission): void;
   setName(name: string): Promise<void>;
   notify(text: string): void;
   /** Test seam. Production workers report `PI_INTERCOM_WORKER_ROLE` from the launch environment. */
@@ -79,6 +81,10 @@ export interface RuntimeOptions {
   workspaceRoot?: string;
   /** Test seam for the operator environment. Production reads process.env once per runtime start. */
   reminderMinutesEnv?: () => string | undefined;
+  /** Test seam for the reminder text selector. Production reads PI_INTERCOM_REMINDER_FILE once per runtime start. */
+  reminderFileEnv?: () => string | undefined;
+  /** Test seam for reminder file access. Production uses node:fs with no-follow, regular-file and bounded reads. */
+  reminderFiles?: ReminderFileSystem;
   /** Test seam for the adoption boundary. Production reads this process's configuration. */
   adoption?: Partial<AdoptionDeps>;
 }
@@ -115,6 +121,8 @@ export class Intercom {
   private reminderInvocation = 0;
   /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
   private reminderIntervalMsCache = DEFAULT_REMINDER_INTERVAL_MS;
+  /** Immutable reminder text snapshot for this runtime only; undefined disables reminders for it. */
+  private reminderContent?: ReminderContent;
   /**
    * Coordinator authority is the board config entry (ADR 0025): this runtime's native session id plus the
    * port its endpoint actually bound, matched against the single coordinator entry. There is no claim
@@ -243,6 +251,8 @@ export class Intercom {
     this.bootHeld = false;
     this.bootPortAttempted = false;
     this.responsibility = undefined;
+    // The reminder text snapshot belongs to this runtime lifecycle only; a replacement loads its own.
+    this.reminderContent = undefined;
     this.observationEnabled = !this.orchestratorLaunch();
     const generation = ++this.generation, assertValid = this.validity();
     // Snapshot the reminder interval once for this runtime. A child tool cannot
@@ -300,6 +310,11 @@ export class Intercom {
       // observationEnabled, which stays closed across the boot boundary below.
       try { this.observer = this.options.observe ? this.options.observe(this.store.root, this.initialId) : new LocalObserver(this.store.root, this.initialId); } catch { /* Logging is optional on failure. */ }
       record = this.captureObserver();
+      // Reminder text is loaded once for this runtime before any reminder can exist; failure disables only reminders.
+      // The load happens before the endpoint binds, so a lifecycle/endpoint failure across it can never
+      // leave a half-started runtime, and the snapshot belongs to exactly this start.
+      this.reminderContent = await this.loadReminderSnapshot(assertValid);
+      assertValid();
       const own = previous?.agents.find(a => a.sessionId === this.initialId);
       const endpoint = await (this.options.listen ?? listen)(own?.port, m => { assertValid(); return this.receive(m); }, () => {
         assertValid();
@@ -413,8 +428,22 @@ export class Intercom {
       throw e;
     }
   }
+  /**
+   * Resolves the optional reminder selector exactly once. A present-but-invalid selection emits the one fixed
+   * diagnostic and yields no content; the diagnostic carries no path, value, contents or raw error.
+   */
+  private async loadReminderSnapshot(assertValid: () => void): Promise<ReminderContent | undefined> {
+    const loaded = await loadReminderContent((this.options.reminderFileEnv ?? readReminderFileEnv)(), { files: this.options.reminderFiles });
+    assertValid();
+    if (loaded.ok) return loaded.content;
+    this.host.notify(REMINDER_CONFIGURATION_DIAGNOSTIC);
+    return undefined;
+  }
   private startServices(assertValid: () => void): void {
-    this.reminders = new CoordinatorReminders({
+    const content = this.reminderContent;
+    // Reminders exist only with valid content: an unavailable selection never arms or delivers any text.
+    // Authority stays the current-config exact-pair proof (ADR 0025) on every boundary that can effect.
+    this.reminders = content ? new CoordinatorReminders({
       // Timer preparation only checks the captured lifecycle; delivery owns the fresh current-config proof.
       captureGuard: () => () => assertValid(),
       isCoordinator: async () => {
@@ -428,8 +457,8 @@ export class Intercom {
       busy: () => this.host.busy(),
       // The fresh final proof is owned here, synchronously immediately before the host submission, so no
       // await can reopen the gap between permission and effect.
-      deliver: message => { assertValid(); this.assertCoordinatorEffectSync({ responsibility: true }); this.host.deliver(message, false); },
-    }, this.options.reminderClock, this.reminderIntervalMsCache);
+      deliver: (message, submission) => { assertValid(); this.assertCoordinatorEffectSync({ responsibility: true }); this.host.deliver(message, false, submission); },
+    }, this.options.reminderClock, this.reminderIntervalMsCache, content) : undefined;
     this.handoff = new HandoffWorkflow({
       state: async () => this.state(),
       // Provider inspection/closure guards call this final callback: retain role-appropriate current

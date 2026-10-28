@@ -4,6 +4,7 @@ import { listen, send, type Endpoint, type Envelope, type Kind } from './transpo
 import { probeWorker } from './connections.js';
 import { type CloseProvider } from './handoff.js';
 import { type ReminderClock } from './reminders.js';
+import { type ReminderFileSystem, type ReminderSubmission } from './reminder-content.js';
 import { type AdoptionPhase, type CommandContext, type Result } from './adoption.js';
 export declare const UNSUPPORTED_CANCELLATION = "Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).";
 /** Named refusal for an effect whose current-config permission no longer holds (ADR 0025). */
@@ -12,7 +13,8 @@ export interface Host {
     sessionId(): string;
     cwd: string;
     busy(): boolean;
-    deliver(text: string, busy: boolean): void;
+    /** reminder carries kind/hash/attempt metadata for reminder text only; ordinary delivery omits it. */
+    deliver(text: string, busy: boolean, reminder?: ReminderSubmission): void;
     setName(name: string): Promise<void>;
     notify(text: string): void;
     /** Test seam. Production workers report `PI_INTERCOM_WORKER_ROLE` from the launch environment. */
@@ -46,6 +48,10 @@ export interface RuntimeOptions {
     workspaceRoot?: string;
     /** Test seam for the operator environment. Production reads process.env once per runtime start. */
     reminderMinutesEnv?: () => string | undefined;
+    /** Test seam for the reminder text selector. Production reads PI_INTERCOM_REMINDER_FILE once per runtime start. */
+    reminderFileEnv?: () => string | undefined;
+    /** Test seam for reminder file access. Production uses node:fs with no-follow, regular-file and bounded reads. */
+    reminderFiles?: ReminderFileSystem;
     /** Test seam for the adoption boundary. Production reads this process's configuration. */
     adoption?: Partial<AdoptionDeps>;
 }
@@ -84,6 +90,8 @@ export declare class Intercom {
     private reminderInvocation;
     /** Snapshot once per start (startServices consumes it); see PI_INTERCOM_REMINDER_MINUTES docs. */
     private reminderIntervalMsCache;
+    /** Immutable reminder text snapshot for this runtime only; undefined disables reminders for it. */
+    private reminderContent?;
     /**
      * Coordinator authority is the board config entry (ADR 0025): this runtime's native session id plus the
      * port its endpoint actually bound, matched against the single coordinator entry. There is no claim
@@ -137,6 +145,11 @@ export declare class Intercom {
     private id;
     private validity;
     start(): Promise<void>;
+    /**
+     * Resolves the optional reminder selector exactly once. A present-but-invalid selection emits the one fixed
+     * diagnostic and yields no content; the diagnostic carries no path, value, contents or raw error.
+     */
+    private loadReminderSnapshot;
     private startServices;
     /**
      * The private boot-only verified-port publication (ADR 0025 P3). Reachable only from this captured

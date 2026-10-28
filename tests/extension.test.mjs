@@ -11,6 +11,8 @@ import { Intercom } from '../dist/runtime.js';
 import { listen, send } from '../dist/transport.js';
 import { readObservationSnapshot } from '../dist/snapshot.js';
 import { ADOPTION_CHANNEL, ADOPTION_PROTOCOL } from '../dist/index.js';
+import { REMINDER_TEXT } from '../dist/reminders.js';
+import { REMINDER_CONFIGURATION_DIAGNOSTIC, REMINDER_FILE_ENV } from '../dist/reminder-content.js';
 
 // These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
@@ -474,4 +476,70 @@ test('coordinator startup does not attempt name synchronization; malformed confi
   await a.start();
   assert.ok(a.notices.some(n => n.level === 'error'));
   await assert.rejects(a.invoke('list'), /not initialized/);
+});
+
+// Reminder text reaches the model only through the real adapter's user-message path. Mock timers make the
+// default five-minute tick deterministic; the real board reads and sendUserMessage capture stay in place.
+async function reminderAdapter(t, selector) {
+  const saved = { file: process.env[REMINDER_FILE_ENV], minutes: process.env.PI_INTERCOM_REMINDER_MINUTES };
+  t.after(() => {
+    for (const [name, value] of [[REMINDER_FILE_ENV, saved.file], ['PI_INTERCOM_REMINDER_MINUTES', saved.minutes]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+  delete process.env.PI_INTERCOM_REMINDER_MINUTES;
+  if (selector === undefined) delete process.env[REMINDER_FILE_ENV]; else process.env[REMINDER_FILE_ENV] = selector;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const a = await adapter(t);
+  await a.start();
+  // configure_worker is a qualifying coordinator call: it arms the timer before its own effect.
+  await a.invoke('configure_worker', { sessionId: 'worker-session', port: 1, projectDirectory: '.', name: 'Worker', description: 'Assigned scope' });
+  const sent = () => a.messages.filter(m => m.options?.deliverAs === 'steer');
+  // Real I/O inside the reminder check needs the event loop, not a fixed number of ticks.
+  const waitFor = async (condition, limit = 3000) => {
+    const started = Date.now();
+    while (!condition()) {
+      if (Date.now() - started > limit) return false;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    return true;
+  };
+  return { a, sent, waitFor, tick: () => t.mock.timers.tick(5 * 60 * 1000) };
+}
+
+test('adapter: a selected file is the exact model input, once per interval, with the steering delivery shape', supportedHost, async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'intercom-reminder-adapter-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const text = '  Generic check: list any stalled work.\n\nPlain text with trailing spaces.  \n';
+  const file = path.join(dir, 'reminder text.txt');
+  await writeFile(file, text);
+  const r = await reminderAdapter(t, file);
+  r.tick();
+  assert.equal(await r.waitFor(() => r.sent().length === 1), true, 'one reminder is submitted on the first full interval');
+  assert.equal(r.sent()[0].content, text, 'model input is the selected text, byte-for-byte');
+  assert.deepEqual(r.sent()[0].options, { deliverAs: 'steer' });
+  assert.equal(r.sent().filter(m => m.content === text).length, 1, 'never an appended or duplicated generic message');
+  assert.equal(r.sent().some(m => m.content === REMINDER_TEXT), false);
+  r.tick();
+  assert.equal(await r.waitFor(() => r.sent().length === 2), true);
+  assert.equal(r.sent()[1].content, text);
+  assert.equal(r.a.notices.filter(n => n.text === REMINDER_CONFIGURATION_DIAGNOSTIC).length, 0);
+});
+
+test('adapter: an unset selector keeps the built-in literal as the exact model input', supportedHost, async t => {
+  const r = await reminderAdapter(t, undefined);
+  r.tick();
+  assert.equal(await r.waitFor(() => r.sent().length === 1), true);
+  assert.equal(r.sent()[0].content, REMINDER_TEXT);
+  assert.deepEqual(r.sent()[0].options, { deliverAs: 'steer' });
+});
+
+test('adapter: an invalid selection sends nothing and emits one fixed notice', supportedHost, async t => {
+  const r = await reminderAdapter(t, '');
+  r.tick();
+  await r.waitFor(() => r.a.notices.some(n => n.text === REMINDER_CONFIGURATION_DIAGNOSTIC));
+  for (let i = 0; i < 3; i++) r.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(r.sent().length, 0, 'no reminder text is sent while the selection is invalid');
+  assert.deepEqual(r.a.notices.filter(n => n.text === REMINDER_CONFIGURATION_DIAGNOSTIC), [{ text: REMINDER_CONFIGURATION_DIAGNOSTIC, level: 'info' }]);
 });

@@ -1,3 +1,6 @@
+import { createHash, randomUUID } from 'node:crypto';
+import type { ReminderContent, ReminderSubmission } from './reminder-content.js';
+
 /** Operator override for the coordinator reminder interval, in whole minutes. Read once per runtime start. */
 export const REMINDER_MINUTES_ENV = 'PI_INTERCOM_REMINDER_MINUTES';
 export const DEFAULT_REMINDER_MINUTES = 5;
@@ -24,6 +27,12 @@ export function reminderIntervalMs(raw: string | undefined): number {
 export function readReminderMinutesEnv(): string | undefined { return process.env[REMINDER_MINUTES_ENV]; }
 
 export const REMINDER_TEXT = 'Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.\n\nIf there is genuinely nothing to follow up on, call intercom_stop_reminders. Otherwise, reminders continue at the configured interval; a new worker call resets the timer.\n\nThis reminder does not authorize new work, retries, worker closure, or publication.';
+/** The unselected built-in content. Its text is REMINDER_TEXT, byte-for-byte. */
+export const BUILTIN_REMINDER_CONTENT: ReminderContent = Object.freeze({
+  text: REMINDER_TEXT,
+  source: 'builtin',
+  sha256: createHash('sha256').update(REMINDER_TEXT, 'utf8').digest('hex'),
+});
 
 export interface ReminderClock {
   schedule(callback: () => void, milliseconds: number): () => void;
@@ -39,7 +48,7 @@ interface ReminderHost {
   captureGuard?(): () => void;
   isCoordinator(): Promise<boolean>;
   busy(): boolean;
-  deliver(text: string): void;
+  deliver(text: string, submission: ReminderSubmission): void;
 }
 /** Ephemeral reminder only: never worker actions, network retries or a backlog. */
 export class CoordinatorReminders {
@@ -49,8 +58,11 @@ export class CoordinatorReminders {
   private disposed = false;
   private cancel?: () => void;
   private detachOwner?: () => void;
-  /** intervalMs comes from reminderIntervalMs(); the scheduler never revalidates operator input. */
-  constructor(private readonly host: ReminderHost, private readonly timer: ReminderClock = clock, private readonly intervalMs: number = DEFAULT_REMINDER_INTERVAL_MS) {}
+  /**
+   * intervalMs comes from reminderIntervalMs(); the scheduler never revalidates operator input.
+   * content is the immutable snapshot the runtime loaded at start; it is never reread here.
+   */
+  constructor(private readonly host: ReminderHost, private readonly timer: ReminderClock = clock, private readonly intervalMs: number = DEFAULT_REMINDER_INTERVAL_MS, private readonly content: ReminderContent = BUILTIN_REMINDER_CONTENT) {}
   arm(signal?: AbortSignal): void {
     if (this.disposed || signal?.aborted) return;
     this.stop();
@@ -91,7 +103,7 @@ export class CoordinatorReminders {
           try { assertReady?.(); }
           catch { if (this.current(generation, tick)) this.stop(); return; }
           if (!coordinator) { this.stop(); return; }
-          if (!this.host.busy()) this.host.deliver(REMINDER_TEXT);
+          if (!this.host.busy()) this.host.deliver(this.content.text, { attemptId: randomUUID(), source: this.content.source, sha256: this.content.sha256 });
         } catch { /* Unknown role/read/delivery outcome: no blind immediate replay. */ }
         finally { this.checking = false; }
       })();

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, REMINDER_TEXT } from '../dist/reminders.js';
+import { createHash } from 'node:crypto';
+import { BUILTIN_REMINDER_CONTENT, CoordinatorReminders, DEFAULT_REMINDER_INTERVAL_MS, REMINDER_TEXT } from '../dist/reminders.js';
 import { Intercom } from '../dist/runtime.js';
 import { ConfigStore } from '../dist/config.js';
 
@@ -288,4 +289,33 @@ test('runtime reset, busy skip, lifecycle close/restart and changed role suppres
   const state = f.c.state.bind(f.c);
   f.c.state = async () => { const value = await state(); return { ...value, me: { ...value.me, coordinator: false } }; };
   await f.tick(); assert.equal(f.reminderCount(), 1); assert.equal(f.clock.pending.size, 0);
+});
+
+test('the injected immutable snapshot supplies the text and metadata for every delivery', async () => {
+  const content = Object.freeze({ text: '  Custom generic text.\n', source: 'file', sha256: createHash('sha256').update('  Custom generic text.\n', 'utf8').digest('hex') });
+  const clock = fakeClock(DEFAULT_REMINDER_INTERVAL_MS), delivered = [];
+  let busy = false;
+  const reminders = new CoordinatorReminders({ isCoordinator: async () => true, busy: () => busy, deliver: (text, submission) => delivered.push({ text, submission }) },
+    clock, DEFAULT_REMINDER_INTERVAL_MS, content);
+  reminders.arm(); clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
+  busy = true; clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
+  busy = false; clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
+  assert.equal(delivered.length, 2, 'the busy tick sends nothing; the next idle tick sends the injected text');
+  for (const d of delivered) {
+    assert.equal(d.text, content.text);
+    assert.equal(d.submission.source, 'file');
+    assert.equal(d.submission.sha256, content.sha256);
+    assert.match(d.submission.attemptId, /^[0-9a-f-]{36}$/);
+  }
+  assert.notEqual(delivered[0].submission.attemptId, delivered[1].submission.attemptId);
+  reminders.dispose();
+});
+
+test('the default constructor keeps the built-in literal and its metadata', async () => {
+  const clock = fakeClock(DEFAULT_REMINDER_INTERVAL_MS), delivered = [];
+  const reminders = new CoordinatorReminders({ isCoordinator: async () => true, busy: () => false, deliver: (text, submission) => delivered.push({ text, submission }) }, clock);
+  reminders.arm(); clock.advance(DEFAULT_REMINDER_INTERVAL_MS); await settled(reminders);
+  assert.equal(delivered[0].text, REMINDER_TEXT);
+  assert.deepEqual({ source: delivered[0].submission.source, sha256: delivered[0].submission.sha256 }, { source: 'builtin', sha256: BUILTIN_REMINDER_CONTENT.sha256 });
+  reminders.dispose();
 });
