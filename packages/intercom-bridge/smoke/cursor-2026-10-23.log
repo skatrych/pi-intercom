@@ -1,0 +1,12 @@
+[bridge] bridge cursor-bridge-<uuid> (cursor) listening on 127.0.0.1:46835
+[coordinator inbox] [Intercom registration from unconfigured worker (cursor-bridge-<uuid>)] | {"sessionId":"cursor-bridge-<uuid>","port":46835,"projectDirectory":"."} | This is connection information, not a work assignment. Configure explicitly, then reload separately.
+[bridge] registration sent; waiting for configure + reload
+[bridge] responsibility loaded as Smoke
+[bridge] accepted instruction from Coordinator (57 chars); queue 1
+[bridge] turn succeeded (4 chars, cli session <uuid>)
+[coordinator inbox] [Intercom worker report from Smoke (cursor-bridge-<uuid>)] | Report: ready_for_review | PONG
+[bridge] accepted instruction from Coordinator (64 chars); queue 1
+[bridge] turn succeeded (4 chars, cli session <uuid>)
+[coordinator inbox] [Intercom worker report from Smoke (cursor-bridge-<uuid>)] | Report: ready_for_review | PONG
+[result] cli session <uuid>; reports received: 2
+[bridge] bridge closed
