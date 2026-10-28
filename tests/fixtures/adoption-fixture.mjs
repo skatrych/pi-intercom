@@ -5,7 +5,7 @@
 // Pi worker, model turn, or cancellation is involved.
 
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -145,7 +145,10 @@ export async function createFixture(options = {}) {
   const { renderClaim } = await dist('adoption.js');
   const { listen } = await dist('transport.js');
   const { probeWorker } = await dist('connections.js');
-  const home = options.home ?? await mkdtemp(path.join(tmpdir(), 'intercom-adopt-'));
+  // os.tmpdir() can contain an 8.3 alias on Windows (or a symlink on Unix). The
+  // positive fixture must use the same canonical home as the production safety gates.
+  // Explicit homes remain untouched so negative alias fixtures can still exercise refusal.
+  const home = options.home ?? await realpath(await mkdtemp(path.join(tmpdir(), 'intercom-adopt-')));
   const sessions = path.join(home, '.pi/default-sessions');
   const endpoints = [];
   const removed = [];

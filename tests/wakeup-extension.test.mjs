@@ -90,6 +90,8 @@ async function orchestratorAdapter(t) {
   extension(pi);
   await events.get('session_start')({}, ctx);
   t.after(async () => { await events.get('session_shutdown')(); await rm(f.home, { recursive: true, force: true }); });
+  assert.ok(runtime instanceof Intercom, 'the extension runtime was captured');
+  assert.ok(runtime.reminders, 'the canonical fixture must pass Orchestrator role/home gates');
   const settleRun = entries => events.get('agent_settled')({ aborted: false }, { ...ctx, sessionManager: { ...ctx.sessionManager, getBranch: () => entries } });
   return { f, tools, ctx, events, runtime, setBranch: entries => { branch = entries; }, submissions, steered, notices, tick: ms => t.mock.timers.tick(ms), settleRun };
 }

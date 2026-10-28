@@ -122,6 +122,8 @@ export async function nativeHost(t) {
   session = new host.AgentSession({ agent, sessionManager: manager, settingsManager: settings, resourceLoader: resources, modelRuntime, cwd: f.home, baseToolsOverride: {}, initialActiveToolNames: [] });
   await session.bindExtensions({ mode: 'tui', uiContext: { notify: (text, level) => notices.push({ text, level }), setStatus() {}, setWidget() {} }, onError: error => errors.push(error) });
   const runner = session._extensionRunner;
+  assert.ok(intercom instanceof Intercom, 'the native extension runtime was captured');
+  assert.ok(intercom.reminders, 'the canonical fixture must pass Orchestrator role/home gates');
   // Preparation failure is a failing resource/preparation seam, not fabricated settlement events.
   const prepare = session._preparePromptAndToolLoadout.bind(session);
   session._preparePromptAndToolLoadout = (...args) => { if (state.failPreparation) throw new Error('offline prepared-run failure'); return prepare(...args); };
