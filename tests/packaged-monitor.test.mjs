@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,7 +63,7 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
     // A fresh process also catches accidental terminal startup during import.
     run(process.execPath, ['--input-type=module', '--eval', `
       import assert from 'node:assert/strict';
-      import { existsSync } from 'node:fs';
+      import { existsSync, mkdirSync } from 'node:fs';
       import { createRequire } from 'node:module';
       import path from 'node:path';
       import { pathToFileURL } from 'node:url';
@@ -93,6 +93,23 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
       assert.equal(loaded.ok, true);
       assert.equal(loaded.content.text, '  packaged text\\n');
       assert.equal(loaded.content.source, 'file');
+      // Packaged native-lock gate (review M2): the installed package must load its exact-pinned native
+      // provider (fs-native-extensions) and actually serialize writers, not merely exist in deps.
+      const nativeLock = await import(pathToFileURL(path.join(installed, 'dist/native-lock.js')).href);
+      assert.equal(nativeLock.CONFIG_LOCK_FILE, 'config.lock');
+      assert.match(nativeLock.LOCK_PROVIDER, /^fs-native-extensions@/);
+      assert.equal(existsSync(path.join(process.cwd(), 'node_modules', 'fs-native-extensions')), true);
+      const boardDir = path.join(process.cwd(), 'lock-proof', '.pi-intercom');
+      mkdirSync(boardDir, { recursive: true });
+      const guard = path.join(boardDir, nativeLock.CONFIG_LOCK_FILE);
+      const first = await nativeLock.acquireConfigLock(guard);
+      first.assertHeld(); // the held handle identifies the same guard inode
+      await assert.rejects(nativeLock.acquireConfigLock(guard), error => error.name === 'ConfigLockContention', 'a second holder must be refused while the packed lock is held');
+      assert.equal(await first.release(), undefined);
+      // After release the guard file is the same permanent regular file, and the next writer acquires.
+      const second = await nativeLock.acquireConfigLock(guard);
+      second.assertHeld();
+      assert.equal(await second.release(), undefined);
     `], temporary, 30000);
 
     const cli = run(process.execPath, [path.join(temporary,
