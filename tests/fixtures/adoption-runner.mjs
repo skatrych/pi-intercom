@@ -10,6 +10,13 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fixture, standalone, declineUI, removeBoard } from './adoption-support.mjs';
 import { createFixture, configText, mockUi, IDS } from './adoption-fixture.mjs';
+
+/**
+ * Mirror of the adoption display formatter (src/adoption.ts escapePath): refusal text escapes control
+ * characters, quotes and backslashes, so a reported path cannot be re-read as a different path. Windows
+ * machine paths therefore appear with escaped separators, and expectations encode the same shape.
+ */
+const shownPath = value => value.replace(/[\x00-\x1f\x7f-\x9f"\\]/g, character => `\\x${(character.codePointAt(0) ?? 0).toString(16).padStart(2, '0')}`);
 import { listen } from '../../dist/transport.js';
 
 const checks = [];
@@ -161,7 +168,7 @@ const cases = {
     check('a second board refuses', result.code === 'BOARD_COUNT');
     const text = result.lines.join('\n');
     check('both offending paths and the expected root are named',
-      text.includes(path.join(nested, '.pi-intercom')) && text.includes(path.join(f.home, '.pi-intercom')));
+      text.includes(shownPath(path.join(nested, '.pi-intercom'))) && text.includes(shownPath(path.join(f.home, '.pi-intercom'))));
     check('only a human removal of a confirmed empty stray is suggested', /confirmed empty/.test(text) && /never recursive deletion/.test(text));
   }),
 

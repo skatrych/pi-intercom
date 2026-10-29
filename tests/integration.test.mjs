@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, rename, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, rename, readFile, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
@@ -10,7 +10,10 @@ import { readObservationSnapshot } from '../dist/snapshot.js';
 import { envelope } from '../dist/transport.js';
 
 async function setup(t) {
-  const root = await mkdtemp(path.join(tmpdir(), 'intercom-integration-'));
+  // The board root doubles as a canonical Orchestrator projects home, so the fixture uses the
+  // canonical path Windows reports for the temp directory (mkdtemp may hold an 8.3 alias there),
+  // exactly like the production gates. Explicit comparisons all derive from this root unchanged.
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'intercom-integration-')));
   // Keep runtime discovery in this fixture instead of adopting a real ancestor config.
   // The fake listener's actual port replaces this test-only saved endpoint at startup.
   await new ConfigStore(root).initialize({ sessionId: 'c', port: 12345 });
@@ -57,7 +60,8 @@ async function callerFor(store) {
 }
 
 async function publicationFixture(t, options) {
-  const root = await mkdtemp(path.join(tmpdir(), 'intercom-publication-'));
+  // Same canonical-temp rationale as setup(): the Orchestrator gates compare canonical paths.
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'intercom-publication-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const counts = { writes: 0, syncs: 0, closes: 0, mutations: 0 };
   class CountingStore extends ConfigStore {
