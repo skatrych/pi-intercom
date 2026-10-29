@@ -9,6 +9,13 @@ import { fixture, standalone, declineUI } from './fixtures/adoption-support.mjs'
 import { createFixture, configText, mockUi, IDS } from './fixtures/adoption-fixture.mjs';
 import { AdoptionDecisionCaptureFailure, AdoptionHostUiUnavailable } from '../dist/adoption.js';
 
+/**
+ * Mirror of the adoption display formatter (src/adoption.ts escapePath): refusal text escapes control
+ * characters, quotes and backslashes, so a reported path cannot be re-read as a different path. Windows
+ * machine paths therefore appear with escaped separators, and expectations must encode the same shape.
+ */
+const shownPath = value => value.replace(/[\x00-\x1f\x7f-\x9f"\\]/g, character => `\\x${(character.codePointAt(0) ?? 0).toString(16).padStart(2, '0')}`);
+
 test('first-board startup asks nothing, writes no evidence record and loads responsibility', async t => {
   const f = await fixture({ noBoard: true });
   t.after(() => f.dispose());
@@ -220,8 +227,8 @@ test('board isolation refuses a child board and names paths; the empty-stray gui
   const result = await f.adopt();
   assert.equal(result.code, 'BOARD_COUNT');
   const text = result.lines.join('\n');
-  assert.ok(text.includes(path.join(nested, '.pi-intercom')));
-  assert.ok(text.includes(path.join(f.home, '.pi-intercom')));
+  assert.ok(text.includes(shownPath(path.join(nested, '.pi-intercom'))));
+  assert.ok(text.includes(shownPath(path.join(f.home, '.pi-intercom'))));
   assert.match(text, /confirmed empty/);
   assert.doesNotMatch(text, /rm -rf|deleted automatically|automatic cleanup/i);
 });
