@@ -1,4 +1,5 @@
 node_modules/
+node_modules
 # dist/ is committed. pi installs git packages with --omit=dev, so prepare
 # cannot rely on typescript being present. A git install must already contain dist/.
 *.tgz
