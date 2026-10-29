@@ -247,25 +247,55 @@ test('cleanup after stable root or metadata redirect preserves the original erro
     }
     const store = new RedirectingStore(f.root); await store.initialize({ sessionId: 'local', port: 12345 });
     redirect = true;
-    await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, config => { config.agents[0].port = 34567; }), error => error === failure);
-    assert.equal(await readFile(outsideTemp, 'utf8'), 'outside collision must survive cleanup');
-    assert.equal(await readFile(external.file, 'utf8'), original);
+    if (process.platform === 'win32') {
+      // Windows truth: the rename refuses while the transaction holds the native config.lock handle on
+      // a file inside the renamed directory, so the injected failure is never observed and nothing is
+      // moved. Safety here means the outside board byte-untouched, no redirect artifacts, and the same
+      // ordinary writer succeeding again after the failed attempt.
+      await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, config => { config.agents[0].port = 34567; }),
+        error => error.code === 'EPERM' || /EPERM|operation not permitted/.test(String(error)));
+      assert.equal(existsSync(path.join(f.base, 'saved-before-redirect')), false, 'nothing was moved');
+      assert.equal(await readFile(external.file, 'utf8'), original, 'the outside board is byte-untouched');
+      await store.update({ sessionId: 'local', port: 12345 }, config => { config.agents[0].port = 34567; });
+      assert.equal(redirect, false, 'the injected redirect branch is exactly once');
+    } else {
+      await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, config => { config.agents[0].port = 34567; }), error => error === failure);
+      assert.equal(await readFile(outsideTemp, 'utf8'), 'outside collision must survive cleanup');
+      assert.equal(await readFile(external.file, 'utf8'), original);
+    }
   }
 });
 
 // The held guard is a permanent regular file in the board metadata directory, not an owned directory
 // token. If that directory is redirected while the transaction holds the lock, publication stays
 // fail-closed and release closes the handle without unlinking anything outside the validated root.
+// Windows cannot physically perform the mid-transaction rename (the open config.lock handle inside
+// the renamed directory refuses the operation with EPERM), so this suite asserts the redirected state
+// only on POSIX systems and asserts the Windows-truthful refusal plus subsequent safety on win32.
 test('a held guard redirected outside the root is never unlinked or replaced, and the next writer fails closed', async t => {
   const f = await fixture(t);
   await new ConfigStore(f.root).initialize({ sessionId: 'local', port: 12345 });
   const store = new ConfigStore(f.root);
   const outsideMetadata = path.join(f.outside, '.pi-intercom');
-  const outsideLock = path.join(outsideMetadata, 'config.lock');
+  if (process.platform === 'win32') {
+    // Windows truth: with the guard handle held, the redirect rename is refused outright (EPERM),
+    // so the injected failure is never observed. Safety that Windows can genuinely observe: the
+    // metadata stayed exactly in place, no outside artifacts exist, and the same ordinary writer
+    // succeeds again after the failed attempt.
+    await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, async () => {
+      await rename(path.join(f.root, '.pi-intercom'), outsideMetadata);
+      await symlink(outsideMetadata, path.join(f.root, '.pi-intercom'), 'junction');
+      throw new Error('injected failure while the guard is redirected');
+    }), error => error.code === 'EPERM' || /EPERM|operation not permitted/.test(String(error)));
+    assert.deepEqual((await readdir(path.join(f.root, '.pi-intercom'))).sort(), ['config.json', 'config.lock']);
+    assert.equal(existsSync(outsideMetadata), false, 'the redirect created no outside metadata');
+    await store.update({ sessionId: 'local', port: 12345 }, config => { config.agents[0].port = 34567; });
+    assert.deepEqual((await readdir(path.join(f.root, '.pi-intercom'))).sort(), ['config.json', 'config.lock']);
+    return;
+  }
   await assert.rejects(store.update({ sessionId: 'local', port: 12345 }, async () => {
     await rename(path.join(f.root, '.pi-intercom'), outsideMetadata);
-    await symlink(outsideMetadata, path.join(f.root, '.pi-intercom'),
-      process.platform === 'win32' ? 'junction' : 'dir');
+    await symlink(outsideMetadata, path.join(f.root, '.pi-intercom'), 'dir');
     throw new Error('injected failure while the guard is redirected');
   }), /injected failure while the guard is redirected/);
   // Release owns a handle, not a path: the moved metadata (config plus guard) survives exactly where it went.
