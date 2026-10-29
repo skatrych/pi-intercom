@@ -529,3 +529,64 @@ test('B2: failed first-ID publish fences next turn and restart (no silent fresh 
   const fresh = ctx.bridge(cursor, { sessionId: 'b2-brand-new-first-use', stateDir: path.join(ctx.root, 'b2-fresh-state') });
   await fresh.start();
 });
+
+// --- Re-review REQUEST CHANGES regression (B2 directory fault on 864b545) ---
+
+const asRoot = process.getuid?.() === 0;
+const skipChmod = skip || (asRoot ? 'root bypasses directory mode bits; chmod fault cannot be simulated' : false);
+
+test('B2: state dir 0500 fails ID save and marker; restore → close → restart stays fenced', { skip: skipChmod }, async t => {
+  const { chmod } = await import('node:fs/promises');
+  const ctx = await board(t);
+  const stateDir = path.join(ctx.root, 'state');
+  t.after(() => chmod(stateDir, 0o700).catch(() => {}));
+  const sessionId = 'b2-dir-fault-worker';
+  const b = ctx.bridge(cursor, { sessionId, stateDir });
+  await enlist(b, ctx, 'B2DirFault');
+
+  // One ordinary fault: the whole state directory refuses writes (state JSON and sidecar both fail).
+  await chmod(stateDir, 0o500);
+  await ctx.coordinator.tool('send', { to: 'B2DirFault', message: 'first bind under unwritable dir' });
+  await until(() => ctx.messages.find(m => m.includes('Report: blocked') && m.includes('failed to persist')), 'persist blocked', 8000);
+  assert.equal(b.cliSessionId, undefined);
+
+  // Restore permission, then close normally; restart of the same identity must not silently start fresh.
+  await chmod(stateDir, 0o700);
+  await b.close();
+  const spawnsBefore = (await ctx.argv()).length;
+  const again = ctx.bridge(cursor, { sessionId, stateDir });
+  await assert.rejects(again.start(), /continuity bind previously failed|refusing fresh-chat/);
+  assert.equal((await ctx.argv()).length, spawnsBefore, 'no CLI spawn after restart');
+
+  // Close while the directory is still unwritable: ownership evidence is retained (fail closed).
+  const ctx2 = await board(t);
+  const stateDir2 = path.join(ctx2.root, 'state');
+  t.after(() => chmod(stateDir2, 0o700).catch(() => {}));
+  const c = ctx2.bridge(cursor, { sessionId, stateDir: stateDir2 });
+  await enlist(c, ctx2, 'B2DirFault2');
+  await chmod(stateDir2, 0o500);
+  await ctx2.coordinator.tool('send', { to: 'B2DirFault2', message: 'first bind, close still unwritable' });
+  await until(() => ctx2.messages.find(m => m.includes('Report: blocked') && m.includes('failed to persist')), 'persist blocked (2)', 8000);
+  await c.close();
+  await chmod(stateDir2, 0o700);
+  const again2 = ctx2.bridge(cursor, { sessionId, stateDir: stateDir2 });
+  await assert.rejects(again2.start(), /continuity fence could not be published|already owned/);
+
+  // Explicit recovery still works: restore the bound mapping and clear the fence evidence.
+  await rm(path.join(stateDir2, `${sessionId}.lock`), { force: true });
+  await rm(path.join(stateDir2, `${sessionId}.continuity-blocked`), { force: true });
+  await saveState(stateDir2, { version: 1, agent: 'cursor', sessionId, cliSessionId: 'recovered-cli-id' });
+  const recovered = ctx2.bridge(cursor, { sessionId, stateDir: stateDir2 });
+  await recovered.start();
+  assert.equal(recovered.cliSessionId, 'recovered-cli-id');
+});
+
+test('B2: marker I/O errors are not proof of absence (only ENOENT is)', { skip: skipChmod }, async t => {
+  const { chmod } = await import('node:fs/promises');
+  const { hasContinuityBlocked } = await import('../dist/state.js');
+  const dir = await mkdtemp(path.join(tmpdir(), 'intercom-bridge-marker-'));
+  t.after(async () => { await chmod(dir, 0o700).catch(() => {}); await rm(dir, { recursive: true, force: true }); });
+  assert.equal(await hasContinuityBlocked(dir, 'w'), false, 'genuine ENOENT is absent');
+  await chmod(dir, 0o000);
+  await assert.rejects(hasContinuityBlocked(dir, 'w'), /EACCES/);
+});

@@ -61,16 +61,23 @@ export async function clearContinuityBlocked(dir: string, sessionId: string): Pr
   await unlink(continuityBlockedFile(dir, sessionId)).catch(() => {});
 }
 
+/** Only genuine ENOENT is absence; any other I/O error (EACCES, EIO, ...) propagates (fail closed). */
 export async function hasContinuityBlocked(dir: string, sessionId: string): Promise<boolean> {
   try { await access(continuityBlockedFile(dir, sessionId)); return true; }
-  catch { return false; }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw e;
+  }
 }
 
 /**
  * Exclusive ownership of a bridge session identity for this process.
  * Concurrent starts with the same session ID must not both succeed.
  */
-export async function acquireOwnership(dir: string, sessionId: string): Promise<() => Promise<void>> {
+/** Release ownership; with `retain`, the lock file is kept (reason written via the open handle) as a fence. */
+export type ReleaseOwnership = (retain?: string) => Promise<void>;
+
+export async function acquireOwnership(dir: string, sessionId: string): Promise<ReleaseOwnership> {
   await mkdir(dir, { recursive: true });
   const target = lockFile(dir, sessionId);
   let handle: FileHandle;
@@ -78,15 +85,25 @@ export async function acquireOwnership(dir: string, sessionId: string): Promise<
     handle = await open(target, 'wx');
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+      const held = await readFile(target, 'utf8').catch(() => '');
+      if (held.includes('continuity-blocked')) {
+        fail(`session ${sessionId}: continuity fence could not be published; lock retained to refuse fresh-chat continuation (restore a bound mapping and remove ${target}, or use a new identity)`);
+      }
       fail(`session ${sessionId} is already owned by another bridge process`);
     }
     throw e;
   }
   await handle.writeFile(`${process.pid}\n`, 'utf8');
   let released = false;
-  return async () => {
+  return async (retain?: string) => {
     if (released) return;
     released = true;
+    if (retain) {
+      // Writing through the already-open handle needs no new directory entry.
+      await handle.truncate(0).then(() => handle.write(`continuity-blocked ${retain}\n`, 0)).catch(() => {});
+      await handle.close().catch(() => {});
+      return;
+    }
     await handle.close().catch(() => {});
     await unlink(target).catch(() => {});
   };

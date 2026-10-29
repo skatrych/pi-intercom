@@ -8,7 +8,7 @@ import path from 'node:path';
 import { type Adapter } from './adapters.js';
 import { coordinatorOf, entryOf, fencedClose, projectDirectory, readBoard, type Agent } from './board.js';
 import { runTurn } from './runner.js';
-import { acquireOwnership, clearContinuityBlocked, hasContinuityBlocked, loadState, markContinuityBlocked, saveState, type BridgeState } from './state.js';
+import { acquireOwnership, clearContinuityBlocked, hasContinuityBlocked, loadState, markContinuityBlocked, saveState, type BridgeState, type ReleaseOwnership } from './state.js';
 import { clip, fail, fitEnvelope, listen, MESSAGE_LIMIT, send, SUMMARY_LIMIT, type Endpoint, type Envelope, type Kind, type ReportStatus } from './wire.js';
 
 export interface BridgeOptions {
@@ -49,11 +49,13 @@ export class Bridge {
   private pump: Promise<void> = Promise.resolve();
   private readonly abort = new AbortController();
   private closed = false;
-  private releaseOwnership?: () => Promise<void>;
+  private releaseOwnership?: ReleaseOwnership;
   /** CLI child that ignored SIGTERM past settleMs; blocks next turn and ownership release until exit. */
   private unresolvedChild?: Promise<void>;
   /** First CLI ID publication failed under this identity; fence fresh-chat until bind or new identity. */
   private continuityBlocked = false;
+  /** The durable continuity-blocked marker could not be written; close must not release ownership as if it had. */
+  private markerUnpublished = false;
   private readonly log: (line: string) => void;
 
   constructor(readonly options: BridgeOptions) {
@@ -195,7 +197,11 @@ export class Bridge {
       return;
     }
     // Same-process / durable fence after failed first-ID publication (B2).
-    if (this.continuityBlocked || (!this.state.cliSessionId && await hasContinuityBlocked(this.options.stateDir, this.sessionId))) {
+    const markerBlocked = !this.continuityBlocked && !this.state.cliSessionId &&
+      await hasContinuityBlocked(this.options.stateDir, this.sessionId).catch(e => {
+        this.log(`continuity-blocked marker unreadable; failing closed: ${String(e)}`); return true;
+      });
+    if (this.continuityBlocked || markerBlocked) {
       this.continuityBlocked = true;
       this.log('turn aborted before spawn: continuity bind previously failed; refusing fresh-chat continuation');
       await this.deliver(work, false, `${this.options.adapter.name} turn failed: continuity bind previously failed; refusing fresh-chat continuation under this identity`)
@@ -236,12 +242,15 @@ export class Bridge {
           await saveState(this.options.stateDir, next);
           this.state = next;
           this.continuityBlocked = false;
+          this.markerUnpublished = false;
           await clearContinuityBlocked(this.options.stateDir, this.sessionId);
         } catch (e) {
           // Fence this identity against silent fresh-chat continuation (in-process and across restart).
           this.continuityBlocked = true;
-          await markContinuityBlocked(this.options.stateDir, this.sessionId).catch(err =>
-            this.log(`continuity-blocked marker write failed: ${String(err)}`));
+          await markContinuityBlocked(this.options.stateDir, this.sessionId).catch(err => {
+            this.markerUnpublished = true;
+            this.log(`continuity-blocked marker write failed: ${String(err)}`);
+          });
           result = {
             ok: false, text: result.text, cliSessionId: result.cliSessionId,
             error: `failed to persist CLI conversation ID; refusing to establish restart continuity (${e instanceof Error ? e.message : String(e)})`,
@@ -314,7 +323,16 @@ export class Bridge {
     }
     if (dropped) this.log(`dropped ${dropped} queued instruction(s) on shutdown`);
     await this.endpoint?.close();
-    await this.releaseOwnership?.().catch(() => {});
+    // B2: if the durable marker never landed, retry once; if it still fails, keep the ownership lock
+    // as the fence instead of releasing it as though continuity protection had been published.
+    let retain: string | undefined;
+    if (this.markerUnpublished) {
+      await markContinuityBlocked(this.options.stateDir, this.sessionId).then(() => { this.markerUnpublished = false; }, e => {
+        retain = 'marker publish failed after first-ID bind failure';
+        this.log(`continuity-blocked marker still unpublishable; retaining ownership lock as fence: ${String(e)}`);
+      });
+    }
+    await this.releaseOwnership?.(retain).catch(() => {});
     this.releaseOwnership = undefined;
     this.log('bridge closed');
   }
