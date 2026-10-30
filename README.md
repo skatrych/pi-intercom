@@ -28,7 +28,7 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.8.0:** Config is restricted to the session working directory. No parent search or explicit-parent override; shared-config subfolder launches are refused.
 >
-> **Unreleased:** Orchestrator idle wake-ups replace worker-call-armed reminder timers: a reminder is sent once after one full idle interval of an authorized Orchestrator session, regardless of worker activity. `intercom_stop_reminders` now truthfully refuses to stop. See [Orchestrator idle wake-ups](#orchestrator-idle-wake-ups).
+> **0.10.0:** Orchestrator idle wake-ups replace worker-call-armed reminder timers: a reminder is sent once after one full idle interval of an authorized Orchestrator session, regardless of worker activity. `intercom_stop_reminders` now truthfully refuses to stop. See [Orchestrator idle wake-ups](#orchestrator-idle-wake-ups).
 >
 > **0.7.0:** Coordinator-local reminders follow worker calls, at a five-minute default that [you can configure](#reminder-interval). Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
 
@@ -114,7 +114,7 @@ Created/resumed workers receive `--intercom-root /absolute/board/root` explicitl
 
 Ordinary non-Orchestrator startup uses only that local config; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before reading any config: second/wrong/unsafe boards stop with the offending paths and the expected root named, and a child directory with no board is held rather than silently given a private board. At the projects home itself a missing config is a **zero-question first-board initialization**: the atomic no-replace writer creates the board and responsibility loads, with no command, claim, or confirmation. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators.
 
-**Coordinator authority is the board config entry (`sessionId` + `port`).** Every coordinator effect re-reads that exact pair, and every config writer re-proves it at locked admission and at each publication attempt, so a replaced coordinator cannot keep acting from a cached flag. There is no claim file, commit evidence, Git state, or authority epoch in the decision. All writers serialize on a permanent regular `.pi-intercom/config.lock` through the pinned `fs-native-extensions` provider: exclusive non-waiting kernel locks (Linux `F_OFD_SETLK`, macOS `flock`, Windows `LockFileEx`) that the kernel releases when the holder closes or dies, so a crashed holder needs no stale-lock cleanup. Contention and unsupported platforms refuse; nothing is stolen and there is no weaker fallback. A pre-0.9 lock **directory** is refused with offline-upgrade guidance and left untouched. Upgrade every process sharing a board before using it; older writers do not honor this lock.
+**Coordinator authority is the board config entry (`sessionId` + `port`).** Every coordinator effect re-reads that exact pair, and every config writer re-proves it at locked admission and at each publication attempt, so a replaced coordinator cannot keep acting from a cached flag. There is no claim file, commit evidence, Git state, or authority epoch in the decision. All writers serialize on a permanent regular `.pi-intercom/config.lock` through the pinned `fs-native-extensions` provider: exclusive non-waiting kernel locks (Linux `F_OFD_SETLK`, macOS `flock`, Windows `LockFileEx`) that the kernel releases when the holder closes or dies, so a crashed holder needs no stale-lock cleanup. Contention and unsupported platforms refuse; nothing is stolen and there is no weaker fallback. A legacy pre-0.10 **directory** lock (older fork releases, including 0.9.1, kept `.pi-intercom/config.lock` as a directory) is refused with offline-upgrade guidance and left untouched; it is never converted or removed at runtime. This native lock fences only writers that participate in it: an older binary keeps its own lock protocol and is **not** refused by the new gate, so a whole-board upgrade must stop every old process and upgrade them together before the first new writer starts on that board.
 
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
 
@@ -129,8 +129,10 @@ new coordinator on their next message—no worker restart or extension reload is
 installing this package alone does not add the command. Use a fresh Orchestrator session
 in a trusted project at the shared projects home, with an idle interactive Pi UI. Git state is
 irrelevant: a dirty, staged, conflicted, absent or failing Git has no influence, and a legacy
-`coordinator-claim.md` is ignored in every state (never read, rewritten, or deleted). Upgrade every
-process that writes board config to this version before taking over; older writers do not honor its lock.
+`coordinator-claim.md` is ignored in every state (never read, rewritten, or deleted). Stop every old
+board process first, then upgrade every process that writes board config to this version before
+taking over (an offline whole-board upgrade); older writers use their own lock protocol and are
+not fenced by this gate, so they must not run while a new coordinator works.
 
 After ending the old coordinator, enter these commands in the **new Pi session**:
 
@@ -448,7 +450,16 @@ The workflow validates on Windows and Linux, then publishes with provenance from
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
 
-### Unreleased Orchestrator idle wake-ups (Swactory #68 stage 3)
+### 0.10.0 Coordinator config-entry authority, native board lock
+
+- Coordinator authority is the board config entry: every coordinator effect re-reads the exact `sessionId` + `port` pair, and every config writer re-proves it at locked admission and at each publication attempt. All writers serialize on a permanent regular `.pi-intercom/config.lock` through the pinned `fs-native-extensions` provider: exclusive non-waiting kernel locks (Linux `F_OFD_SETLK`, macOS `flock`, Windows `LockFileEx`) that the kernel releases when the holder closes or dies, so a crashed holder needs no stale-lock cleanup. Contention and unsupported platforms refuse; nothing is stolen and there is no weaker fallback. Adoption no longer depends on Git, claim files or commit evidence; see `docs/adr/0025-git-independent-adoption.md`.
+- **Upgrade precondition (offline whole-board upgrade):** stop every old coordinator and worker process on the board, upgrade all of them (coordinator, workers, monitor) to this release, and only then start the first 0.10.0 writer on that board; reload coordinator/workers after the upgrade. The native lock fences only its participants: an older binary that never uses this protocol is **not** refused by the new gate, and a reviewer reproduced an old writer publishing board config while a 0.10.0 writer held the native lock. Stopping the old processes is therefore the requirement, not runtime-enforced protection.
+- A legacy pre-0.10 directory-form `.pi-intercom/config.lock` (older fork releases, including 0.9.1) is refused at the new gate with offline-upgrade guidance and left untouched; it is never converted or removed at runtime. Contention or a legacy lock directory needs human maintenance, never automatic removal or lock stealing.
+- Windows CI found post-merge fixture issues; the corrections keep shared fixture filesystem imports on `pathToFileURL` specifiers, add packed native-lock evidence, and align the lock documentation.
+- Release validation on this lease: `npm test` **445 pass / 0 fail / 0 skipped**, `npm run typecheck` PASS, and the isolated package gate (`npm run check:package` → packed-tarball monitor import check) PASS, node v24.21.0, Linux. The committed `dist/` output of a clean rebuild is byte-identical to the committed tree. Different environments and Node versions can report different aggregate counts; see the notes per feature below.
+- Version: package and lockfile move 0.9.1 → 0.10.0. Tag plan (ADR 0007): after independent review and human merge, an annotated `fork-v0.10.0` tag on origin would mark this tree; origin uses no bare `v*` tags and creates no collision with upstream's `v*` namespace. No npm publication and no installation are performed by this release PR.
+
+### 0.10.0 Orchestrator idle wake-ups (Swactory #68 stage 3)
 
 - Replaces the worker-call-armed periodic reminder scheduler with a **full idle observation** loop: a reminder is sent once after one full idle interval (`PI_INTERCOM_REMINDER_MINUTES`, unchanged contract) of an authorized Orchestrator session — no worker call is needed to start it, zero-worker startup arms fresh, and reminder-induced work resets the interval like any run.
 - Eligibility is conjunctive and re-proved at each admitted expiry: canonical Orchestrator launch, current board coordinator entry, loaded responsibility and open adoption/action readiness. Workers, plain coordinators, held/unresolved and replaced runtimes are excluded. Runtime/authority generations are guarded independently of activity-driven deadline revisions.
@@ -460,18 +471,28 @@ Published versions are immutable. For a new release, bump package and lockfile v
 - Windows validation disposition: shared fixture filesystem imports now use `pathToFileURL` specifiers. The native-dispatcher suite is on the normal CI test list with no platform skip, but local Linux success proves no Windows result. Inspect the exact-head individual Ubuntu/Windows jobs; no Windows acceptance or general platform repair is asserted here.
 - Local Linux validation: `npm test` **643 PASS / 0 FAIL / 0 SKIP**, typecheck PASS, isolated package gate **1 PASS / 0 FAIL / 0 SKIP**. The 14 additions since the prior 629-test head are two delayed diagnostic-transition regressions, the sensitive cancelled-tree regression and 11 native-dispatcher cases. Removing both tree handler calls, cancelling the admission-bound handle, or resetting the attempt warning on reopen makes the respective focused regression fail. Generated distribution is rebuilt; no installation or delivered cutover is implied.
 
-### Unreleased Optional reminder text file
+### 0.10.0 Optional reminder text file
 
 - New optional coordinator-process environment variable `PI_INTERCOM_REMINDER_FILE` selects the reminder text from one bounded UTF-8 file; see [Reminder text file](#reminder-text-file). Unset keeps the built-in text byte-for-byte with no file access. Invalid selections disable reminder delivery for that runtime with one fixed notice; they never fall back silently.
 - Generic loader and immutable per-runtime snapshot (`src/reminder-content.ts`), with the content source and SHA-256 passed to the delivery boundary. The delivered message shape is unchanged in this release. No scheduler, stop-tool, role-eligibility or ordinary-messaging behavior changed, and `PI_INTERCOM_REMINDER_MINUTES` is unchanged.
-- Version is not bumped and no release is published by this entry; it is an unreleased change set on `main`.
-- Local validation: 633 executed tests (579 before, plus 54 new in `tests/reminder-content.test.mjs`, `tests/reminder-content-runtime.test.mjs`, `tests/reminders.test.mjs` and `tests/extension.test.mjs`), typecheck, and the isolated package gate. Every executed test process scrubs inherited `PI_INTERCOM_REMINDER_FILE`, `PI_INTERCOM_REMINDER_MINUTES`, `PI_ROLE_DIR` and `PI_INTERCOM_WORKER_ROLE` (`tests/support/scrub-process-env.mjs`), so an operator's launch environment cannot change results.
+- Local validation (merged in PR #44): 633 executed tests (579 before, plus 54 new in `tests/reminder-content.test.mjs`, `tests/reminder-content-runtime.test.mjs`, `tests/reminders.test.mjs` and `tests/extension.test.mjs`), typecheck, and the isolated package gate. Every executed test process scrubs inherited `PI_INTERCOM_REMINDER_FILE`, `PI_INTERCOM_REMINDER_MINUTES`, `PI_ROLE_DIR` and `PI_INTERCOM_WORKER_ROLE` (`tests/support/scrub-process-env.mjs`), so an operator's launch environment cannot change results.
 
 ### Unreleased Configurable reminder interval
 
+- Bookkeeping note (added 2026-10-30): this feature is contained in the fork's own `fork-v0.8.0` tag, which is annotated "Release 0.8.0: coordinator adoption backend and configurable reminder interval"; its heading predates the rebase bookkeeping and has not been retitled in this release because the existing "0.8.0" section below documents the separately incorporated upstream root-isolation change set.
 - New coordinator-process environment variable `PI_INTERCOM_REMINDER_MINUTES` selects the reminder interval in whole minutes (trimmed ASCII digits, `1`-`35791`), read once per runtime start. Unset or unusable input keeps the existing five-minute default.
 - Reminder text and tool descriptions are interval-neutral instead of naming five minutes. All other scheduling, reset/rearm, authorization, busy-skip, and disposal semantics are unchanged, as is `intercom_stop_reminders` as the disable operation.
 - Local validation: 237 tests, typecheck and the isolated package gate on the approved base. See `tests/reminder-config.test.mjs` and `tests/reminders.test.mjs` for the parser, boundary, fake-clock delay, runtime-start snapshot, and default-path regressions.
+
+### 0.9.1 Descendant worker launches
+
+- Worker launches are admitted again at the board root or a descendant of it; the strict single root-isolation escape is retained.
+
+### 0.9.0 Native-selection adoption and advisory Windows CI
+
+- Adoption asks a single contextual yes/no through native selection controls; no typed wording.
+- The Windows Validate leg is advisory and cancel-free, with a Windows failure census.
+- Upstream `v0.8.0` root-isolation behavior was incorporated through the rebase.
 
 ### 0.8.0 Strict session-root isolation
 
