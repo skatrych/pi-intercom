@@ -19,8 +19,10 @@ function roleLauncher(env) {
 }
 /**
  * Ask the launcher if this role can start, then require the role's own pi-intercom copy at
- * `<printed role dir>/extensions/pi-intercom`. A role launch loads that copy and gets no `-e`,
- * so a role without one is refused instead of silently falling back to the coordinator's copy.
+ * `<printed role dir>/extensions/pi-intercom` with a loadable directory entry, `index.ts` or
+ * `index.js` (pi's directory-extension index rule; swactory's role-local copy ships `index.ts`).
+ * A role launch loads that copy and gets no `-e`, so a role without one is refused instead of
+ * silently falling back to the coordinator's copy. Existence only: no package validation.
  */
 async function preflightRole(exec, launcher, role) {
     let found = '';
@@ -40,9 +42,10 @@ async function preflightRole(exec, launcher, role) {
         fail(`role ${role} is not available from ${launcher} --print. No worker was launched. (${String(error)})`);
     }
     const copy = roleDir && path.posix.isAbsolute(roleDir) ? path.posix.join(roleDir, 'extensions', 'pi-intercom') : '';
-    const present = copy ? await stat(copy).then(s => s.isDirectory(), () => false) : false;
+    const isFile = (file) => stat(file).then(s => s.isFile(), () => false);
+    const present = copy ? await isFile(path.posix.join(copy, 'index.ts')) || await isFile(path.posix.join(copy, 'index.js')) : false;
     if (!present)
-        fail(`role ${role} has no pi-intercom copy at ${copy || `<${launcher} --print ${role}>/extensions/pi-intercom`}; role workers load their own copy and are not given -e. No worker was launched.`);
+        fail(`role ${role} has no loadable pi-intercom copy (index.ts or index.js) at ${copy || `<${launcher} --print ${role}>/extensions/pi-intercom`}; role workers load their own copy and are not given -e. No worker was launched.`);
 }
 /** Role-less invocation stays `exec pi`. A role wraps that same argument list with `pi-role` and does not set PI_CODING_AGENT_DIR. */
 function linuxPiInvocation(request, args, env) {
