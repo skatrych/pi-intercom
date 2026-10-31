@@ -183,7 +183,7 @@ Existing workers restore responsibility by session ID, bind their saved port or,
 
 ## Role-aware workers
 
-`role` is a logical Pi role name such as `developer`, `architect`, or `verifier`. Intercom persists that name with the worker and, on Linux, launches and resumes the worker through the existing `pi-role` executable. `pi-role` resolves `~/.pi/roles/<role>` (or `PI_ROLES_DIR`), loads the role overlay, and starts the normal `pi` binary. Intercom does not resolve role directories, inspect role contents, or set `PI_CODING_AGENT_DIR`.
+`role` is a logical Pi role name such as `developer`, `architect`, or `verifier`. Intercom persists that name with the worker and, on Linux, launches and resumes the worker through the existing `pi-role` executable. `pi-role` resolves `~/.pi/roles/<role>` (or `PI_ROLES_DIR`), loads the role overlay, and starts the normal `pi` binary. Intercom does not resolve role directories or set `PI_CODING_AGENT_DIR`; it only checks the directory `--print` reports for the role's own pi-intercom copy (see below).
 
 A Pi role is an overlay on the normal global Pi home (`~/.pi/agent`), which continues to own authentication, sessions, global settings, and model configuration. Omitting `role` keeps the existing Intercom launch exactly.
 
@@ -196,18 +196,18 @@ intercom_create_worker({
 
 `projectDirectory` stays the existing root-relative directory (`.` is the coordinator root). A role does not select a branch, worktree, or role directory.
 
-Before a pane is created, Intercom preflights the launcher in the coordinator process: `command -v <launcher>`, then `<launcher> --print <role>`. Both must succeed. `--print` is the launcher contract: exit 0 when that logical role can be started, and non-zero when it cannot (pi-role exits 1 when the role directory is absent). Intercom discards the printed path and does not resolve `~/.pi/roles`. A missing launcher or a failed `--print` refuses the launch; no worker pane is created for that failure. The worker pane still needs the same launcher on its own PATH. This check uses the coordinator's PATH.
+Before a pane is created, Intercom preflights the launcher in the coordinator process: `command -v <launcher>`, then `<launcher> --print <role>`. Both must succeed. `--print` is the launcher contract: exit 0 when that logical role can be started, and non-zero when it cannot (pi-role exits 1 when the role directory is absent). Intercom does not resolve `~/.pi/roles` itself; it uses the printed role directory only to require the role's own pi-intercom copy at `<role dir>/extensions/pi-intercom`. A role worker loads that copy, so Intercom does not pass `-e` for it (loading both would register the tools and `--intercom-root` twice and pi exits 1). A missing launcher, a failed `--print`, or a role without that copy refuses the launch; there is no `-e` fallback and no worker pane is created for that failure. The worker pane still needs the same launcher on its own PATH. This check uses the coordinator's PATH.
 
 That launch is structurally:
 
 ```text
-pi-role developer -e <intercom-extension>
+pi-role developer --intercom-root <board root>
 ```
 
 Resume uses the same wrapper. The saved Pi session id is the existing `--session` argument, not a second session store:
 
 ```text
-pi-role developer -e <intercom-extension> --session <existing-session>
+pi-role developer --intercom-root <board root> --session <existing-session>
 ```
 
 `pi-role` must be on `PATH` in the worker pane. `PI_INTERCOM_ROLE_LAUNCHER` can name a different executable; it must support the same `--print <role>` contract and is not a map of roles to directories. Intercom accepts the pi-role alphabet up to 64 characters and rejects the names `apply.sh` will not install: `credentials`, `auth.json`, `sessions`, `history`, and `cache`. A longer name that `pi-role` itself would accept is rejected here. An invalid name does not start a process.

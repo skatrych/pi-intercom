@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DEFAULT_ROLE_LAUNCHER, ROLE_LAUNCHER_ENV, WORKER_ROLE_ENV, fail, logicalRole } from './config.js';
 import type { LaunchRequest } from './runtime.js';
@@ -25,14 +26,22 @@ function roleLauncher(env: NodeJS.ProcessEnv): string {
   if (launcher !== launcher.trim() || /[\u0000-\u001f\u007f]/.test(launcher)) fail(`invalid ${ROLE_LAUNCHER_ENV}`);
   return launcher;
 }
-/** Ask the launcher if this role can start. The printed directory is ignored; Intercom does not resolve role paths. */
+/**
+ * Ask the launcher if this role can start, then require the role's own pi-intercom copy at
+ * `<printed role dir>/extensions/pi-intercom`. A role launch loads that copy and gets no `-e`,
+ * so a role without one is refused instead of silently falling back to the coordinator's copy.
+ */
 async function preflightRole(exec: Run, launcher: string, role: string): Promise<void> {
   let found = '';
   try { found = (await exec('sh', ['-c', 'command -v "$1"', 'pi-intercom-role', launcher])).trim(); }
   catch (error) { fail(`role launcher not found: ${launcher}. No worker was launched. (${String(error)})`); }
   if (!found) fail(`role launcher not found: ${launcher}. No worker was launched.`);
-  try { await exec(launcher, ['--print', role]); }
+  let roleDir = '';
+  try { roleDir = (await exec(launcher, ['--print', role])).trim(); }
   catch (error) { fail(`role ${role} is not available from ${launcher} --print. No worker was launched. (${String(error)})`); }
+  const copy = roleDir && path.posix.isAbsolute(roleDir) ? path.posix.join(roleDir, 'extensions', 'pi-intercom') : '';
+  const present = copy ? await stat(copy).then(s => s.isDirectory(), () => false) : false;
+  if (!present) fail(`role ${role} has no pi-intercom copy at ${copy || `<${launcher} --print ${role}>/extensions/pi-intercom`}; role workers load their own copy and are not given -e. No worker was launched.`);
 }
 /** Role-less invocation stays `exec pi`. A role wraps that same argument list with `pi-role` and does not set PI_CODING_AGENT_DIR. */
 function linuxPiInvocation(request: LaunchRequest, args: string[], env: NodeJS.ProcessEnv): string {
@@ -63,7 +72,8 @@ export function launchers(options: LauncherOptions) {
     if (platform === 'linux' && request.multiplexer === 'none') fail('Linux worker launching requires Herdr; none is Windows-only. No terminal fallback');
     if (request.sessionId && !await options.sessionExists(request.cwd, request.sessionId)) fail('saved Pi session not found in project directory; never-used sessions may not be persisted. Config unchanged; no replacement launched');
     // Explicit per-child CLI scope cannot widen cwd or leak from a parent shell environment.
-    const args = ['-e', options.extension, '--intercom-root', request.workspaceRoot, ...(request.sessionId ? ['--session', request.sessionId] : [])];
+    // A role worker loads its own pi-intercom copy (checked in preflightRole); adding -e would load it twice.
+    const args = [...(request.role ? [] : ['-e', options.extension]), '--intercom-root', request.workspaceRoot, ...(request.sessionId ? ['--session', request.sessionId] : [])];
     if (request.multiplexer === 'herdr') {
       if (env.HERDR_ENV !== '1' || !env.HERDR_WORKSPACE_ID) fail('Herdr launcher requires this Pi to run inside a Herdr-managed workspace; no fallback');
       if (request.role) await preflightRole(exec, roleLauncher(env), request.role);
