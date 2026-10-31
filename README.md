@@ -28,6 +28,8 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.8.0:** Config is restricted to the session working directory. No parent search or explicit-parent override; shared-config subfolder launches are refused.
 >
+> **0.10.1:** Role-launched workers no longer get `-e <orchestrator extension>`; they load their role's own pi-intercom copy, fixing the double-load exit with swactory's role-local install. See [Role-aware workers](#role-aware-workers).
+>
 > **0.10.0:** Orchestrator idle wake-ups replace worker-call-armed reminder timers: a reminder is sent once after one full idle interval of an authorized Orchestrator session, regardless of worker activity. `intercom_stop_reminders` now truthfully refuses to stop. See [Orchestrator idle wake-ups](#orchestrator-idle-wake-ups).
 >
 > **0.7.0:** Coordinator-local reminders follow worker calls, at a five-minute default that [you can configure](#reminder-interval). Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
@@ -449,6 +451,12 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### 0.10.1 Role worker launch without double-load
+
+- Role-launched workers (`intercom_create_worker` with `role`, and their resume) no longer receive `-e <orchestrator extension>`; they load their role's own role-local pi-intercom copy. Passing both loaded the extension twice since swactory's role-local install: conflicting `intercom_*` tool registrations plus an `--intercom-root` flag conflict made the worker exit 1 while the launch still reported submission, so the Orchestrator stalled silently (#53, fixed in #54).
+- Role launches now preflight that `<role dir>/extensions/pi-intercom/index.ts` or `index.js` exists (role dir as printed by `<launcher> --print <role>`) and fail closed with a clear error before any pane is created otherwise; there is no `-e` fallback. Role-less launches are unchanged and keep `-e`.
+- Version: package and lockfile move 0.10.0 → 0.10.1. Tag plan (ADR 0007): after human merge, an annotated `fork-v0.10.1` tag on origin marks the merge commit. No npm publication and no installation are performed by this release PR.
 
 ### 0.10.0 Coordinator config-entry authority, native board lock
 
