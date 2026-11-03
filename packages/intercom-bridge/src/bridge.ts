@@ -226,36 +226,38 @@ export class Bridge {
     const unresolved = result.unresolved;
     if (unresolved) this.unresolvedChild = unresolved;
 
-    // Continuity: bind on first success; refuse missing ID and ID drift (fail closed).
-    if (result.ok) {
-      if (!result.cliSessionId || !result.cliSessionId.trim()) {
-        result = { ok: false, text: result.text, error: 'CLI returned success without a conversation ID; refusing to report ready without continuity' };
-      } else if (this.state.cliSessionId && result.cliSessionId !== this.state.cliSessionId) {
+    // Continuity: bind a validated CLI conversation ID on first sight (success or failed process
+    // outcome). A nonzero exit that still emitted a session_id must not discard that native chat
+    // and silently start a fresh one under the same worker identity (N1). Keep the turn report
+    // blocked when result.ok is false; only refuse missing ID on an accepted success.
+    const seenId = result.cliSessionId?.trim() || undefined;
+    if (result.ok && !seenId) {
+      result = { ok: false, text: result.text, error: 'CLI returned success without a conversation ID; refusing to report ready without continuity' };
+    } else if (seenId && this.state.cliSessionId && seenId !== this.state.cliSessionId) {
+      result = {
+        ok: false, text: result.text, cliSessionId: this.state.cliSessionId,
+        error: `CLI conversation ID drifted (expected ${this.state.cliSessionId}, got ${seenId}); refusing silent remap`,
+      };
+    } else if (seenId && !this.state.cliSessionId) {
+      // Persistence must succeed before continuity is established; in-memory-only ID is not restart-safe.
+      try {
+        const next = { ...this.state, cliSessionId: seenId };
+        await saveState(this.options.stateDir, next);
+        this.state = next;
+        this.continuityBlocked = false;
+        this.markerUnpublished = false;
+        await clearContinuityBlocked(this.options.stateDir, this.sessionId);
+      } catch (e) {
+        // Fence this identity against silent fresh-chat continuation (in-process and across restart).
+        this.continuityBlocked = true;
+        await markContinuityBlocked(this.options.stateDir, this.sessionId).catch(err => {
+          this.markerUnpublished = true;
+          this.log(`continuity-blocked marker write failed: ${String(err)}`);
+        });
         result = {
-          ok: false, text: result.text, cliSessionId: this.state.cliSessionId,
-          error: `CLI conversation ID drifted (expected ${this.state.cliSessionId}, got ${result.cliSessionId}); refusing silent remap`,
+          ok: false, text: result.text, cliSessionId: seenId,
+          error: `failed to persist CLI conversation ID; refusing to establish restart continuity (${e instanceof Error ? e.message : String(e)})`,
         };
-      } else if (!this.state.cliSessionId) {
-        // Persistence must succeed before continuity is established; in-memory-only ID is not restart-safe.
-        try {
-          const next = { ...this.state, cliSessionId: result.cliSessionId };
-          await saveState(this.options.stateDir, next);
-          this.state = next;
-          this.continuityBlocked = false;
-          this.markerUnpublished = false;
-          await clearContinuityBlocked(this.options.stateDir, this.sessionId);
-        } catch (e) {
-          // Fence this identity against silent fresh-chat continuation (in-process and across restart).
-          this.continuityBlocked = true;
-          await markContinuityBlocked(this.options.stateDir, this.sessionId).catch(err => {
-            this.markerUnpublished = true;
-            this.log(`continuity-blocked marker write failed: ${String(err)}`);
-          });
-          result = {
-            ok: false, text: result.text, cliSessionId: result.cliSessionId,
-            error: `failed to persist CLI conversation ID; refusing to establish restart continuity (${e instanceof Error ? e.message : String(e)})`,
-          };
-        }
       }
     }
     if (result.ok) this.contextSentFor = this.responsibilityKey;

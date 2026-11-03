@@ -590,3 +590,42 @@ test('B2: marker I/O errors are not proof of absence (only ENOENT is)', { skip: 
   await chmod(dir, 0o000);
   await assert.rejects(hasContinuityBlocked(dir, 'w'), /EACCES/);
 });
+
+// --- Re-review REQUEST CHANGES regression (N1 first-turn failure continuity on a3d421c) ---
+
+test('N1: EXIT9 first turn keeps report blocked but binds ID; next turn and restart resume', { skip }, async t => {
+  const ctx = await board(t);
+  const sessionId = 'n1-exit9-worker';
+  const stateDir = path.join(ctx.root, 'state');
+  const b = ctx.bridge(cursor, { sessionId, stateDir });
+  await enlist(b, ctx, 'N1Exit9');
+
+  await ctx.coordinator.tool('send', { to: 'N1Exit9', message: 'EXIT9 first native chat' });
+  await until(() => ctx.wire.some(m => m.kind === 'report' && m.payload.status === 'blocked'
+    && String(m.payload.summary).includes('exited with code 9')), 'first blocked', 8000);
+  const bound = b.cliSessionId;
+  assert.ok(bound, 'failed first process outcome must still persist a validated conversation ID');
+  const saved = await loadState(stateDir, sessionId);
+  assert.equal(saved?.cliSessionId, bound);
+
+  // Same process: next instruction must --resume the bound ID (not silently create a fresh chat).
+  await ctx.coordinator.tool('send', { to: 'N1Exit9', message: 'second after EXIT9' });
+  await until(() => ctx.messages.find(m => m.includes('echo: second after EXIT9')), 'second ready', 8000);
+  const argv = await ctx.argv();
+  const second = argv.find(e => JSON.stringify(e.argv).includes('second after EXIT9'));
+  assert.ok(second, 'second turn must spawn CLI');
+  assert.deepEqual(second.argv.slice(second.argv.indexOf('--resume'), second.argv.indexOf('--resume') + 2), ['--resume', bound]);
+
+  // Clean close/restart: same identity resumes the same ID.
+  await b.close();
+  const again = ctx.bridge(cursor, { sessionId, stateDir });
+  await again.start();
+  assert.equal(again.cliSessionId, bound);
+  await ctx.coordinator.tool('configure_worker', { sessionId, port: again.port, projectDirectory: '.', name: 'N1Exit9', description: 'Run N1Exit9 turns.' });
+  await ctx.coordinator.tool('reload_worker', { to: 'N1Exit9' });
+  await ctx.coordinator.tool('send', { to: 'N1Exit9', message: 'after restart' });
+  await until(() => ctx.messages.find(m => m.includes('echo: after restart')), 'restart resume', 8000);
+  const after = (await ctx.argv()).find(e => JSON.stringify(e.argv).includes('after restart'));
+  assert.ok(after);
+  assert.deepEqual(after.argv.slice(after.argv.indexOf('--resume'), after.argv.indexOf('--resume') + 2), ['--resume', bound]);
+});
