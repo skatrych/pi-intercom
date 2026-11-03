@@ -1,178 +1,100 @@
-# Coordinator adoption
+# Coordinator adoption (ADR 0025)
 
-A board can outlive its coordinator session. `Intercom.adoptCoordinator` replaces that session's
-id and port in place, and the human starts it with `/intercom-adopt` from an Orchestrator Pi
-session. The role-local frontend discovers exactly one offer on `intercom:coordinator-adoption:v1`.
-This package registers no adoption tool, HTTP writer, CLI, or slash command. There is no manual
-claim or config editing, and no terminal fallback: the command is the only writer.
-
-The worker roster, pending close jobs, reports, logs, and session history stay. The next worker
-send reads the new pair from config. Adoption does not message workers, reload them, restart
-them, or clear reports.
+Status: implemented source behavior for fork 0.9.x; the command is offered only through the separately
+installed Orchestrator role integration. This reference supersedes the claim/Git evidence flow of
+ADR 0009/0012. [ADR 0025](../docs/adr/0025-git-independent-adoption.md) records the lasting decision.
 
 ## Availability and prerequisites
 
-`/intercom-adopt` comes from the separately installed Orchestrator role integration. Installing
-this package alone does not add the command.
+- A Pi process launched as the canonical **Orchestrator** role, in a trusted project under the shared
+  projects home, with an idle interactive UI.
+- `/intercom-adopt` comes from the installed role integration, not from this package alone.
+- Every process that writes this board's config must run a version with this lock. Mixed old/new
+  writers are not supported: older code looks for the obsolete lock **directory** and does not
+  serialize with the new guard.
+- No Git repository, clean tree, session file, claim file, or extra confirmation is required.
 
-Use a fresh, persisted Orchestrator session: interactive, trusted, and idle, with its working
-directory under the shared projects home (`PI_INTERCOM_PROJECTS_HOME`, default
-`~/workspaces/projects`). That home is a Git repository. For an adoption or a recovery, the index and
-worktree are clean, except one recognized recovery: active claim bytes that are an exact derivative of
-the committed prepared anchor. A *first declaration* is the one exception, and only for untracked
-content outside the protected board surface; see [Git state](#git-state). Upgrade every process that
-publishes board config before taking over. A down port does not prove the old session ended.
+## First board: no adoption at all
 
-## What you see
+A canonical Orchestrator startup at the projects home with no config creates the first board with an
+atomic no-replace write, then loads responsibility. There is no command, question, claim, or separate
+confirmation. A competing initializer never overwrites the winner; a loser reads that board and holds
+without authority. A child directory with no board is held and gets no private board. An empty
+`.pi-intercom` directory is an allowed absence. Existing malformed/unreadable config is an error and is
+never repaired or overwritten. A `/intercom-adopt` invocation that finds no config requests a restart:
+it never creates a board.
 
-Every decision is one question on a supported visible selection surface: two named choices, `No` and `Yes`, that
-you move between and activate. **No is offered first, so it is the preselected answer** — an Enter you
-press without reading declines. Escape (or Ctrl+C) dismisses, which declines the same way. Nothing is ever
-typed: there is no text field on the screen, and no answer you have to compose.
+## Existing board: one native confirmation
 
-The complete question is durable, paged text, painted as ordinary wrapped content above the
-choices — the projects home, this session id and port, the coordinator the backend selected and where that
-identity came from, any differing id in committed claim history, the transition id, the config hash, the
-close jobs and roster left untouched, and exactly what a yes writes. A question is never shortened to fit,
-and a directory name or identifier is never elided.
+`/intercom-adopt status` is read-only. `/intercom-adopt`:
 
-The native selector has no question paging; an oversized title's accessibility cannot be inferred from
-its renderer. The supported workaround uses Pi's public custom overlay with its native `SelectList`
-control, a bounded question viewport and pinned choices. **PgUp/PgDn** page through the full context;
-**Home/End** retrieve the first/last page. The range indicator shows where you are. No terminal scrollback
-is assumed. With default bindings, terminals smaller than 40 columns/12 rows fail closed as named `HOST`;
-enlarge and invoke again. See [Host rendering](#host-rendering) for real-host evidence and limitations.
+1. re-checks the launch role, interactive/trusted context, idle host, canonical projects-home/cwd/root,
+   board count, and this runtime's captured session id plus **actually bound** port;
+2. refuses configured session or port collisions, naming the conflicting entry, pair and board path;
+3. probes the configured old coordinator. A matching live endpoint refuses before any question;
+4. asks **exactly one** native No-first yes/no showing the board root, the old pair, this session's
+   pair, and that only those two parsed values change while every other parsed value is preserved;
+5. on yes, under the all-writer lock, re-reads the config, compares the exact preview bytes, identity,
+   board layout and collisions, re-probes the old endpoint, and publishes only if nothing drifted;
+6. atomically replaces the coordinator `sessionId` and `port`, then loads responsibility in place.
 
-A refusal always names the decision it is about, and an adoption refusal still reports all the identities:
-this session, the board entry, the committed record if any, and the selected target.
+Declining (No, Esc, dismissal) writes nothing and authorizes nothing; a fresh invocation is a new
+decision. No answer is typed, stored, renewed, or reused. An already-matching pair needs no question
+and no write: it is a load-only path. A registered worker session is never promoted, removed, or
+rebound.
 
-## What the command does
+## JSON handling
 
-1. Count `.pi-intercom` directories from the current directory up to the projects home, before
-   creating or discovering a board. A second, wrong, or unsafe board stops the command. A child
-   directory with no board does not create a private one. Creating the root board requires its
-   own confirmation.
-2. Read the new session id from Pi's persisted session list, and the port from this process's
-   ready health endpoint. A registered worker id, or a port already in use, stops the command.
-   A reachable old coordinator also stops it. An unreachable endpoint does not prove the old
-   process exited.
-3. Decide what is actually being authorized, from the board and the claim history the backend has
-   verified — never from a guess about which session you meant.
+The strict reader parses the complete JSON with `JSON.parse`, rejects duplicate keys at any depth
+(including escaped aliases) and values that cannot roundtrip (overflow, negative zero), and validates
+the whole object without stripping tolerated unknown fields. The writer validates, serializes, and
+re-reads the result, requiring deep equality with the intended object. Formatting may normalize;
+name, description, workers, jobs, closes, handoffs, array order and unknown parsed values survive.
+The raw preview bytes still bind the human answer: any intervening change, even formatting-only,
+invalidates it.
 
-   **A first declaration** is one yes/no decision. It applies only where there is no claim history at all:
-   either no board yet, or a board that already names this session. The question shows the projects home,
-   this session id, this port, and what confirming will write. The recorded authority evidence is then
-   generated by this implementation from your yes, and says so in the record itself: it names the board
-   root and this verified pair, and states that it is implementation-generated rather than a typed external
-   reference. No timestamp is claimed, because nothing ended. Declining writes nothing at all, including no
-   board.
+## Serialization and crash behavior
 
-   **An adoption of another coordinator** is also exactly one yes/no decision — the same single question
-   carries the attestation and the authorization, so there is no separate "continue?" step and nothing to
-   transcribe. Your yes does two things at once: it states that the named coordinator has ended, and it
-   authorizes that exact replacement and its two commits. The question prints the sentence your yes records
-   as the attestation, `I confirm coordinator <old-sessionId> ended`, verbatim, beside the warning that a
-   disconnected or unknown endpoint is not evidence of termination. That sentence is stored as written; it
-   is the stored form of what you confirmed, never a transcription of text you typed. The accompanying
-   authority record is generated by this implementation and names itself as such, binding both pairs, the
-   transition id and the config hash.
+Every config writer and initializer uses one crash-released native file lock on the permanent regular
+`.pi-intercom/config.lock` (pinned `fs-native-extensions@1.5.2`: Linux `F_OFD_SETLK`, macOS `flock`,
+Windows `LockFileEx`), plus the existing process queue and async-local nesting. The guard file is
+never unlinked, renamed or replaced, and its existence is not ownership. A crashed holder is released
+by the kernel; Windows cleanup may be delayed. Contention and unsupported bindings/filesystems refuse
+with no weaker fallback; there is no PID/age stealing and no compare-then-rename CAS. A legacy lock
+**directory** is refused with the exact path and offline whole-board upgrade guidance, left untouched.
 
-   Removing the typed fields did not relax anything else. You never name the target: the question states
-   which coordinator the backend selected and where that identity came from, separating the configured
-   board entry from any differing id in committed claim history. A reachable old coordinator is refused
-   before any question opens, and again under the lock. Collisions, claim history, path safety, config
-   validity, hashes, and the Git rules below are unchanged, and a yes on a preview that has since changed
-   is refused rather than reused.
-4. Under the shared config lock, commit a prepared claim, patch only the coordinator `sessionId`
-   and `port` tokens, commit the active claim, and load responsibility in this process.
+This is cooperating local-process serialization on supported local filesystems. It is not distributed
+fencing, hostile-same-user protection, recall of submitted OS work, or a new power-loss guarantee.
+Network/remote filesystems and unsupported prebuild/libc/ABI combinations are not claimed.
 
-Recovery asks one question too, and the two recovery branches are different questions. Renewing a
-committed *prepared-before* intent reuses that transition id and refreshes only the authority evidence and
-its timestamp. Finalizing a *prepared-after* transition authorizes the active-evidence commit and
-promotion only: no coordinator entry is replaced, no new attestation is generated, and the authority the
-prepared intent already records is preserved byte-for-byte.
+## Boot-only port recovery
 
-## Git state
+A configured coordinator whose saved port is unavailable binds an OS-selected fallback and, at startup
+only, publishes the **verified** bound port under the same lock before responsibility load, handoff
+recovery, observer maintenance, reminders, registration/config callbacks, tools, or sends. It refuses
+when this endpoint does not verify this native session, when the saved pair still answers, or when
+config/identity/root/lifecycle drift is observed after an await. A same-port startup performs no
+write. A command never repairs a same-id/different-port mismatch: restart on a non-conflicting port.
+Automatic recovery accepts the documented risk of an unreachable duplicate process using the same
+session id; it does not detect or solve duplicate launches.
 
-A first declaration writes and commits exactly one path, `coordinator-claim.md`, and refuses before
-writing if anything else is in the way: staged content, tracked modifications, an unresolved merge or
-rebase, or untracked content inside the protected board surface. Unrelated untracked content outside
-that surface — a backup directory, a scratch clone — does not stop a first declaration, and is still
-reported as what it is. The same content still blocks an ordinary adoption or a recovery: the
-relaxation belongs to the declaration, not to the repository.
+## Refusals and recovery
 
-Nothing is ever committed, cleaned, ignored, reset, or removed on your behalf, and no hook is bypassed.
-Blocked paths are named with their category kept accurate: staged index content, tracked worktree
-changes, and untracked content are three different facts, a path can be two of them at once, a rename
-names its source and its destination, and a path containing a newline is displayed escaped rather than
-split into filenames that do not exist.
-
-`/intercom-adopt status` is read-only. It says to proceed only when this process holds the
-matching active claim and has loaded responsibility.
-
-Evidence is re-proved, not remembered. Every live final-effect guard requires the newest reachable
-claim commit, the exact committed and worktree bytes, the current board pair, prepared-intent
-ancestry of that commit, and this process's own local promotion. Checking that no newer claim is
-malformed is not sufficient; a stale epoch, cached byte comparison, or presence check is never
-approval.
-
-## Recovery
-
-The claim commit and the config rename are not one atomic write. Run the same command again.
-It does not replay a notification that was blocked halfway through.
-
-| Evidence you find | What the same command does |
+| State | Outcome |
 |---|---|
-| Prepared claim, config still the old pair | Asks again, refreshes the prepared claim, then replaces the pair once. |
-| Prepared claim, config already the expected new pair | Finalizes the active claim. It does not swap the pair again. |
-| Active claim, responsibility not loaded | Loads responsibility. It writes neither config nor the claim. Status stays `PROMOTION_PENDING` until that load succeeds. |
-| Prepared claim from a different session | Stops with `RECOVERY_REQUIRED` and leaves the files for a person to route. There is no supersession command. |
-| Config lock left by a dead process | Stops with `LOCKED`. A person confirms the owner is gone before removing the lock. |
+| No/Esc/dismiss, unreadable capture, unavailable dialog | named refusal; nothing written; fresh invocation for a new decision |
+| Wrong role, non-TUI, untrusted, busy | named refusal before any question |
+| Second/wrong board, unsafe root/config path | named paths plus the expected root; only a human may remove a confirmed empty unintended stray |
+| Live old endpoint, session/port collision | refused before or inside the transaction; no rebinding |
+| Config changed after the preview | stale preview; no merge and no second question in the invocation |
+| Native contention / legacy lock directory / provider unavailable | distinct named refusals; retry later or perform the reviewed offline upgrade |
+| Publication succeeded, local load failed | *config replaced, local promotion pending*; matching retry loads only, zero questions/writes |
+| Publication/process interruption | config is old or new complete JSON; a later invocation reads the current board, never replays stored consent |
+| Replaced during a queued report/callback/reminder | later coordinator effects are refused; an already saved report stays saved and is reported as stored-but-not-notified |
 
-Recovery matches exact config bytes and the displayed config hash, not merely the old/new pair. A
-roster change that keeps the same pair is a new decision, and mixed, partial, foreign, semantic, or
-staged state stops without modification.
-
-Until the active claim is committed and responsibility is loaded, coordinator tools, incoming
-callbacks, report saves, and reminders stay closed; read-only health and adoption status stay
-served. Requests admitted while closed fail `ADOPTION_NOT_READY` as HTTP 400, before accepting,
-saving, or clearing a report, and before any registration, config, or lifecycle change. There is no
-`202` and no success for evidence that was not saved. A report saved before its notification was
-blocked stays on disk and is reported as stored but not notified; inspect the stored report before
-any resend. A lost response or timeout stays outcome-unknown: nothing is buffered, replayed, or
-retried automatically, and a closed-epoch reminder stops until ordinary orchestration arms it
-again.
-
-After adoption, the first separate coordinator action re-inspects the board, lease, and tracker
-state over the supported APIs, then reads stored evidence, leaves untouched jobs alone, and
-re-briefs assignments explicitly. A tool receipt or a worker's self-reported summary is not
-approval.
-
-## Serialization
-
-Every config publication takes the same path: Pi's per-file queue, then this process's per-file
-queue, then an exclusive `.pi-intercom/config.lock` directory. Adoption re-reads the raw config
-and the newest committed claim under that lock before it writes. Only the owner releases its
-lock. Nothing clears a lock by process age or pid. A crashed writer leaves the lock until a
-person establishes that the owner is dead.
-
-An ordinary update rechecks the current coordinator after it acquires the lock. A legacy board
-with no claim history can still be updated. The next update discovers a claim that appeared
-during that write. The store does not remember "this board was never adopted."
-
-## Limits
-
-- Arguments from the caller cannot confirm the change, name a session, or choose a port. The
-  backend reads those from the captured Pi context.
-- A malformed or deleted newer claim does not fall back to an older approval, even when the
-  worktree file looks like the previously approved bytes.
-- A missing claim file is not "never adopted" when committed history still shows a prepared or
-  active claim. Ordinary config writes stay closed.
-- There is no hook bypass, rollback, automatic retry, or second writer for the claim.
-- This is a cooperating local-filesystem contract. It is not a distributed lock, and it is not a
-  fence against legacy processes with their own writer or a malicious same-user process. An
-  installation reload is separate from adoption.
-- Agents do not install this, merge it, or run a live adoption.
+Legacy `coordinator-claim.md` is ignored in every state, including malformed, missing, symlinked or
+changed while a question is open. Do not delete it as part of adoption; a separately requested cleanup
+is optional. Do not edit board JSON to bypass a refusal.
 
 ## Proof
 
@@ -180,112 +102,11 @@ during that write. The store does not remember "this board was never adopted."
 env -u PI_ROLE_DIR -u PI_INTERCOM_WORKER_ROLE npm test
 npm run typecheck
 npm run check:package
-PI_ADOPTION_HOST_ROOT=<absolute Pi 1.2.0 package root> npm run test:adoption-host
-timeout 45s npm run test:adoption-dialog
-# Optional actual-host terminal smoke; pyte is an external test-only prerequisite:
-PI_ADOPTION_HOST_ROOT=<absolute Pi package root> \
-PI_ADOPTION_PYTE_PATH=<isolated pyte install directory> \
-timeout 115s node scripts/adoption-dialog-host-check.mjs --real
-node tests/fixtures/adoption-runner.mjs <case-name>
 ```
 
-`npm test` runs the adoption fixture table, the contract and bridge checks, and one regression
-for each distinct fence. A missing case fails. Fixtures use temporary Git boards and loopback
-listeners. The public-host check installs the packed extension's runtime dependencies with peers omitted, loads
-its source through public Pi 1.2.0 and typechecks public declarations. It does not start a runtime,
-model, worker, or live board. The separate opt-in dialog smoke starts an ephemeral interactive Pi
-with only synthetic selection code, as described below.
-
-### Host rendering
-
-The earlier candidate's native-selector measurements proved only returned render lines, not accessibility
-in the host. Its inferred scrollback claim is withdrawn. The supported workaround is a bounded overlay
-using public `ui.custom` and native `SelectList`, with explicit PgUp/PgDn and Home/End navigation.
-
-Recorded real-host smoke: source/build `416939f`, Pi `@earendil-works/pi-coding-agent@1.2.0` at
-`/home/agentdev/tools/npm/lib/node_modules/@earendil-works/pi-coding-agent`, Node v24.21.0, Linux.
-Terminal: actual Pi subprocess attached to a POSIX PTY, TERM=xterm-256color, rendered cells decoded by
-pyte 0.8.2 (wcwidth 0.9.2), in **both fullscreen and regular modes**. The seven domain-generated branch
-previews each default-declined; the real host loaded only a synthetic selection extension, not Intercom
-or an installed role. Temporary HOME/agent directory and scrubbed environment; no model or credentials.
-
-| Preview at 40x16 | Pages read through actual host | Result |
-|---|---:|---|
-| First board | 6 | exact complete context, default Enter No |
-| Existing-self declaration | 8 | exact complete context, default Enter No |
-| Adoption without claim | 11 | exact complete context, default Enter No |
-| Adoption with claim | 11 | exact complete context, default Enter No |
-| Prepared-before renewal | 14 | exact complete context, default Enter No |
-| Clean prepared-after finalization | 9 | exact complete context, default Enter No |
-| Exactly-derived active finalization | 9 | exact complete context, default Enter No |
-
-Additional synthetic long paths/full IDs/multiline effects: 40x16 (9 pages, No), 100x30 (2 pages,
-explicit down then Enter Yes), 60x18 (6 pages, Esc declines), 40x12 (17 pages, pasted navigation/Enter
-neither selects nor submits, then Esc declines). Both choices stayed visible; No was initially marked;
-navigation alone did not settle. Home retrieved the first page after paging to the end. Reconstructed
-question text matched exactly after whitespace normalization for wrapping. No text-entry control exists
-in the selected component. No board/claim was created; all disposable fixture files/host processes were
-removed. The affirmative synthetic answer authorized no action: the fixture never invoked adoption.
-
-`npm run test:adoption-dialog` separately verifies all seven preview bodies at actual 100x30/60x18/40x12
-bounded component viewports. Adapter tests cover resize, insufficient dimensions, split/malformed paste,
-nonstring captures and missing surfaces. Domain tests preserve prepared/derived evidence on HOST and
-CONFIRMATION failures as well as No/dismiss. The opt-in smoke requires Python with pyte; absence or a
-failed/timeout child is a nonzero failure, never a visual pass. Child execution and overall smoke have
-deadlines.
-
-Limitations: this is automated inspection of a real host's terminal output, not a human aesthetic
-approval or screenshot of Herdr/Windows/other emulators. Those combinations are unverified, not declared
-broken or universally supported. No live adoption, worker launch/termination, production board, installed
-role/auth/settings change or external consent channel was used. Independent review remains required.
-
-Repair validation: typecheck/build PASS; full normal suite 576/576 PASS (zero skips), including root
-isolation and admission epoch regressions; package gate PASS; public Pi 1.2.0 packed-host gate PASS;
-component diagnostic and both real-host terminal modes PASS. All commands used explicit outer deadlines;
-the dialog capture and PTY children have their own deadlines. One initial public-host run exposed that
-its extracted-package fixture had not installed declared dependencies; the fixture now installs them
-before loading, matching managed package behavior. Concurrent build checks briefly removed dist while a
-smoke started; final recorded smoke runs were serialized after the build and passed. Neither failure is
-counted as a successful host check.
-
-## Timing evidence stays in history
-
-The reduced D9 differential archive, its runner, and its npm script are not carried in this tree.
-This commit's parent removed them (`145c4c18d197a8494114c20b20a78dfa833fb358`); the last commit that
-still holds them, and the locator below, is `1835e793231a086022d5c96aa8c32af51da858ce`. No `src/` or
-`dist/` byte differs between that commit and this one. Recover with
-`git show 1835e793231a086022d5c96aa8c32af51da858ce:<path>`.
-
-- Measured source and dist commit for every figure: `7778d4f605855b06cea35a11deef789b073c11da`.
-  Baseline and original archives were fingerprinted at `e5b817a7b309dd28c2b56efc25506aa431fc0e68`
-  (54 committed dist files) and `f04c1f42bbc4359aa0ad7d2c39c60f9cd29cdb10` (57).
-- Method, environment, seeded order, quantile rule (`sorted[min(n-1, floor(n*q))]`), the reduced
-  5-process × 12-sample × 2-warmup matrix, the ablations, and each file's byte count and SHA-256 of
-  the committed gzip bytes: `git show 1835e793:references/coordinator-adoption.md`, sections
-  `Measured differential`, `Measured smaller alternatives`, `Focused sample, cold access, churn,
-  refusal, recovery, handoff`, and `Raw records and reproduction`. The reproduction command there
-  names the removed runner `tests/adoption-differential.mjs`; it is not restored in this tree.
-- The 15 gzip members live under `tests/fixtures/` at that commit, each named
-  `adoption-d9-<cell>.jsonl.gz`: `warm-2`, `warm-16`, `warm-64`, `cold-list`, `cold-status`,
-  `cold-worker-status-probe`, `cold-overlap`, `focused`, `churn`, `refusal-missing`,
-  `refusal-newer`, `recovery`, `handoff-counts`, `handoff-before`, `alternatives`.
-- Accepted cells, handler p50/p95 ms from the warm default-observer matrix (baseline p50 A/B, then
-  candidate p50, p95, A/A, paired delta, Git sync/async):
-
-  | Profile | Mode | Operation | baseline p50 | candidate p50 | p95 | A/A | delta | Git |
-  |---|---|---|---:|---:|---:|---:|---:|---|
-  | 2w/h0 | ordinary-nonrepo | status | 0.465 / 0.469 | 1.275 | 2.376 | 0.046 | 0.816 | 0/0 |
-  | 2w/h0 | ordinary-repo | status | 0.503 / 0.512 | 2.911 | 6.352 | 0.050 | 2.419 | 0/1 |
-  | 2w/h0 | adopted | list | 0.213 / 0.216 | 6.871 | 9.795 | 0.062 | 6.662 | 4/0 |
-  | 2w/h0 | adopted | report | 0.964 / 0.953 | 21.284 | 27.618 | 0.161 | 20.357 | 12/0 |
-  | 2w/h0 | adopted | status | 0.533 / 0.538 | 28.993 | 36.511 | 0.083 | 28.512 | 12/4 |
-  | 2w/h0 | adopted | overlap | 2.015 / 1.997 | 100.979 | 117.907 | 0.184 | 98.910 | 48/8 |
-  | 64w/h1024 | ordinary-repo | status | 0.742 / 0.755 | 21.045 | 24.576 | 0.100 | 20.133 | 0/1 |
-  | 64w/h1024 | adopted | list | 0.277 / 0.282 | 8.269 | 10.677 | 0.050 | 8.026 | 4/0 |
-  | 64w/h1024 | adopted | status | 0.778 / 0.759 | 34.604 | 42.706 | 0.107 | 33.653 | 12/4 |
-  | 64w/h1024 | adopted | overlap | 2.569 / 2.498 | 120.758 | 152.173 | 0.184 | 119.162 | 48/8 |
-
-  Each gap above is larger than its A/A band. Those figures are a measured record, not a waiver, a
-  zero-cost claim, or an irreducible floor. The acceptance decision for them is the PR #8 review
-  record (comment `6241350142`), external to this repository. Re-running or re-accepting these
-  numbers is not part of `npm test`, and these safety tests do not revalidate them.
+`npm test` includes the adoption fixture table (`node tests/fixtures/adoption-runner.mjs <case>`),
+the native-lock separate-process tests (contention, crash release, child non-inheritance, fail-closed
+provider/guard replacement), runtime first-board/boot-recovery tests, and the contract/UX/bridge
+regressions. Fixtures use disposable projects-home directories and loopback listeners; no Git
+repository, live board, installed role, model call or worker is involved. There is no package-level
+host smoke requirement for adoption.

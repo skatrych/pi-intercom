@@ -1,3 +1,5 @@
+> **Partly superseded by [ADR 0025](0025-git-independent-adoption.md):** the single native No-first question is retained, while declaration, typed-word removal bookkeeping, claim evidence, Git gates and second/finalize questions no longer exist. This file is retained as historical provenance.
+
 # Issue 9: Adoption UX implementation plan
 
 > **Partly superseded (2026-10-19, issue #12).** The typed authority record and typed exact-ended-wording

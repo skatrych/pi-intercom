@@ -18,7 +18,7 @@ async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-http-'));
   // Stop production upward discovery inside this fixture, never at a real ancestor project.
   // Coordinator startup replaces this test-only saved port with its actual bound endpoint.
-  await new ConfigStore(root).initialize('coordinator', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'coordinator', port: 12345 });
   const runtimes = [], extraEndpoints = [];
   t.after(async () => {
     for (const runtime of runtimes) await runtime.close();

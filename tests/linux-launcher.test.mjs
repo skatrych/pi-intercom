@@ -92,6 +92,10 @@ test('Linux role launch wraps Pi with a quoted pi-role and keeps normal argument
   const calls = [];
   let lookup;
   const role = 'dev.role-1';
+  // The role ships its own pi-intercom copy, so the launch must not add -e (#53: double load exits 1).
+  const roleDir = path.join(root, 'not-a-pi-home', role);
+  await mkdir(path.join(roleDir, 'extensions', 'pi-intercom'), { recursive: true });
+  await writeFile(path.join(roleDir, 'extensions', 'pi-intercom', 'index.ts'), 'export { default } from "./src/index.ts";\n');
   const sessionId = "session'$HOME;`echo bad`";
   const launcher = launchers({
     ...options,
@@ -100,7 +104,7 @@ test('Linux role launch wraps Pi with a quoted pi-role and keeps normal argument
     run: async (file, args) => {
       calls.push({ file, args });
       if (file === 'sh') return `${launcherPath}\n`;
-      if (args[0] === '--print') return `/tmp/not-a-pi-home/${role}\n`;
+      if (args[0] === '--print') return `${roleDir}\n`;
       return created;
     },
   });
@@ -113,7 +117,8 @@ test('Linux role launch wraps Pi with a quoted pi-role and keeps normal argument
   assert.match(command, /exec /);
   assert.doesNotMatch(command, /PI_CODING_AGENT_DIR|exec pi |not-a-pi-home/);
   const { stdout } = await promisify(execFile)('/bin/sh', ['-c', command], { env: { ...process.env, PATH: `${root}:${process.env.PATH}` } });
-  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, role, 'UNSET', role, '-e', options.extension, '--intercom-root', cwd, '--session', sessionId]);
+  assert.deepEqual(stdout.trimEnd().split('\n'), [cwd, role, 'UNSET', role, '--intercom-root', cwd, '--session', sessionId]);
+  assert.doesNotMatch(command, /'-e'/);
   await assert.rejects(access(path.join(cwd, 'pwned')), /ENOENT/);
 });
 
@@ -130,6 +135,34 @@ test('missing role or launcher fails preflight before a pane is created', async 
     if (file === 'sh') throw new Error('not found');
     assert.fail('no pane');
   } }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp', role: 'developer' }), /role launcher not found: pi-role/);
+});
+
+test('a role without its own pi-intercom copy is refused before any herdr call, with no -e fallback', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'intercom-linux-role-nocopy-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const withExtensions = path.join(root, 'with-extensions');
+  await mkdir(path.join(withExtensions, 'extensions', 'other'), { recursive: true });
+  await writeFile(path.join(root, 'file-not-dir'), '');
+  await mkdir(path.join(root, 'file-copy', 'extensions'), { recursive: true });
+  await writeFile(path.join(root, 'file-copy', 'extensions', 'pi-intercom'), '');
+  const emptyCopy = path.join(root, 'empty-copy');
+  await mkdir(path.join(emptyCopy, 'extensions', 'pi-intercom'), { recursive: true });
+  // Package files but no index.ts/index.js entry (and index.ts as a directory is not an entry).
+  const noEntry = path.join(root, 'no-entry');
+  await mkdir(path.join(noEntry, 'extensions', 'pi-intercom', 'src'), { recursive: true });
+  await mkdir(path.join(noEntry, 'extensions', 'pi-intercom', 'index.ts'));
+  await writeFile(path.join(noEntry, 'extensions', 'pi-intercom', 'src', 'index.ts'), '');
+  await writeFile(path.join(noEntry, 'extensions', 'pi-intercom', 'package.json'), '{}');
+  for (const printed of [path.join(root, 'missing'), withExtensions, path.join(root, 'file-copy'), emptyCopy, noEntry, '', 'relative/role']) {
+    const calls = [];
+    await assert.rejects(launchers({ ...options, run: async (file, args) => {
+      calls.push(file);
+      if (file === 'sh') return '/usr/bin/pi-role\n';
+      if (args[0] === '--print') return `${printed}\n`;
+      assert.fail('no herdr call');
+    } }).launch({ multiplexer: 'herdr', cwd: '/tmp', workspaceRoot: '/tmp', role: 'developer' }), /has no loadable pi-intercom copy.*No worker was launched/);
+    assert.deepEqual(calls, ['sh', 'pi-role']);
+  }
 });
 
 test('invalid role syntax and a control-character launcher never start a process', async () => {

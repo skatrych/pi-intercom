@@ -28,6 +28,10 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.8.0:** Config is restricted to the session working directory. No parent search or explicit-parent override; shared-config subfolder launches are refused.
 >
+> **0.10.1:** Role-launched workers no longer get `-e <orchestrator extension>`; they load their role's own pi-intercom copy, fixing the double-load exit with swactory's role-local install. See [Role-aware workers](#role-aware-workers).
+>
+> **0.10.0:** Orchestrator idle wake-ups replace worker-call-armed reminder timers: a reminder is sent once after one full idle interval of an authorized Orchestrator session, regardless of worker activity. `intercom_stop_reminders` now truthfully refuses to stop. See [Orchestrator idle wake-ups](#orchestrator-idle-wake-ups).
+>
 > **0.7.0:** Coordinator-local reminders follow worker calls, at a five-minute default that [you can configure](#reminder-interval). Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
 
 > **0.6.1:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
@@ -110,7 +114,9 @@ Created/resumed workers receive `--intercom-root /absolute/board/root` explicitl
 
 **Subfolder workspaces:** A worker in a subfolder of the board root reads that board's roster through the explicit root it was launched with; its own directory never needs a config. A saved `projectDirectory` is resumed as itself. A saved directory that has since become a link escaping the root stays refused. An independent session started in a subfolder without `--intercom-root` still uses only its own local config; ancestor files are left untouched.
 
-Ordinary non-Orchestrator startup uses only that local config; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before reading any config: second/wrong/unsafe boards stop, and no-board startup is held for a deliberate root bootstrap decision rather than silently creating a child board. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators. Coordinator actions and boot side effects are held until committed matching claim evidence and local responsibility are ready.
+Ordinary non-Orchestrator startup uses only that local config; with no config it creates a board in cwd. Coordinator session/tab names are preserved. Canonical **Orchestrator** launches instead count the cwd→projects-home ancestor board directories before reading any config: second/wrong/unsafe boards stop with the offending paths and the expected root named, and a child directory with no board is held rather than silently given a private board. At the projects home itself a missing config is a **zero-question first-board initialization**: the atomic no-replace writer creates the board and responsibility loads, with no command, claim, or confirmation. Invalid/unreadable config is never overwritten. Unknown session IDs are anonymous workers, never automatic replacement coordinators.
+
+**Coordinator authority is the board config entry (`sessionId` + `port`).** Every coordinator effect re-reads that exact pair, and every config writer re-proves it at locked admission and at each publication attempt, so a replaced coordinator cannot keep acting from a cached flag. There is no claim file, commit evidence, Git state, or authority epoch in the decision. All writers serialize on a permanent regular `.pi-intercom/config.lock` through the pinned `fs-native-extensions` provider: exclusive non-waiting kernel locks (Linux `F_OFD_SETLK`, macOS `flock`, Windows `LockFileEx`) that the kernel releases when the holder closes or dies, so a crashed holder needs no stale-lock cleanup. Contention and unsupported platforms refuse; nothing is stolen and there is no weaker fallback. A legacy pre-0.10 **directory** lock (older fork releases, including 0.9.1, kept `.pi-intercom/config.lock` as a directory) is refused with offline-upgrade guidance and left untouched; it is never converted or removed at runtime. This native lock fences only writers that participate in it: an older binary keeps its own lock protocol and is **not** refused by the new gate, so a whole-board upgrade must stop every old process and upgrade them together before the first new writer starts on that board.
 
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below. Role-aware launch is Linux-only; requesting a role on Windows fails before any process starts, and workers without a role keep the existing Windows launch.
 
@@ -122,10 +128,13 @@ new coordinator on their next message—no worker restart or extension reload is
 
 **Availability:** `/intercom-adopt` requires the separately installed
 [Orchestrator role integration](references/coordinator-adoption.md#availability-and-prerequisites);
-installing this package alone does not add the command. Use a fresh, persisted Orchestrator session
-in a trusted project under the shared projects home, with an idle interactive Pi UI. The projects
-home must be a Git repository with a clean index/worktree. Upgrade every process that writes board
-config to this version before taking over; older writers do not honor its lock.
+installing this package alone does not add the command. Use a fresh Orchestrator session
+in a trusted project at the shared projects home, with an idle interactive Pi UI. Git state is
+irrelevant: a dirty, staged, conflicted, absent or failing Git has no influence, and a legacy
+`coordinator-claim.md` is ignored in every state (never read, rewritten, or deleted). Stop every old
+board process first, then upgrade every process that writes board config to this version before
+taking over (an offline whole-board upgrade); older writers use their own lock protocol and are
+not fenced by this gate, so they must not run while a new coordinator works.
 
 After ending the old coordinator, enter these commands in the **new Pi session**:
 
@@ -134,26 +143,34 @@ After ending the old coordinator, enter these commands in the **new Pi session**
 /intercom-adopt
 ```
 
-Status shows the board and both identities without changing anything. The second command asks **one
-yes/no question per admissible human-touching invocation**, using native selection controls and a paged
-context viewport (PgUp/PgDn, Home/End), and shows the whole context in it:
-the board root, every identity pair with the port each came from, the transition id, the config hash,
-what the yes authorizes, and the sentence it will record as your attestation that the old session ended.
-Nothing is typed anywhere in the flow. No is preselected, so a reflexive Enter declines; Escape declines
-the same way. A first coordinator on a board with no claim history needs the same single yes/no; the
-authority evidence it records is generated by the implementation and says so. Success records the
-transition in `coordinator-claim.md` and makes this running session the coordinator, without sending
-workers any work. A registered worker cannot be promoted.
+Status shows the board, both identity pairs and whether local responsibility is loaded, without
+changing anything. The second command asks **exactly one native No-first yes/no** for replacing an
+existing board's coordinator, using native selection controls and a paged context viewport
+(PgUp/PgDn, Home/End). It shows the board root, the configured old pair, this session's actually bound
+port, that only the two coordinator values change while every other parsed value (name, description,
+workers, jobs, handoffs, array order, tolerated unknown fields) is preserved, and that a disconnected
+or unknown old endpoint is not proof of termination. Nothing is typed anywhere in the flow and no
+attestation wording is recorded. No is preselected, so a reflexive Enter declines; Escape dismisses the
+same way. Success atomically replaces only those two parsed values and loads responsibility in place,
+without sending workers any work, reloading them, or starting a model turn. A registered worker cannot
+be promoted, removed, or rebound. An already-matching pair loads only, with no question and no write.
 
-A reachable old coordinator always blocks adoption. An unreachable endpoint **does not prove the
-session ended**; the single question states that, and your yes records the attestation.
-Failed or timed-out requests can have an
-unknown outcome: inspect status before retrying. The same command can finalize an interrupted
-transition or retry loading responsibility, but cannot recover prepared evidence belonging to a
-different session; that case needs human escalation. Stale locks also need human maintenance, not
-automatic removal. Do not edit board JSON to bypass a stop.
+A reachable old coordinator always blocks adoption. The question authorizes the replacement only.
+A replaced coordinator cannot perform later coordinator effects because the exact pair is re-read at
+each boundary; an already-submitted network action cannot be recalled. Failed or timed-out requests can
+have an unknown outcome: inspect status before retrying. A successful replacement whose local load
+failed is reported as *config replaced, local promotion pending*; a matching invocation loads only.
+Contention or a legacy lock directory needs human maintenance, never automatic removal or lock stealing.
+Do not edit board JSON to bypass a stop.
 
-See [recovery and the other limits](references/coordinator-adoption.md#recovery).
+**Boot-only port recovery:** a configured coordinator whose saved port was taken binds an OS-selected
+fallback and, at startup only, publishes that verified bound port under the same lock before any other
+coordinator effect (handoff recovery, observer maintenance, reminders, registration, tools). It
+refuses when its own endpoint cannot be verified or when the saved pair still answers; disconnected or
+unknown is not termination evidence. A `/intercom-adopt` command never repairs a same-id/different-port
+mismatch: restart this session, or free the saved port and restart.
+
+See the [adoption reference](references/coordinator-adoption.md) for refusals, recovery and limits.
 
 ## Explicit workflow
 
@@ -168,7 +185,7 @@ Existing workers restore responsibility by session ID, bind their saved port or,
 
 ## Role-aware workers
 
-`role` is a logical Pi role name such as `developer`, `architect`, or `verifier`. Intercom persists that name with the worker and, on Linux, launches and resumes the worker through the existing `pi-role` executable. `pi-role` resolves `~/.pi/roles/<role>` (or `PI_ROLES_DIR`), loads the role overlay, and starts the normal `pi` binary. Intercom does not resolve role directories, inspect role contents, or set `PI_CODING_AGENT_DIR`.
+`role` is a logical Pi role name such as `developer`, `architect`, or `verifier`. Intercom persists that name with the worker and, on Linux, launches and resumes the worker through the existing `pi-role` executable. `pi-role` resolves `~/.pi/roles/<role>` (or `PI_ROLES_DIR`), loads the role overlay, and starts the normal `pi` binary. Intercom does not resolve role directories or set `PI_CODING_AGENT_DIR`; it only checks the directory `--print` reports for the role's own pi-intercom copy (see below).
 
 A Pi role is an overlay on the normal global Pi home (`~/.pi/agent`), which continues to own authentication, sessions, global settings, and model configuration. Omitting `role` keeps the existing Intercom launch exactly.
 
@@ -181,18 +198,18 @@ intercom_create_worker({
 
 `projectDirectory` stays the existing root-relative directory (`.` is the coordinator root). A role does not select a branch, worktree, or role directory.
 
-Before a pane is created, Intercom preflights the launcher in the coordinator process: `command -v <launcher>`, then `<launcher> --print <role>`. Both must succeed. `--print` is the launcher contract: exit 0 when that logical role can be started, and non-zero when it cannot (pi-role exits 1 when the role directory is absent). Intercom discards the printed path and does not resolve `~/.pi/roles`. A missing launcher or a failed `--print` refuses the launch; no worker pane is created for that failure. The worker pane still needs the same launcher on its own PATH. This check uses the coordinator's PATH.
+Before a pane is created, Intercom preflights the launcher in the coordinator process: `command -v <launcher>`, then `<launcher> --print <role>`. Both must succeed. `--print` is the launcher contract: exit 0 when that logical role can be started, and non-zero when it cannot (pi-role exits 1 when the role directory is absent). Intercom does not resolve `~/.pi/roles` itself; it uses the printed role directory only to require the role's own pi-intercom copy at `<role dir>/extensions/pi-intercom` with a loadable entry file, `index.ts` or `index.js` (pi's directory-extension rule; an existence check, not package validation). A role worker loads that copy, so Intercom does not pass `-e` for it (loading both would register the tools and `--intercom-root` twice and pi exits 1). A missing launcher, a failed `--print`, or a role without that copy refuses the launch; there is no `-e` fallback and no worker pane is created for that failure. The worker pane still needs the same launcher on its own PATH. This check uses the coordinator's PATH.
 
 That launch is structurally:
 
 ```text
-pi-role developer -e <intercom-extension>
+pi-role developer --intercom-root <board root>
 ```
 
 Resume uses the same wrapper. The saved Pi session id is the existing `--session` argument, not a second session store:
 
 ```text
-pi-role developer -e <intercom-extension> --session <existing-session>
+pi-role developer --intercom-root <board root> --session <existing-session>
 ```
 
 `pi-role` must be on `PATH` in the worker pane. `PI_INTERCOM_ROLE_LAUNCHER` can name a different executable; it must support the same `--print <role>` contract and is not a map of roles to directories. Intercom accepts the pi-role alphabet up to 64 characters and rejects the names `apply.sh` will not install: `credentials`, `auth.json`, `sessions`, `history`, and `cache`. A longer name that `pi-role` itself would accept is rejected here. An invalid name does not start a process.
@@ -220,7 +237,7 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_list` | None | Configured coordinator/workers; saved roster, never live health |
 | `intercom_worker_status` | `name?`, `offset?`, `limit?`, `probe?` | Configured sessions; local JSON by default, optional bounded endpoint checks for returned page |
 | `intercom_request_status` | `to` (worker name) | Coordinator; independent extension report |
-| `intercom_stop_reminders` | None | Coordinator; disable reminder timer until another qualifying worker call, without cancelling work |
+| `intercom_stop_reminders` | None | Coordinator; truthful non-stopping tool: returns `stopped:false`; the idle wake-up loop is never agent-paused |
 | `intercom_report_status` | None | Workers including anonymous; shared report function, never registration |
 | `intercom_report_work` | `status`, `summary?` | Configured, responsibility-loaded workers; save a public report and notify coordinator, never approve/complete work |
 | `intercom_stop_worker` | `to` | Unsupported graceful cancellation; no side effects |
@@ -234,18 +251,19 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 
 Anonymous `send`/`list` and all coordinator operations fail explicitly. Anonymous registration and status remain available. A dedicated repeat-registration operation and broader anonymous permissions remain **unresolved contract TODOs**, not silently added tools. If initial registration fails, the worker remains reachable and reports the error locally. Explicit user Pi `/reload` restarts this extension and repeats startup registration; status is not a substitute and there is no automatic retry.
 
-### Coordinator reminders (0.7.0)
+### Orchestrator idle wake-ups
 
-A coordinator-local timer wakes an idle agent to review delegated work. It is **not** an endpoint health ping, task assignment, worker retry, or crashed-process watchdog. It starts disarmed and does not change shared config or the wire protocol.
+One wake-up loop per authorized Orchestrator session sends a reminder **once after one full idle interval** of that session, so wake-ups no longer measure time since a worker-directed call and do not need workers to start. It is **not** an endpoint health ping, task assignment, worker retry, or crashed-process watchdog, and it grants no authority of its own. It does not change shared config or the wire protocol.
 
-- Valid coordinator calls to create, configure, resume, reload, request status from, message, or close a worker start/reset the timer **before the attempted operation**. A subsequent operation failure can still need follow-up, so it does not automatically cancel the timer.
-- At the configured interval (five minutes unless [`PI_INTERCOM_REMINDER_MINUTES`](#reminder-interval) says otherwise), recheck coordinator identity and whether Pi is idle. Busy ticks are skipped, not queued. Worker replies, incoming reports, list/JSON status reads (including probes), and worker-to-worker/coordinator messages do not reset it.
-- `intercom_stop_reminders({})` disables reminders until the next qualifying call. It does not cancel workers, close jobs or model work. There is no automatic reminder-count cutoff.
-- Timers are in memory only. Shutdown, Pi `/reload`, or session replacement disposes them; startup does not restore or replay them. Reset/stop invalidates stale callbacks and older in-flight calls cannot re-arm after a later stop.
-- Aborting the owning tool's Pi run also disarms its reminder generation when that AbortSignal is available. This is **not universal Escape/Stop detection**: the host may later be in a separate retry/compaction run whose abort does not reach the original signal. Use the explicit stop tool to disable reminders reliably.
-- Reminder delivery uses Pi's existing user-message path. Host input rejection remains possible (including the documented compaction gap); reminders are not immediately retried. The next normal tick is a new periodic check, not proof of prior delivery.
+- **Eligibility:** only a canonical Orchestrator launch (`<PI_ROLES_DIR or ~/.pi/roles>/orchestrator`) whose board entry is the current coordinator, with loaded responsibility and open adoption/action readiness, reaches the wake-up path. Worker sessions, plain (non-Orchestrator) coordinators, and held or resolved-away sessions get no reminders. A fresh eligible startup or authorization transition (for example adoption promotion) begins one interval immediately, without any worker call; a busy startup waits for observed idle first. Other Orchestrator-parity releases: non-Orchestrator coordinators lose the old reminder loop by design — the loop is idle-based, not worker-based.
+- **Full idle period:** every agent run — human, worker, custom or reminder-triggered — invalidates the next deadline, and only a settled run starts the next full interval. A run longer than X produces no queued and no immediate catch-up reminder. Preparation, tools, retries, continuations, recovery and compaction count as busy time, never as idle. A human message with no agent run does not reset the deadline.
+- **One sample per attempt:** at a due deadline the host idle state is sampled exactly once. Busy means skip: nothing is sent, nothing is queued, no backlog exists, and observation restarts a full interval later. After an idle sample the attempt is admitted, the eligibility proof runs, and host idle/activity/deadline are deliberately **not** rechecked — activity after the sample updates future scheduling but cannot cancel an admitted attempt. Idle suppression is therefore best effort: Pi may defer or steer the already-submitted message while an agent is processing. That race is accepted; the extension keeps no parallel catch-up queue and sends no second message for it.
+- **Bounded recurrence and fences:** one attempt slot exists. Delivery outcome is unknown by definition; an unconfirmed attempt is warned about **once** (one fixed notice) and then stays fenced until the wake-up's own message is correlated inside a settling agent run, or until an explicit operator restart. There is no blind retry, no transcript replay after restart or reload, and no accumulation of missed intervals. After correlated completion the next attempt is a full fresh interval later, even with zero workers and no worker call.
+- **Delivery:** the reminder is submitted through the supported `pi.sendMessage` custom-message API (`intercom-orchestrator-wakeup`, `display:true`, `triggerTurn:true`) with generic source/hash/attempt metadata. Ordinary Intercom messaging still uses the existing user-message path and is unchanged.
+- **Runtime changes:** timers are in memory only; shutdown, Pi `/reload` or session replacement disposes the loop and starts fresh on the next runtime with no restored deadline. Reload is therefore **not a receipt** that Pi's already-owned deferred (submitted) input was cancelled: an uncertain attempt stays fenced until it is correlated or an operator restarts explicitly. Authority loss (adoption/readiness/boundary changes) suspends the loop until authorization reopens with a fresh interval; a prepared run without any settle keeps its bounded uncertainty warning across the transition.
+- `intercom_stop_reminders` no longer stops anything. It returns `{stopped:false, reason:'idle_wakeups_are_automatic'}` truthfully, cancels no deadline and stores no disable bit — absence of workers or of actionable work cannot disable future reminders, and an agent cannot pause the loop. Only an operator restarting the Pi process or unloading Intercom changes the loop, and that also stops worker communication.
 
-By default the reminder contains only this fixed public text, never task payloads or private reasoning. An operator can instead select one plain-text file with [`PI_INTERCOM_REMINDER_FILE`](#reminder-text-file); the file's exact text then replaces this default:
+By default the reminder contains only this fixed public text, never task payloads or private reasoning. An operator can instead select one plain-text file with [`PI_INTERCOM_REMINDER_FILE`](#reminder-text-file); the file's exact text then replaces this default. (The default text is a transitional placeholder until a configured payload — such as the Swactory orchestrator reminder checklist — replaces it; its stop-tool sentence describes the superseded behavior.)
 
 > Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.
 >
@@ -271,9 +289,9 @@ $env:PI_INTERCOM_REMINDER_MINUTES = "2"; pi
 
 - Accepted value: ASCII decimal digits only, surrounding whitespace ignored, leading zeros allowed, numeric value `1` to `35791` inclusive. `35791` is `floor(2147483647 / 60000)`, the largest whole-minute delay inside Node's signed 32-bit timeout maximum, so a long interval fires at the requested time instead of overflowing to a near-immediate tick.
 - Anything else — unset, blank or whitespace-only, `0`, `-5`, `+2`, `2.5`, `2e3`, `0x10`, `2min`, `NaN`, `35792`, or a value beyond a safe integer — silently falls back to the **5 minute** default. There is no throw, clamp, or disable, and an unusable value cannot block extension startup, worker operations, or scheduling. The raw value is never echoed into a reminder, notification, or log.
-- `0` is **not** a disable switch. `intercom_stop_reminders({})` remains the way to disable reminders until the next qualifying worker call.
+- `0` is **not** a disable switch. Wake-ups are never agent-stoppable: `intercom_stop_reminders({})` truthfully returns `{stopped:false, reason:'idle_wakeups_are_automatic'}`.
 - Scope is the coordinator Pi process environment only. This option has **no `settings.json` support and no project/global precedence**: Pi 0.84.4 documents no extension-key settings API, so Intercom does not read Pi settings for it. Worker processes and shared workspace configuration are unaffected, and nothing watches or re-reads the value while a runtime runs.
-- Startup, Pi `/reload`, and session replacement each read it again for the new runtime; a `/reload` only re-reads the environment that process already has. A shell `export` executed as a child tool cannot change the already-running coordinator, so restart Pi with the new inherited environment to change an operator-provided interval. The new runtime still starts disarmed.
+- Startup, Pi `/reload`, and session replacement each read it again for the new runtime; a `/reload` only re-reads the environment that process already has. A shell `export` executed as a child tool cannot change the already-running coordinator, so restart Pi with the new inherited environment to change an operator-provided interval. An eligible new runtime arms one fresh interval on startup.
 
 #### Reminder text file
 
@@ -290,7 +308,7 @@ $env:PI_INTERCOM_REMINDER_FILE = "C:\absolute\path\reminder.txt"; pi
 - **Selector:** exactly one absolute path for the native platform. Spaces are literal. Nothing is trimmed, `~`/environment variables are not expanded, globs and URLs are not interpreted, and nothing is resolved from the working directory. Empty, relative, whitespace-padded, or NUL/CR/LF-containing values are invalid; an empty value is **invalid, not unset**. No settings key, command-line flag, ancestor lookup or board field competes with it.
 - **File:** a regular file, at most **16,384 bytes**, decoded as strict UTF-8. Symlinks at the selected path and non-regular files (directories, devices, FIFOs) are refused before any read. A file that grows, shrinks or is replaced during the read is refused.
 - **Text:** 1 to **4,000 Unicode code points** (not UTF-16 length) with at least one non-whitespace character. A byte-order mark, CR, NUL, other control characters except TAB and LF, and DEL are refused. Every accepted byte is preserved exactly: spaces, tabs, line breaks and the presence or absence of a final newline. Nothing is trimmed, normalised, truncated, interpolated or executed.
-- **Snapshot and restart:** the selector and file are read **once per coordinator runtime start**, before any reminder can be armed, and the resulting text is fixed for that runtime. Ticks, arming, tool calls and file edits never reread it, and no watcher exists. Editing the file takes effect at the next Pi `/reload` or session start. Changing the selector requires a new Pi process with the changed environment: a shell export inside a running session cannot affect the process. A runtime that is shut down or replaced while its load is in flight cannot arm reminders. Restart or reload never replays old reminders or expired deadlines.
+- **Snapshot and restart:** the selector and file are read **once per Orchestrator runtime start**, before any wake-up loop can exist, and the resulting text is fixed for that runtime. Intervals, attempts and tool calls never reread it, and no watcher exists. Editing the file takes effect at the next Pi `/reload` or session start. Changing the selector requires a new Pi process with the changed environment: a shell export inside a running session cannot affect the process. A runtime that is shut down or replaced while its load is in flight cannot arm a wake-up loop. Restart or reload never replays old reminders or expired deadlines, and an in-flight wake-up attempt is disposed with the old callbacks.
 - **Failure:** a selected value that is invalid, unreadable, oversize, or not acceptable text disables **reminder delivery only** for that runtime, and emits this single fixed notice: `Intercom reminder configuration invalid; reminders unavailable until corrected and runtime reloaded.` Intercom never silently falls back to the default text, reuses earlier text, retries on a timer, or passes an error to the model. Messaging, adoption, readiness and read-only status keep working. Correct the file or selector, then reload the coordinator or restart Pi.
 - **Privacy and trust:** the path, raw environment value, file contents, raw filesystem error and private reasoning are never logged or shown in the notice. The configured text is sent to the model as ordinary user input on each delivery, so it must contain no secrets. It is trusted local prompt input, not a sandbox: whoever can replace the selected file controls the text. Standalone `pi` users choose it directly; the selector grants no reminder, workflow or tool authority.
 
@@ -321,7 +339,7 @@ Legacy coordinator-only `dashboardPort` values are accepted for migration, but t
 
 Workers have `coordinator:false` and an existing project directory equal to root or below it. Writes canonicalize directories and check real paths (including symlink escapes). Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
 
-Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. All publications share Pi's file-mutation queue → process-local per-file queue → owner-token filesystem mutex; contention stops without stealing/replay. Updates recheck coordinator authority after lock acquisition, validate, fsync a temporary file and atomically rename. Adoption commits intent first and losslessly changes only the two coordinator identity value tokens; ordinary writes retain their normal serialization. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
+Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. All publications share Pi's file-mutation queue → process-local per-file queue → the permanent regular `.pi-intercom/config.lock` acquired through the exact-pinned native kernel lock; contention is a named refusal without stealing, wait or replay, and the kernel releases the lock when a holder closes or dies. Updates revalidate the exact coordinator pair at locked admission and before every rename, validate, fsync a temporary file and atomically publish a fully validated document. Adoption keeps the same lock and publishes one complete replacement: it re-reads the config under the lock, verifies the frozen preview bytes and collisions, and changes only the coordinator `sessionId` and `port` parsed values while every other parsed value must survive the re-read; there is no separate intent commit, evidence record or byte-patch step. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
 
 HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.1 also exposes side-effect-free `GET /intercom/health`, returning only protocol version and current session ID; it does not submit messages/model turns or write config. Envelope:
 
@@ -428,6 +446,8 @@ PI_INTERCOM_PI_ROOT='C:/path/to/pi-coding-agent' npm run test:host
 
 The extension source runs through Pi's TypeScript loader; `npm run build` generates `dist` for tests and the standalone terminal monitor. Build output is included in releases; the publish job builds it explicitly before publishing with scripts disabled. `npm run check:package` also installs the tarball in an isolated directory with peer installation disabled (matching Pi's managed npm installs), verifies the standalone monitor imports without host packages, and checks its non-TTY error path. This network-dependent regression runs on both CI platforms; it does not claim a live terminal/Herdr smoke test. Pi core/typebox are peer dependencies, not bundled; pinned development copies are included in the lockfile for reproducible CI without local junctions.
 
+`npm test` also executes `tests/wakeup-native-dispatcher.test.mjs` against the exact test-only alias `pi-wakeup-test-host` (Pi **1.4.0**). It uses that version's actual `AgentSession`, `ExtensionRunner`, `Agent`, in-memory session storage and custom-message dispatch, with fabricated resources/auth/UI and a scripted offline stream. This is separate from the existing **0.84.4** type/compatibility development dependency; it changes no production peer requirement or installed host. No host is installed by the fixture, no real provider/credentials or live board is used, and no global host path is required. These are version-specific dispatcher/lifecycle regressions, **not** a deployed-host attestation, actual model-compliance evidence, or the required real-host AC5 demonstration.
+
 ## Publishing
 
 [`.github/workflows/publish.yml`](https://github.com/comput-sh/pi-intercom/blob/main/.github/workflows/publish.yml) publishes through npm Trusted Publishing (GitHub OIDC), without an npm token secret. Configure the npm trusted publisher as owner `comput-sh`, repository `pi-intercom`, workflow `publish.yml`, with no environment.
@@ -436,18 +456,55 @@ The workflow validates on Windows and Linux, then publishes with provenance from
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
 
-### Unreleased Optional reminder text file
+### 0.10.1 Role worker launch without double-load
+
+- Role-launched workers (`intercom_create_worker` with `role`, and their resume) no longer receive `-e <orchestrator extension>`; they load their role's own role-local pi-intercom copy. Passing both loaded the extension twice since swactory's role-local install: conflicting `intercom_*` tool registrations plus an `--intercom-root` flag conflict made the worker exit 1 while the launch still reported submission, so the Orchestrator stalled silently (#53, fixed in #54).
+- Role launches now preflight that `<role dir>/extensions/pi-intercom/index.ts` or `index.js` exists (role dir as printed by `<launcher> --print <role>`) and fail closed with a clear error before any pane is created otherwise; there is no `-e` fallback. Role-less launches are unchanged and keep `-e`.
+- Version: package and lockfile move 0.10.0 → 0.10.1. Tag plan (ADR 0007): after human merge, an annotated `fork-v0.10.1` tag on origin marks the merge commit. No npm publication and no installation are performed by this release PR.
+
+### 0.10.0 Coordinator config-entry authority, native board lock
+
+- Coordinator authority is the board config entry: every coordinator effect re-reads the exact `sessionId` + `port` pair, and every config writer re-proves it at locked admission and at each publication attempt. All writers serialize on a permanent regular `.pi-intercom/config.lock` through the pinned `fs-native-extensions` provider: exclusive non-waiting kernel locks (Linux `F_OFD_SETLK`, macOS `flock`, Windows `LockFileEx`) that the kernel releases when the holder closes or dies, so a crashed holder needs no stale-lock cleanup. Contention and unsupported platforms refuse; nothing is stolen and there is no weaker fallback. Adoption no longer depends on Git, claim files or commit evidence; see `docs/adr/0025-git-independent-adoption.md`.
+- **Upgrade precondition (offline whole-board upgrade):** stop every old coordinator and worker process on the board, upgrade all of them (coordinator, workers, monitor) to this release, and only then start the first 0.10.0 writer on that board; reload coordinator/workers after the upgrade. The native lock fences only its participants: an older binary that never uses this protocol is **not** refused by the new gate, and a reviewer reproduced an old writer publishing board config while a 0.10.0 writer held the native lock. Stopping the old processes is therefore the requirement, not runtime-enforced protection.
+- A legacy pre-0.10 directory-form `.pi-intercom/config.lock` (older fork releases, including 0.9.1) is refused at the new gate with offline-upgrade guidance and left untouched; it is never converted or removed at runtime. Contention or a legacy lock directory needs human maintenance, never automatic removal or lock stealing.
+- Windows CI found post-merge fixture issues; the corrections keep shared fixture filesystem imports on `pathToFileURL` specifiers, add packed native-lock evidence, and align the lock documentation.
+- Release validation on this lease: `npm test` **445 pass / 0 fail / 0 skipped**, `npm run typecheck` PASS, and the isolated package gate (`npm run check:package` → packed-tarball monitor import check) PASS, node v24.21.0, Linux. The committed `dist/` output of a clean rebuild is byte-identical to the committed tree. Different environments and Node versions can report different aggregate counts; see the notes per feature below.
+- Version: package and lockfile move 0.9.1 → 0.10.0. Tag plan (ADR 0007): after independent review and human merge, an annotated `fork-v0.10.0` tag on origin would mark this tree; origin uses no bare `v*` tags and creates no collision with upstream's `v*` namespace. No npm publication and no installation are performed by this release PR.
+
+### 0.10.0 Orchestrator idle wake-ups (Swactory #68 stage 3)
+
+- Replaces the worker-call-armed periodic reminder scheduler with a **full idle observation** loop: a reminder is sent once after one full idle interval (`PI_INTERCOM_REMINDER_MINUTES`, unchanged contract) of an authorized Orchestrator session — no worker call is needed to start it, zero-worker startup arms fresh, and reminder-induced work resets the interval like any run.
+- Eligibility is conjunctive and re-proved at each admitted expiry: canonical Orchestrator launch, current board coordinator entry, loaded responsibility and open adoption/action readiness. Workers, plain coordinators, held/unresolved and replaced runtimes are excluded. Runtime/authority generations are guarded independently of activity-driven deadline revisions.
+- One idle sample per attempt; busy-at-sample sends nothing with no backlog; one outstanding attempt slot; bounded one-warning fence for unconfirmed attempts; correlated completion (the owned custom message plus its containing run's settlement) arms the next fresh interval. Accepted best-effort busy race: an attempt submitted after the idle sample may be deferred/steered by Pi into busy work; the extension does not recheck idle, replay, resend or queue.
+- Delivery moved from the ordinary steering path to a reminder-only `pi.sendMessage` custom message (`intercom-orchestrator-wakeup`, `display:true`, generic source/hash/attempt metadata, `triggerTurn:true`). Ordinary Intercom delivery is unchanged.
+- `intercom_stop_reminders` is now truthful and non-stopping (`stopped:false`, reason `idle_wakeups_are_automatic`); it can no longer cancel the loop and stores no disable bit. Operator docs explain full-idle semantics, one-sample race, fences, restart behavior and the loss of agent-side pausing.
+- Independent review corrections on the same lease: tree activity invalidates deadlines even if cancellation/failure produces no completion event; the sensitive regression waits for any real admission proof to drain before asserting non-delivery. Admission diagnostics retain their original one-additional-X bound through authority transitions, and submitted-attempt warnings retain their original submission-relative 30-second bound even after delayed/repeated reopening. Neither transition releases the fence, retries, creates a parallel read or adds a timer.
+- `tests/wakeup-extension.test.mjs` exercises the actual Intercom runtime/adapter with a mocked Pi API. The separate executed Pi 1.4.0 native-dispatcher suite covers actual idle custom start/model-input projection/recurrence, delayed unrelated notification dispatch followed by native deferral and busy steering, owned consumption/settlement correlation without another custom-start event, the accepted single-sample race, swallowed preparation failure without settlement, busy preparation, retry/error/abort/automatic-compaction paths, and native reload/shutdown/replacement guards. Scripted provider plumbing does not satisfy real-host AC5; that operator-controlled turn-start AND response gate remains **unproven**.
+- Windows validation disposition: shared fixture filesystem imports now use `pathToFileURL` specifiers. The native-dispatcher suite is on the normal CI test list with no platform skip, but local Linux success proves no Windows result. Inspect the exact-head individual Ubuntu/Windows jobs; no Windows acceptance or general platform repair is asserted here.
+- Local Linux validation: `npm test` **643 PASS / 0 FAIL / 0 SKIP**, typecheck PASS, isolated package gate **1 PASS / 0 FAIL / 0 SKIP**. The 14 additions since the prior 629-test head are two delayed diagnostic-transition regressions, the sensitive cancelled-tree regression and 11 native-dispatcher cases. Removing both tree handler calls, cancelling the admission-bound handle, or resetting the attempt warning on reopen makes the respective focused regression fail. Generated distribution is rebuilt; no installation or delivered cutover is implied.
+
+### 0.10.0 Optional reminder text file
 
 - New optional coordinator-process environment variable `PI_INTERCOM_REMINDER_FILE` selects the reminder text from one bounded UTF-8 file; see [Reminder text file](#reminder-text-file). Unset keeps the built-in text byte-for-byte with no file access. Invalid selections disable reminder delivery for that runtime with one fixed notice; they never fall back silently.
 - Generic loader and immutable per-runtime snapshot (`src/reminder-content.ts`), with the content source and SHA-256 passed to the delivery boundary. The delivered message shape is unchanged in this release. No scheduler, stop-tool, role-eligibility or ordinary-messaging behavior changed, and `PI_INTERCOM_REMINDER_MINUTES` is unchanged.
-- Version is not bumped and no release is published by this entry; it is an unreleased change set on `main`.
-- Local validation: 633 executed tests (579 before, plus 54 new in `tests/reminder-content.test.mjs`, `tests/reminder-content-runtime.test.mjs`, `tests/reminders.test.mjs` and `tests/extension.test.mjs`), typecheck, and the isolated package gate. Every executed test process scrubs inherited `PI_INTERCOM_REMINDER_FILE`, `PI_INTERCOM_REMINDER_MINUTES`, `PI_ROLE_DIR` and `PI_INTERCOM_WORKER_ROLE` (`tests/support/scrub-process-env.mjs`), so an operator's launch environment cannot change results.
+- Local validation (merged in PR #44): 633 executed tests (579 before, plus 54 new in `tests/reminder-content.test.mjs`, `tests/reminder-content-runtime.test.mjs`, `tests/reminders.test.mjs` and `tests/extension.test.mjs`), typecheck, and the isolated package gate. Every executed test process scrubs inherited `PI_INTERCOM_REMINDER_FILE`, `PI_INTERCOM_REMINDER_MINUTES`, `PI_ROLE_DIR` and `PI_INTERCOM_WORKER_ROLE` (`tests/support/scrub-process-env.mjs`), so an operator's launch environment cannot change results.
 
 ### Unreleased Configurable reminder interval
 
+- Bookkeeping note (added 2026-10-30): this feature is contained in the fork's own `fork-v0.8.0` tag, which is annotated "Release 0.8.0: coordinator adoption backend and configurable reminder interval"; its heading predates the rebase bookkeeping and has not been retitled in this release because the existing "0.8.0" section below documents the separately incorporated upstream root-isolation change set.
 - New coordinator-process environment variable `PI_INTERCOM_REMINDER_MINUTES` selects the reminder interval in whole minutes (trimmed ASCII digits, `1`-`35791`), read once per runtime start. Unset or unusable input keeps the existing five-minute default.
 - Reminder text and tool descriptions are interval-neutral instead of naming five minutes. All other scheduling, reset/rearm, authorization, busy-skip, and disposal semantics are unchanged, as is `intercom_stop_reminders` as the disable operation.
 - Local validation: 237 tests, typecheck and the isolated package gate on the approved base. See `tests/reminder-config.test.mjs` and `tests/reminders.test.mjs` for the parser, boundary, fake-clock delay, runtime-start snapshot, and default-path regressions.
+
+### 0.9.1 Descendant worker launches
+
+- Worker launches are admitted again at the board root or a descendant of it; the strict single root-isolation escape is retained.
+
+### 0.9.0 Native-selection adoption and advisory Windows CI
+
+- Adoption asks a single contextual yes/no through native selection controls; no typed wording.
+- The Windows Validate leg is advisory and cancel-free, with a Windows failure census.
+- Upstream `v0.8.0` root-isolation behavior was incorporated through the rebase.
 
 ### 0.8.0 Strict session-root isolation
 
@@ -548,7 +605,7 @@ Coverage includes bounded metadata logging, transport/runtime instrumentation, r
 
 A separate synthetic-browser smoke check verified desktop rendering, literal hostile labels, unknown/stale evidence, error filtering and expandable metadata. Browser native-click automation timed out; programmatic DOM clicks verified the interactions instead, so this is not a full keyboard/mouse accessibility or live Pi end-to-end test.
 
-Tests use temporary directories, local test-only HTTP servers, static session fixtures and mocked Pi hosts/launch executors. They never start agents, tabs, terminals, contact models, services or bridges, or access credentials.
+Tests use temporary directories, local test-only HTTP servers, static session fixtures and mocked Pi hosts/launch executors. The wake-up native-dispatcher fixture additionally runs an in-process Agent against a scripted offline stream. Tests never launch live Pi agents, tabs or terminals, contact real model providers/services/bridges, or access credentials.
 
 ### Observed live behavior
 

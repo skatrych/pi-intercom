@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
@@ -18,13 +18,17 @@ async function until(check) {
 }
 
 async function setup(t, extra = {}) {
-  const root = await mkdtemp(path.join(tmpdir(), 'intercom-roles-'));
-  await new ConfigStore(root).initialize('c', 12345);
+  // Role launch checks compare resolved paths this fixture hands to the runtime; mkdtemp can hold a
+  // Windows 8.3 alias, so the fixture state uses the canonical path like the production gates do.
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'intercom-roles-')));
+  await new ConfigStore(root).initialize({ sessionId: 'c', port: 12345 });
   let nextPort = 31000;
   const endpoints = new Map(), all = [], launches = [], events = [];
   const options = {
-    listen: async (_port, accept) => {
-      const port = nextPort++; endpoints.set(port, accept);
+    // The fake listener honors a preferred saved port exactly like transport.listen: a configured
+    // coordinator then starts on its own saved port and needs no boot recovery in these fixtures.
+    listen: async (preferred, accept) => {
+      const port = preferred ?? nextPort++; endpoints.set(port, accept);
       return { port, close: async () => { endpoints.delete(port); } };
     },
     send: async (port, message) => {

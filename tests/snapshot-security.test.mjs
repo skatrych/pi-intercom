@@ -11,7 +11,7 @@ import { readObservationSnapshot } from '../dist/snapshot.js';
 const SECRET = 'UNEXPECTED_SECRET_BODY_OR_CREDENTIAL';
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-snapshot-'));
-  const store = new ConfigStore(root); await store.initialize('coordinator', 32100);
+  const store = new ConfigStore(root); await store.initialize({ sessionId: 'coordinator', port: 32100 });
   t.after(() => rm(root, { recursive: true, force: true }));
   return { root, store };
 }
