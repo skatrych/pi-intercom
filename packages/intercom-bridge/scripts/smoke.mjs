@@ -13,7 +13,7 @@ const [name = 'cursor', bin] = process.argv.slice(2);
 const root = await mkdtemp(path.join(tmpdir(), 'bridge-smoke-'));
 const log = line => console.log(`[bridge] ${line}`);
 const messages = [];
-await new ConfigStore(root).initialize('smoke-coordinator', 12345);
+await new ConfigStore(root).initialize({ sessionId: 'smoke-coordinator', port: 12345 });
 const coordinator = new Intercom({ cwd: root, sessionId: () => 'smoke-coordinator', busy: () => false, deliver: t => { messages.push(t); console.log(`[coordinator inbox] ${t.split('\n').slice(0, 3).join(' | ')}`); },
   setName: async () => {}, notify: () => {}, abort: () => {}, shutdown: () => {} }, { launch: async () => ({ launched: true }) });
 await coordinator.start();

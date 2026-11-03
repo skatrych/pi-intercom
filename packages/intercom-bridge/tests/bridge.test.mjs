@@ -20,6 +20,7 @@ import { configFile } from '../dist/board.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FAKE = path.join(here, 'fixtures', 'fake-cli.mjs');
 const skip = process.platform === 'win32' ? 'fake CLI uses a POSIX shebang' : false;
+let nextBoardPort = 18000;
 
 async function until(check, what, ms = 8000) {
   const end = Date.now() + ms;
@@ -27,7 +28,7 @@ async function until(check, what, ms = 8000) {
 }
 async function board(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-bridge-'));
-  await new ConfigStore(root).initialize('coord', 12345);
+  await new ConfigStore(root).initialize({ sessionId: 'coord', port: ++nextBoardPort });
   const messages = [], all = [];
   const host = { cwd: root, sessionId: () => 'coord', busy: () => false, deliver: text => messages.push(text), setName: async () => {}, notify: () => {},
     abort: () => assert.fail('must not abort'), shutdown: () => assert.fail('must not shutdown') };
