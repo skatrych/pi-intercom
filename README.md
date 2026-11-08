@@ -435,6 +435,7 @@ Run these commands from a source checkout; tests and workflows are not shipped i
 npm ci
 npm run typecheck
 npm test
+npm audit --audit-level=low
 npm run check:package
 # Optional installed-host compatibility probe (confirms the known defect):
 PI_INTERCOM_PI_ROOT='C:/path/to/pi-coding-agent' npm run test:host
